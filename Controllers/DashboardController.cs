@@ -24,18 +24,40 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
     /// <summary>
     /// Real revenue/sales/inventory/peak-hour analytics computed from actual orders —
     /// replaces the Dashboard screen's previously-hardcoded ANALYTICS_DATA constant.
+    ///
+    /// Two ways to pick the period: pass <c>days</c> for a rolling window ending now
+    /// (the original behavior, still the default), or pass <c>from</c>/<c>to</c>
+    /// (yyyy-MM-dd) for an explicit calendar-day range — either one alone extends to
+    /// today/the other bound, both together is an arbitrary custom range. `from`/`to`
+    /// take priority over `days` when present.
     /// </summary>
     [HttpGet("analytics")]
-    public async Task<DashboardAnalyticsDto> Analytics([FromQuery] int days = 7)
+    public async Task<DashboardAnalyticsDto> Analytics([FromQuery] int days = 7, [FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null)
     {
-        if (days <= 0) days = 7;
         var now = DateTime.UtcNow;
-        var periodStart = now.AddDays(-days);
-        var previousPeriodStart = now.AddDays(-2 * days);
+
+        DateTime periodStart;
+        DateTime periodEndExclusive;
+        DateTime previousPeriodStart;
+
+        if (from is not null || to is not null)
+        {
+            periodStart = (from ?? to!.Value).ToDateTime(TimeOnly.MinValue);
+            periodEndExclusive = (to ?? from!.Value).ToDateTime(TimeOnly.MinValue).AddDays(1);
+            if (periodEndExclusive <= periodStart) periodEndExclusive = periodStart.AddDays(1);
+            previousPeriodStart = periodStart - (periodEndExclusive - periodStart);
+        }
+        else
+        {
+            if (days <= 0) days = 7;
+            periodStart = now.AddDays(-days);
+            periodEndExclusive = now;
+            previousPeriodStart = now.AddDays(-2 * days);
+        }
 
         var orders = await db.Orders
             .Include(o => o.Items)
-            .Where(o => o.CreatedAt >= previousPeriodStart)
+            .Where(o => o.CreatedAt >= previousPeriodStart && o.CreatedAt < periodEndExclusive)
             .ToListAsync();
 
         var currentPaid = orders.Where(o => o.Paid && o.CreatedAt >= periodStart).ToList();
@@ -48,21 +70,25 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
         var gstCollected = currentPaid.Sum(o => o.Tax);
         var refundsTotal = currentPaid.Where(o => o.Refunded).Sum(o => o.RefundedAmount ?? 0m);
 
-        // Calendar-day revenue (resets at midnight, not a rolling 24h window) —
-        // computed independently of the `days` window above so it's always
-        // "today" regardless of what range the caller asked for.
-        var todayPaid = orders.Where(o => o.Paid && o.CreatedAt.Date == now.Date).ToList();
-        var todayRevenue = todayPaid.Sum(o => o.Total);
-        var todaySalesCount = todayPaid.Count;
+        // Calendar-day revenue (resets at midnight, not a rolling 24h window) — its own
+        // query, deliberately independent of whatever period/range was requested above,
+        // so it's always "today" even when viewing a custom range that excludes today.
+        var todayPaidTotal = await db.Orders
+            .Where(o => o.Paid && o.CreatedAt >= now.Date && o.CreatedAt < now.Date.AddDays(1))
+            .Select(o => o.Total)
+            .ToListAsync();
+        var todayRevenue = todayPaidTotal.Sum();
+        var todaySalesCount = todayPaidTotal.Count;
 
         var inventoryItems = await db.InventoryItems.ToListAsync();
         var inventoryValue = inventoryItems.Sum(i => (decimal)i.Current * i.UnitCost);
 
-        var weekly = Enumerable.Range(0, 7).Select(offset =>
+        var daySpan = Math.Max(1, (int)Math.Ceiling((periodEndExclusive - periodStart).TotalDays));
+        var weekly = Enumerable.Range(0, daySpan).Select(offset =>
         {
-            var day = now.Date.AddDays(-6 + offset);
+            var day = periodStart.Date.AddDays(offset);
             var dayRevenue = currentPaid.Where(o => o.CreatedAt.Date == day).Sum(o => o.Total);
-            return new DailyRevenueDto(day.ToString("ddd").ToUpperInvariant(), dayRevenue);
+            return new DailyRevenueDto(daySpan <= 7 ? day.ToString("ddd").ToUpperInvariant() : day.ToString("d MMM"), dayRevenue);
         }).ToList();
 
         var hourCounts = HourBuckets
