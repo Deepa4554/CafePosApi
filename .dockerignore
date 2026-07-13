@@ -1,0 +1,7 @@
+bin/
+obj/
+keys/
+appsettings.Development.json
+appsettings.*.local.json
+*.http
+README.md

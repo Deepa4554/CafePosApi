@@ -1,0 +1,11 @@
+# .NET backend secrets — real DB connection strings / JWT secrets live here,
+# never commit them.
+appsettings.Development.json
+appsettings.*.local.json
+
+# Data Protection keys — decrypt QR tokens; never commit.
+keys/
+
+# Build output
+bin/
+obj/
