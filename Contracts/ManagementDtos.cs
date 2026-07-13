@@ -83,6 +83,14 @@ public record LeaveRequestDto(
 public record CreateLeaveRequest(int StaffId, DateOnly StartDate, DateOnly EndDate, LeaveType Type, string? Reason);
 public record ReviewLeaveRequest(string? Note);
 
+public record CafeExpenseDto(int Id, decimal Amount, string Category, string Purpose, string SpentBy, DateTime SpentAt, string RecordedByName, DateTime CreatedAt)
+{
+    public static CafeExpenseDto From(CafeExpense e) => new(e.Id, e.Amount, e.Category.ToString(), e.Purpose, e.SpentBy, e.SpentAt, e.RecordedByName, e.CreatedAt);
+}
+public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt);
+public record CategoryTotalDto(string Category, decimal Total);
+public record CafeExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth, List<CategoryTotalDto> ByCategoryThisMonth, List<CafeExpenseDto> Recent);
+
 public record PerformanceReviewDto(int Id, int StaffId, DateTime PeriodStart, DateTime PeriodEnd, int OrdersHandled, decimal RevenueGenerated, double AttendanceRatePct, double RatingOutOf5)
 {
     public static PerformanceReviewDto From(PerformanceReview p) => new(p.Id, p.StaffId, p.PeriodStart, p.PeriodEnd, p.OrdersHandled, p.RevenueGenerated, p.AttendanceRatePct, p.RatingOutOf5);

@@ -155,6 +155,27 @@ public class LeaveRequest : ITenantScoped
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+// ---------- Cafe operating expenses ----------
+
+public enum ExpenseCategory { Rent, Salaries, Utilities, Maintenance, Supplies, Marketing, Other }
+
+/// <summary>A cafe's own day-to-day running costs (rent, salaries, electricity, repairs,
+/// ...) — tenant-scoped, distinct from PlatformExpense which is CafePOS-the-startup's
+/// own books and has nothing to do with any cafe.</summary>
+public class CafeExpense : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public decimal Amount { get; set; }
+    public ExpenseCategory Category { get; set; }
+    public required string Purpose { get; set; }
+    public required string SpentBy { get; set; }
+    public DateTime SpentAt { get; set; } = DateTime.UtcNow;
+    public int RecordedByUserId { get; set; }
+    public string RecordedByName { get; set; } = "";
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public class PerformanceReview : ITenantScoped
 {
     public int Id { get; set; }
