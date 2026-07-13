@@ -19,7 +19,7 @@ public class OrdersController(
         [OrderStatus.New, OrderStatus.Preparing, OrderStatus.Ready, OrderStatus.Served];
 
     [HttpGet]
-    public async Task<PagedResult<OrderDto>> List([FromQuery] bool activeOnly = false, [FromQuery] int page = 1, [FromQuery] int pageSize = 20)
+    public async Task<PagedResult<OrderDto>> List([FromQuery] bool activeOnly = false, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] int? branchId = null)
     {
         var query = db.Orders.Include(o => o.Items).AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
@@ -27,6 +27,11 @@ public class OrdersController(
         // BOTH paid AND served. Paying early must not make it vanish from the
         // kitchen's ticket list while the food still hasn't gone out.
         if (activeOnly) query = query.Where(o => !o.Paid || o.Status != OrderStatus.Served);
+        // No branch selected -> see everything (single-location cafes, and cafes that
+        // haven't set up branches yet, are unaffected). A branch selected -> only that
+        // branch's orders; pre-branch-scoping orders (BranchId null) intentionally drop
+        // out of a branch-filtered view since they can't be attributed to one.
+        if (branchId is int bid) query = query.Where(o => o.BranchId == bid);
 
         var paged = await query.OrderByDescending(o => o.CreatedAt).ToPagedResultAsync(page, pageSize);
         return new PagedResult<OrderDto>(paged.Items.Select(OrderDto.From).ToList(), paged.Page, paged.PageSize, paged.TotalCount);
@@ -48,7 +53,7 @@ public class OrdersController(
     [HttpPost]
     public async Task<ActionResult<OrderDto>> Create(CreateOrderRequest req)
     {
-        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode);
+        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -90,7 +95,7 @@ public class OrdersController(
     /// </summary>
     private async Task<Order> BuildOrderAsync(
         string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
-        decimal discountPct, string? couponCode, int? explicitTenantId = null)
+        decimal discountPct, string? couponCode, int? explicitTenantId = null, int? branchId = null)
     {
         if (items.Count == 0)
             throw new ApiValidationException("Order must contain at least one item.");
@@ -188,6 +193,7 @@ public class OrdersController(
 
         var order = new Order
         {
+            BranchId = branchId,
             Title = title,
             OrderType = orderType,
             TableCode = orderType == "DINE_IN" ? tableCode : null,

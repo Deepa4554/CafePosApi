@@ -12,7 +12,8 @@ public record CreateOrderRequest(
     string? GuestName,
     List<CreateOrderItemDto> Items,
     decimal DiscountPct = 0,
-    string? CouponCode = null);
+    string? CouponCode = null,
+    int? BranchId = null);
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
 
@@ -42,7 +43,8 @@ public record OrderDto(
     bool Paid,
     bool Refunded,
     decimal? RefundedAmount,
-    DateTime CreatedAt)
+    DateTime CreatedAt,
+    int? BranchId)
 {
     public static OrderDto From(Order o) => new(
         o.Id,
@@ -62,7 +64,8 @@ public record OrderDto(
         o.Paid,
         o.Refunded,
         o.RefundedAmount,
-        o.CreatedAt);
+        o.CreatedAt,
+        o.BranchId);
 }
 
 public record SetStatusRequest(string Status);
@@ -93,17 +96,17 @@ public record CreateTableRequest(string Zone, int Seats);
 
 // ---------- Inventory ----------
 
-public record CreateInventoryItemRequest(string Name, string Category, double Max, string? Unit, decimal? UnitCost, double? MinStock = null, double? ReorderLevel = null);
+public record CreateInventoryItemRequest(string Name, string Category, double Max, string? Unit, decimal? UnitCost, double? MinStock = null, double? ReorderLevel = null, int? BranchId = null);
 
 /// <summary>InventoryItem plus a server-computed LowStock flag (Current &lt;= ReorderLevel)
 /// — replaces the frontend's old hardcoded current/max &lt;= 0.25 ratio guess.</summary>
 public record InventoryItemDto(
     int Id, string Name, string Category, string Icon, double Current, double Max, string Unit,
-    double DailyUsage, DateTime? LastRestockAt, decimal UnitCost, double MinStock, double ReorderLevel, bool LowStock)
+    double DailyUsage, DateTime? LastRestockAt, decimal UnitCost, double MinStock, double ReorderLevel, bool LowStock, int? BranchId)
 {
     public static InventoryItemDto From(InventoryItem i) => new(
         i.Id, i.Name, i.Category, i.Icon, i.Current, i.Max, i.Unit, i.DailyUsage, i.LastRestockAt,
-        i.UnitCost, i.MinStock, i.ReorderLevel, i.Current <= i.ReorderLevel);
+        i.UnitCost, i.MinStock, i.ReorderLevel, i.Current <= i.ReorderLevel, i.BranchId);
 }
 
 public record RestockRequest(double Quantity, decimal? UnitCost);

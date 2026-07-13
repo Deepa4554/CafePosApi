@@ -15,8 +15,15 @@ namespace CafePOS.Api.Controllers;
 public class InventoryController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]
-    public async Task<IEnumerable<InventoryItemDto>> List() =>
-        (await db.InventoryItems.OrderBy(i => i.Name).ToListAsync()).Select(InventoryItemDto.From);
+    public async Task<IEnumerable<InventoryItemDto>> List([FromQuery] int? branchId = null)
+    {
+        var query = db.InventoryItems.AsQueryable();
+        // Same convention as OrdersController.List: no branch selected shows
+        // everything, a branch selected shows only that branch's stock (items
+        // added before branch-scoping existed have BranchId null and drop out).
+        if (branchId is int bid) query = query.Where(i => i.BranchId == bid);
+        return (await query.OrderBy(i => i.Name).ToListAsync()).Select(InventoryItemDto.From);
+    }
 
     [HttpGet("low-stock")]
     public async Task<IEnumerable<InventoryItemDto>> LowStock() =>
@@ -34,6 +41,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
         var item = new InventoryItem
         {
+            BranchId = req.BranchId,
             Name = req.Name.Trim(),
             Category = string.IsNullOrWhiteSpace(req.Category) ? "General" : req.Category.Trim(),
             Current = req.Max,

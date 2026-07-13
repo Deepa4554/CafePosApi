@@ -58,6 +58,10 @@ public class Order : ITenantScoped
 {
     public int Id { get; set; }
     public int TenantId { get; set; }
+    /// <summary>Which branch this order was placed at — null for cafes that haven't
+    /// set up branches, or orders placed before branch-scoping existed. Filtered by
+    /// whichever branch is active in the POS/Orders UI (see BranchesController).</summary>
+    public int? BranchId { get; set; }
     /// <summary>e.g. "Table #T3 – Priya" / "Takeaway – Walk-in".</summary>
     public required string Title { get; set; }
     public required string OrderType { get; set; } // DINE_IN / TAKEAWAY / DELIVERY
@@ -104,6 +108,9 @@ public class InventoryItem : ITenantScoped
 {
     public int Id { get; set; }
     public int TenantId { get; set; }
+    /// <summary>Which branch stocks this ingredient — null for cafes without branches
+    /// set up, or single shared stock across all locations.</summary>
+    public int? BranchId { get; set; }
     public required string Name { get; set; }
     public required string Category { get; set; }
     public string Icon { get; set; } = "package-variant-closed";
