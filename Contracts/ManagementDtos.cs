@@ -72,6 +72,17 @@ public record ShiftWithStaffDto(int Id, int StaffId, string StaffName, string St
 /// top to bottom.</summary>
 public record StaffPerformanceSummaryDto(int StaffId, string StaffName, string StaffRole, int TotalOrders, decimal TotalRevenue, double AvgAttendancePct, double AvgRating);
 
+public record LeaveRequestDto(
+    int Id, int StaffId, string StaffName, DateOnly StartDate, DateOnly EndDate, string Type,
+    string? Reason, string Status, string? ReviewedByName, DateTime? ReviewedAt, DateTime CreatedAt)
+{
+    public static LeaveRequestDto From(LeaveRequest l) => new(
+        l.Id, l.StaffId, l.StaffName, l.StartDate, l.EndDate, l.Type.ToString(),
+        l.Reason, l.Status.ToString(), l.ReviewedByName, l.ReviewedAt, l.CreatedAt);
+}
+public record CreateLeaveRequest(int StaffId, DateOnly StartDate, DateOnly EndDate, LeaveType Type, string? Reason);
+public record ReviewLeaveRequest(string? Note);
+
 public record PerformanceReviewDto(int Id, int StaffId, DateTime PeriodStart, DateTime PeriodEnd, int OrdersHandled, decimal RevenueGenerated, double AttendanceRatePct, double RatingOutOf5)
 {
     public static PerformanceReviewDto From(PerformanceReview p) => new(p.Id, p.StaffId, p.PeriodStart, p.PeriodEnd, p.OrdersHandled, p.RevenueGenerated, p.AttendanceRatePct, p.RatingOutOf5);

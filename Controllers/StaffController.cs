@@ -327,4 +327,107 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             return new PayrollLineDto(s.Id, s.Name, s.HourlyRate!.Value, hours, (decimal)hours * s.HourlyRate.Value);
         });
     }
+
+    // ---------- Leave requests ----------
+
+    /// <summary>All leave requests, newest first — optionally filtered to one status
+    /// (Pending/Approved/Rejected) for the "tabs" the Leave screen shows.</summary>
+    [HttpGet("leave-requests")]
+    public async Task<IEnumerable<LeaveRequestDto>> ListLeaveRequests([FromQuery] LeaveRequestStatus? status)
+    {
+        var query = db.LeaveRequests.AsQueryable();
+        if (status is not null) query = query.Where(l => l.Status == status);
+        var requests = await query.OrderByDescending(l => l.CreatedAt).ToListAsync();
+        return requests.Select(LeaveRequestDto.From);
+    }
+
+    /// <summary>Any staff-portal user can request leave for themselves (or, if they're
+    /// an Owner/Manager, on behalf of someone else) — approval is the gated step, not
+    /// the request itself.</summary>
+    [HttpPost("leave-requests")]
+    public async Task<ActionResult<LeaveRequestDto>> CreateLeaveRequest(CreateLeaveRequest req)
+    {
+        var staff = await db.Staff.FindAsync(req.StaffId);
+        if (staff is null) throw new ApiValidationException("Staff member not found.");
+        if (req.EndDate < req.StartDate) throw new ApiValidationException("End date must be on or after the start date.");
+
+        var leave = new LeaveRequest
+        {
+            StaffId = staff.Id,
+            StaffName = staff.Name,
+            StartDate = req.StartDate,
+            EndDate = req.EndDate,
+            Type = req.Type,
+            Reason = req.Reason?.Trim(),
+        };
+        db.LeaveRequests.Add(leave);
+        await db.SaveChangesAsync();
+        return CreatedAtAction(nameof(ListLeaveRequests), LeaveRequestDto.From(leave));
+    }
+
+    /// <summary>Approving immediately puts the staff member on leave (see LeaveRequest's
+    /// doc comment for why this is manual rather than date-triggered).</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("leave-requests/{id:int}/approve")]
+    public async Task<ActionResult<LeaveRequestDto>> ApproveLeaveRequest(int id)
+    {
+        var leave = await db.LeaveRequests.FindAsync(id);
+        if (leave is null) return NotFound();
+        if (leave.Status != LeaveRequestStatus.Pending) throw new ApiConflictException("This request has already been reviewed.");
+
+        var reviewer = await CurrentUserAsync();
+        leave.Status = LeaveRequestStatus.Approved;
+        leave.ReviewedByUserId = reviewer.Id;
+        leave.ReviewedByName = reviewer.Name;
+        leave.ReviewedAt = DateTime.UtcNow;
+
+        var staff = await db.Staff.FindAsync(leave.StaffId);
+        if (staff is not null) staff.Status = StaffStatus.OnLeave;
+
+        await db.SaveChangesAsync();
+        return LeaveRequestDto.From(leave);
+    }
+
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("leave-requests/{id:int}/reject")]
+    public async Task<ActionResult<LeaveRequestDto>> RejectLeaveRequest(int id, ReviewLeaveRequest req)
+    {
+        var leave = await db.LeaveRequests.FindAsync(id);
+        if (leave is null) return NotFound();
+        if (leave.Status != LeaveRequestStatus.Pending) throw new ApiConflictException("This request has already been reviewed.");
+
+        var reviewer = await CurrentUserAsync();
+        leave.Status = LeaveRequestStatus.Rejected;
+        leave.ReviewedByUserId = reviewer.Id;
+        leave.ReviewedByName = reviewer.Name;
+        leave.ReviewedAt = DateTime.UtcNow;
+        if (!string.IsNullOrWhiteSpace(req.Note)) leave.Reason = $"{leave.Reason} (Rejected: {req.Note.Trim()})".Trim();
+
+        await db.SaveChangesAsync();
+        return LeaveRequestDto.From(leave);
+    }
+
+    /// <summary>Ends an approved leave early / marks the staff member back at work —
+    /// the counterpart to Approve's OnLeave flip.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("leave-requests/{id:int}/return-to-work")]
+    public async Task<ActionResult<LeaveRequestDto>> ReturnToWork(int id)
+    {
+        var leave = await db.LeaveRequests.FindAsync(id);
+        if (leave is null) return NotFound();
+
+        var staff = await db.Staff.FindAsync(leave.StaffId);
+        if (staff is not null && staff.Status == StaffStatus.OnLeave) staff.Status = StaffStatus.Active;
+
+        await db.SaveChangesAsync();
+        return LeaveRequestDto.From(leave);
+    }
+
+    private async Task<AppUser> CurrentUserAsync()
+    {
+        var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+            ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        var id = int.Parse(idClaim!);
+        return await db.Users.FindAsync(id) ?? throw new KeyNotFoundException("User not found.");
+    }
 }

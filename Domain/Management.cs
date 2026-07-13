@@ -131,6 +131,30 @@ public class Shift : ITenantScoped
     public string? Notes { get; set; }
 }
 
+public enum LeaveType { Sick, Casual, Paid, Unpaid }
+public enum LeaveRequestStatus { Pending, Approved, Rejected }
+
+/// <summary>A staff member's request for time off. Approving one immediately flips
+/// the linked StaffMember.Status to OnLeave (this app has no background job runner
+/// to auto-transition on the start date, so it's an explicit staff/manager action
+/// instead — "Return to Work" flips it back).</summary>
+public class LeaveRequest : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int StaffId { get; set; }
+    public required string StaffName { get; set; }
+    public DateOnly StartDate { get; set; }
+    public DateOnly EndDate { get; set; }
+    public LeaveType Type { get; set; }
+    public string? Reason { get; set; }
+    public LeaveRequestStatus Status { get; set; } = LeaveRequestStatus.Pending;
+    public int? ReviewedByUserId { get; set; }
+    public string? ReviewedByName { get; set; }
+    public DateTime? ReviewedAt { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public class PerformanceReview : ITenantScoped
 {
     public int Id { get; set; }
