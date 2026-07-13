@@ -48,6 +48,13 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
         var gstCollected = currentPaid.Sum(o => o.Tax);
         var refundsTotal = currentPaid.Where(o => o.Refunded).Sum(o => o.RefundedAmount ?? 0m);
 
+        // Calendar-day revenue (resets at midnight, not a rolling 24h window) —
+        // computed independently of the `days` window above so it's always
+        // "today" regardless of what range the caller asked for.
+        var todayPaid = orders.Where(o => o.Paid && o.CreatedAt.Date == now.Date).ToList();
+        var todayRevenue = todayPaid.Sum(o => o.Total);
+        var todaySalesCount = todayPaid.Count;
+
         var inventoryItems = await db.InventoryItems.ToListAsync();
         var inventoryValue = inventoryItems.Sum(i => (decimal)i.Current * i.UnitCost);
 
@@ -74,7 +81,7 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
             .Take(3)
             .ToList();
 
-        return new DashboardAnalyticsDto(revenue, previousRevenue, salesCount, avgOrderValue, inventoryValue, gstCollected, refundsTotal, weekly, peakHours, topItems);
+        return new DashboardAnalyticsDto(revenue, previousRevenue, salesCount, avgOrderValue, inventoryValue, gstCollected, refundsTotal, weekly, peakHours, topItems, todayRevenue, todaySalesCount);
     }
 
     /// <summary>

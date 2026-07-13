@@ -14,4 +14,6 @@ public record DashboardAnalyticsDto(
     decimal RefundsTotal,
     List<DailyRevenueDto> Weekly,
     List<HourlyLoadDto> PeakHours,
-    List<TopItemDto> TopItems);
+    List<TopItemDto> TopItems,
+    decimal TodayRevenue,
+    int TodaySalesCount);
