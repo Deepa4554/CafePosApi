@@ -23,7 +23,7 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens) : Co
         var tables = await db.Tables.OrderBy(t => t.Id).ToListAsync();
         var openOrders = await db.Orders
             .Where(o => (!o.Paid || o.Status != OrderStatus.Served) && o.TableCode != null)
-            .Select(o => new { o.Id, o.TableCode, o.Status, o.Total, o.GuestName })
+            .Select(o => new { o.Id, o.TableCode, o.Status, o.Total, o.GuestName, o.GuestPhone })
             .ToListAsync();
 
         return tables.Select(t =>
@@ -40,6 +40,7 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens) : Co
                 OrderStatus = order?.Status.ToString().ToUpperInvariant(),
                 Bill = order?.Total,
                 GuestName = order?.GuestName,
+                GuestPhone = order?.GuestPhone,
                 QrToken = qrTokens.Encode(t.TenantId, t.Code),
             };
         });

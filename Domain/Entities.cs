@@ -67,6 +67,9 @@ public class Order : ITenantScoped
     public required string OrderType { get; set; } // DINE_IN / TAKEAWAY / DELIVERY
     public string? TableCode { get; set; }
     public string? GuestName { get; set; }
+    /// <summary>10-digit mobile, captured so the bill can be sent (WhatsApp, SMS) after
+    /// the order is placed — e.g. when it's marked paid, not necessarily at creation.</summary>
+    public string? GuestPhone { get; set; }
     /// <summary>Linked once the guest name resolves to a CRM customer record.</summary>
     public int? CustomerId { get; set; }
     /// <summary>

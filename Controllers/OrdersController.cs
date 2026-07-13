@@ -53,7 +53,7 @@ public class OrdersController(
     [HttpPost]
     public async Task<ActionResult<OrderDto>> Create(CreateOrderRequest req)
     {
-        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId);
+        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: req.GuestPhone);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -95,7 +95,7 @@ public class OrdersController(
     /// </summary>
     private async Task<Order> BuildOrderAsync(
         string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
-        decimal discountPct, string? couponCode, int? explicitTenantId = null, int? branchId = null)
+        decimal discountPct, string? couponCode, int? explicitTenantId = null, int? branchId = null, string? guestPhone = null)
     {
         if (items.Count == 0)
             throw new ApiValidationException("Order must contain at least one item.");
@@ -198,6 +198,7 @@ public class OrdersController(
             OrderType = orderType,
             TableCode = orderType == "DINE_IN" ? tableCode : null,
             GuestName = guest,
+            GuestPhone = string.IsNullOrWhiteSpace(guestPhone) ? null : guestPhone.Trim(),
             Items = orderItems,
             Subtotal = subtotal,
             DiscountPct = clampedDiscountPct,

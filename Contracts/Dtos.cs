@@ -13,7 +13,8 @@ public record CreateOrderRequest(
     List<CreateOrderItemDto> Items,
     decimal DiscountPct = 0,
     string? CouponCode = null,
-    int? BranchId = null);
+    int? BranchId = null,
+    string? GuestPhone = null);
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
 
@@ -32,6 +33,7 @@ public record OrderDto(
     string OrderType,
     string? TableCode,
     string? GuestName,
+    string? GuestPhone,
     int? CustomerId,
     List<OrderItemDto> Items,
     decimal Subtotal,
@@ -53,6 +55,7 @@ public record OrderDto(
         o.OrderType,
         o.TableCode,
         o.GuestName,
+        o.GuestPhone,
         o.CustomerId,
         o.Items.Select(i => new OrderItemDto(i.Name, i.Qty, i.Price, i.Modifier)).ToList(),
         o.Subtotal,
