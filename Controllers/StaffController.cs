@@ -12,7 +12,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/staff")]
 [Authorize(Policy = Policies.RequirePlus)]
-public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher, IImageStorageService imageStorage) : ControllerBase
+public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher, IImageStorageService imageStorage, IAuditService audit) : ControllerBase
 {
     [HttpGet]
     public async Task<IEnumerable<StaffDto>> List([FromQuery] int? branchId)
@@ -120,6 +120,38 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
         await db.SaveChangesAsync();
         return StaffDto.From(staff);
+    }
+
+    /// <summary>
+    /// Lets an Owner/Manager set a staff member's app-login password directly, no email/OTP
+    /// involved — the self-service forgot-password flow needs a working outbound email
+    /// route, but a manager standing next to the person doesn't. Also revokes their refresh
+    /// token, matching AuthController.ResetPassword's "reset logs you out everywhere" rule.
+    /// </summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("{id:int}/reset-password")]
+    public async Task<IActionResult> ResetPassword(int id, ResetStaffPasswordRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.NewPassword) || req.NewPassword.Length < 6)
+            throw new ApiValidationException("New password must be at least 6 characters.");
+
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access.");
+
+        var user = await db.Users.FindAsync(staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access.");
+
+        user.PasswordHash = hasher.HashPassword(user, req.NewPassword);
+        user.RefreshToken = null;
+        user.RefreshTokenExpiresAt = null;
+        await db.SaveChangesAsync();
+
+        var actor = await CurrentUserAsync();
+        await audit.LogAsync(AuditAction.PasswordChange, AuditResource.Staff, staff.Id.ToString(),
+            $"{actor.Name} reset the login password for {staff.Name}.", AuditSeverity.High, actor.Id, actor.Name);
+
+        return NoContent();
     }
 
     [Authorize(Policy = Policies.OwnerOrManager)]

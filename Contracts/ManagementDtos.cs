@@ -55,6 +55,7 @@ public record UpdateStaffStatusRequest(StaffStatus Status);
 /// <summary>Partial update for the Staff Profile edit flow — only non-null fields are
 /// applied, matching MenuController.Update's pattern.</summary>
 public record UpdateStaffRequest(string? Name, string? Role, string? Email, string? Phone, decimal? HourlyRate, int? BranchId, string? PhotoUrl);
+public record ResetStaffPasswordRequest(string NewPassword);
 
 public record ShiftDto(int Id, int StaffId, DateTime StartsAt, DateTime EndsAt, string? Notes)
 {
