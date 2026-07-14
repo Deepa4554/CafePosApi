@@ -101,6 +101,10 @@ builder.Services.AddSingleton<IEmailService, SmtpEmailService>();
 builder.Services.Configure<GeminiOptions>(builder.Configuration.GetSection("Gemini"));
 builder.Services.AddHttpClient<IGeminiService, GeminiService>();
 
+// ---------- Image storage (Supabase Storage) ----------
+builder.Services.Configure<SupabaseStorageOptions>(builder.Configuration.GetSection("Supabase"));
+builder.Services.AddHttpClient<IImageStorageService, SupabaseImageStorageService>();
+
 builder.Services
     .AddAuthentication(options =>
     {

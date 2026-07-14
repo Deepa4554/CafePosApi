@@ -12,7 +12,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/staff")]
 [Authorize(Policy = Policies.RequirePlus)]
-public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher) : ControllerBase
+public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher, IImageStorageService imageStorage) : ControllerBase
 {
     [HttpGet]
     public async Task<IEnumerable<StaffDto>> List([FromQuery] int? branchId)
@@ -116,7 +116,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             if (!await db.Branches.AnyAsync(b => b.Id == req.BranchId)) throw new ApiValidationException("Branch not found.");
             staff.BranchId = req.BranchId;
         }
-        if (req.PhotoUrl is not null) staff.PhotoUrl = req.PhotoUrl;
+        if (req.PhotoUrl is not null) staff.PhotoUrl = await imageStorage.ResolveAsync("staff", req.PhotoUrl);
 
         await db.SaveChangesAsync();
         return StaffDto.From(staff);

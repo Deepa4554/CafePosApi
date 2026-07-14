@@ -10,7 +10,7 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/settings")]
-public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache) : ControllerBase
+public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage) : ControllerBase
 {
     /// <summary>
     /// Public — the app's theme/branding must render before login (splash,
@@ -43,7 +43,7 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.BusinessName is not null) settings.BusinessName = req.BusinessName.Trim();
         if (req.ReceiptHeader is not null) settings.ReceiptHeader = req.ReceiptHeader;
         if (req.ReceiptFooter is not null) settings.ReceiptFooter = req.ReceiptFooter;
-        if (req.LogoUrl is not null) settings.LogoUrl = req.LogoUrl;
+        if (req.LogoUrl is not null) settings.LogoUrl = await imageStorage.ResolveAsync("cafe-logo", req.LogoUrl);
         if (req.PrimaryColor is not null) settings.PrimaryColor = req.PrimaryColor;
         if (req.QrStyle is not null) settings.QrStyle = req.QrStyle;
         if (req.ThemeMode is not null) settings.ThemeMode = req.ThemeMode;

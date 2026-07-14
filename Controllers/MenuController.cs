@@ -10,7 +10,7 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/menu-items")]
-public class MenuController(CafePosDbContext db) : ControllerBase
+public class MenuController(CafePosDbContext db, IImageStorageService imageStorage) : ControllerBase
 {
     /// <summary>Public — powers the customer-facing QR Menu as well as the internal POS grid.</summary>
     [AllowAnonymous]
@@ -81,6 +81,7 @@ public class MenuController(CafePosDbContext db) : ControllerBase
         if (req.Price < 0)
             throw new ApiValidationException("Price cannot be negative.");
 
+        var imageUrl = await imageStorage.ResolveAsync("menu-items", req.Image);
         var item = new MenuItem
         {
             Name = req.Name.Trim(),
@@ -88,7 +89,7 @@ public class MenuController(CafePosDbContext db) : ControllerBase
             Price = req.Price,
             Icon = req.Icon ?? "silverware-fork-knife",
             Subtitle = req.Subtitle ?? "",
-            Image = req.Image ?? "",
+            Image = imageUrl ?? "",
             Description = req.Description,
             ProductType = req.ProductType ?? ProductType.Prepared,
             LinkedInventoryItemId = req.ProductType == ProductType.Independent ? req.LinkedInventoryItemId : null,
@@ -113,16 +114,20 @@ public class MenuController(CafePosDbContext db) : ControllerBase
             throw new ApiValidationException("Cannot import more than 500 items at once.");
 
         var valid = items.Where(req => !string.IsNullOrWhiteSpace(req.Name) && req.Price > 0).ToList();
-        var created = valid.Select(req => new MenuItem
+        var created = new List<MenuItem>();
+        foreach (var req in valid)
         {
-            Name = req.Name.Trim(),
-            Category = string.IsNullOrWhiteSpace(req.Category) ? "Food" : req.Category.Trim(),
-            Price = req.Price,
-            Icon = req.Icon ?? "silverware-fork-knife",
-            Subtitle = req.Subtitle ?? "",
-            Image = req.Image ?? "",
-            Description = req.Description,
-        }).ToList();
+            created.Add(new MenuItem
+            {
+                Name = req.Name.Trim(),
+                Category = string.IsNullOrWhiteSpace(req.Category) ? "Food" : req.Category.Trim(),
+                Price = req.Price,
+                Icon = req.Icon ?? "silverware-fork-knife",
+                Subtitle = req.Subtitle ?? "",
+                Image = await imageStorage.ResolveAsync("menu-items", req.Image) ?? "",
+                Description = req.Description,
+            });
+        }
 
         db.MenuItems.AddRange(created);
         await db.SaveChangesAsync();
@@ -150,7 +155,7 @@ public class MenuController(CafePosDbContext db) : ControllerBase
         }
         if (req.Available is not null) item.Available = req.Available.Value;
         if (req.Subtitle is not null) item.Subtitle = req.Subtitle;
-        if (req.Image is not null) item.Image = req.Image;
+        if (req.Image is not null) item.Image = await imageStorage.ResolveAsync("menu-items", req.Image) ?? "";
         if (req.Description is not null) item.Description = req.Description;
         if (req.Popular is not null) item.Popular = req.Popular.Value;
         if (req.ProductType is not null) item.ProductType = req.ProductType.Value;
@@ -216,18 +221,14 @@ public class MenuController(CafePosDbContext db) : ControllerBase
 
         if (string.IsNullOrWhiteSpace(req.DataUri) || !req.DataUri.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
             throw new ApiValidationException("That doesn't look like a valid image.");
-        // Same 3MB client-side cap as every other image upload in this app (imagePicker.ts)
-        // — a base64 data URI runs ~4/3x the original file size, so this is a generous
-        // ceiling, not a tight one.
-        if (req.DataUri.Length > 6 * 1024 * 1024)
-            throw new ApiValidationException("Image is too large — please choose one under 3MB.");
 
         const int maxImagesPerItem = 8;
         var existingCount = await db.MenuItemImages.CountAsync(i => i.MenuItemId == id);
         if (existingCount >= maxImagesPerItem)
             throw new ApiValidationException($"An item can have at most {maxImagesPerItem} photos — remove one first.");
 
-        var image = new MenuItemImage { MenuItemId = id, DataUri = req.DataUri, SortOrder = existingCount };
+        var url = await imageStorage.UploadDataUriAsync("menu-items-gallery", req.DataUri);
+        var image = new MenuItemImage { MenuItemId = id, DataUri = url, SortOrder = existingCount };
         db.MenuItemImages.Add(image);
         await db.SaveChangesAsync();
         return MenuItemImageDto.From(image);
