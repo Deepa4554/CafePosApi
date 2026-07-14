@@ -17,8 +17,18 @@ public class NotificationsController(CafePosDbContext db) : ControllerBase
         var query = db.Notifications.AsQueryable();
         if (!includeArchived) query = query.Where(n => !n.IsArchived);
 
+        var unreadQuery = db.Notifications.Where(n => !n.IsRead && !n.IsArchived);
+
+        // Kitchen-facing roles only need to know a new order came in — not billing,
+        // inventory, staff, or any other category meant for front-of-house/management.
+        if (User.IsInRole(nameof(AppRole.Chef)) || User.IsInRole(nameof(AppRole.KitchenStaff)))
+        {
+            query = query.Where(n => n.Category == NotificationCategory.OrderPlaced);
+            unreadQuery = unreadQuery.Where(n => n.Category == NotificationCategory.OrderPlaced);
+        }
+
         var items = await query.OrderByDescending(n => n.CreatedAt).ToListAsync();
-        var unreadCount = await db.Notifications.CountAsync(n => !n.IsRead && !n.IsArchived);
+        var unreadCount = await unreadQuery.CountAsync();
         return new { items = items.Select(NotificationDto.From), unreadCount };
     }
 

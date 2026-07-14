@@ -22,7 +22,7 @@ public class StaffTask : ITenantScoped
 // ---------- Notifications ----------
 
 public enum NotificationChannel { Push, Email, Sms, WhatsApp, InApp }
-public enum NotificationCategory { Order, Inventory, Billing, Staff, System, Marketing, AiInsight }
+public enum NotificationCategory { Order, OrderPlaced, Inventory, Billing, Staff, System, Marketing, AiInsight }
 public enum DeliveryStatus { Pending, Sent, Delivered, Failed, Retrying }
 
 public class AppNotification : ITenantScoped

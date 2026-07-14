@@ -8,8 +8,10 @@ public static class Policies
 {
     public const string OwnerOnly = "OwnerOnly";
     public const string OwnerOrManager = "OwnerOrManager";
-    /// <summary>Everyone except Waiter — matches WAITER_HIDDEN_ROUTES for read access (Inventory, CRM, Dashboard, ...).</summary>
-    public const string NotWaiter = "NotWaiter";
+    /// <summary>Everyone except Waiter/Chef/KitchenStaff — matches FLOOR_STAFF_HIDDEN_ROUTES
+    /// for read access (Inventory, CRM, Dashboard, ...). Chef/KitchenStaff are treated
+    /// identically to Waiter everywhere in the app, not just here.</summary>
+    public const string CanReadInventory = "CanReadInventory";
     /// <summary>The platform operator only — NOT satisfied by AppRole.Owner. See AppUser.IsPlatformAdmin.</summary>
     public const string PlatformAdminOnly = "PlatformAdminOnly";
     /// <summary>Tenant's subscription must be Plus or Premium — see RequirePlanHandler.</summary>

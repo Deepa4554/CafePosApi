@@ -10,7 +10,7 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/inventory")]
-[Authorize(Policy = Policies.NotWaiter)]
+[Authorize(Policy = Policies.CanReadInventory)]
 [Authorize(Policy = Policies.RequirePlus)]
 public class InventoryController(CafePosDbContext db) : ControllerBase
 {

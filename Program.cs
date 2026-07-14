@@ -58,6 +58,13 @@ builder.Services.AddSingleton<ITaxRateCache, TaxRateCache>();
 builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "keys")));
 builder.Services.AddSingleton<QrTokenService>();
+builder.Services.AddSingleton<ReceiptTokenService>();
+
+// ---------- PDF generation (bill receipts) ----------
+// QuestPDF's free Community license — this project qualifies (small business, non-SaaS-
+// resale of the PDF feature itself). Must be set once at startup or every GeneratePdf()
+// call throws.
+QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
 // ---------- Database ----------
 // Use Postgres (Supabase) if a connection string is configured, otherwise fall
@@ -133,8 +140,10 @@ builder.Services.AddAuthorizationBuilder()
         .Build())
     .AddPolicy(Policies.OwnerOnly, p => p.RequireAuthenticatedUser().RequireRole(nameof(AppRole.Owner)))
     .AddPolicy(Policies.OwnerOrManager, p => p.RequireAuthenticatedUser().RequireRole(nameof(AppRole.Owner), nameof(AppRole.Manager)))
-    .AddPolicy(Policies.NotWaiter, p => p.RequireAuthenticatedUser().RequireAssertion(ctx =>
-        !ctx.User.IsInRole(nameof(AppRole.Waiter))))
+    .AddPolicy(Policies.CanReadInventory, p => p.RequireAuthenticatedUser().RequireAssertion(ctx =>
+        !ctx.User.IsInRole(nameof(AppRole.Waiter)) &&
+        !ctx.User.IsInRole(nameof(AppRole.Chef)) &&
+        !ctx.User.IsInRole(nameof(AppRole.KitchenStaff))))
     .AddPolicy(Policies.PlatformAdminOnly, p => p.RequireAuthenticatedUser().RequireAssertion(ctx =>
         ctx.User.FindFirst("isPlatformAdmin")?.Value == "true"))
     .AddPolicy(Policies.RequirePlus, p => p.RequireAuthenticatedUser().AddRequirements(new RequirePlanRequirement(PlanCategory.Plus)))

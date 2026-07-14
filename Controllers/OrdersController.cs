@@ -12,7 +12,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/orders")]
 public class OrdersController(
-    CafePosDbContext db, IAuditService audit, QrTokenService qrTokens, ILogger<OrdersController> logger,
+    CafePosDbContext db, IAuditService audit, QrTokenService qrTokens, ReceiptTokenService receiptTokens, ILogger<OrdersController> logger,
     ITaxRateCache taxRateCache, ITenantContext tenantContext) : ControllerBase
 {
     private static readonly OrderStatus[] StatusFlow =
@@ -44,6 +44,18 @@ public class OrdersController(
         return order is null ? NotFound() : OrderDto.From(order);
     }
 
+    /// <summary>The token half of the WhatsApp bill-PDF link — pair with
+    /// "{apiBaseUrl}/api/public/receipt/{token}" client-side to get the full shareable
+    /// URL. Kept as just the token (not the full URL) so the API never has to know or
+    /// guess its own public base address.</summary>
+    [HttpGet("{id:int}/receipt-token")]
+    public async Task<ActionResult<object>> GetReceiptToken(int id)
+    {
+        var exists = await db.Orders.AnyAsync(o => o.Id == id);
+        if (!exists) return NotFound();
+        return new { token = receiptTokens.Encode(tenantContext.TenantIdOrDefault, id) };
+    }
+
     /// <summary>
     /// Fires an order. The server is the source of truth: it prices items from the
     /// menu, applies tax from settings and any coupon, consumes inventory, and
@@ -53,7 +65,16 @@ public class OrdersController(
     [HttpPost]
     public async Task<ActionResult<OrderDto>> Create(CreateOrderRequest req)
     {
-        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: req.GuestPhone);
+        // Mandatory so every order can be matched to a Customer by phone (see
+        // FindOrCreateCustomerAsync) instead of by name, which two different guests can
+        // share and one guest can spell inconsistently across visits. Enforced here (the
+        // staff POS path) only — CreatePublic (anonymous QR self-ordering) has no phone
+        // field on its request DTO yet and is deliberately left unaffected.
+        var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
+        if (normalizedPhone is null || normalizedPhone.Length != 10)
+            throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
+
+        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: normalizedPhone);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -212,7 +233,7 @@ public class OrdersController(
         if (explicitTenantId is int tid) order.TenantId = tid;
         db.Orders.Add(order);
 
-        var customer = await FindOrCreateCustomerAsync(guest ?? "Walk-in Guest", explicitTenantId);
+        var customer = await FindOrCreateCustomerAsync(guest ?? "Walk-in Guest", guestPhone, explicitTenantId);
         // Link via the navigation, not a copied CustomerId int: for a brand-new
         // customer, customer.Id is still 0 until SaveChanges assigns the real
         // Postgres-generated identity value. EF Core's change tracker fixes up
@@ -234,6 +255,7 @@ public class OrdersController(
             // (and the discount audit entry below) can reference it, so this happens
             // as its own save inside the transaction.
             await db.SaveChangesAsync();
+            NotifyOrderPlaced(order, explicitTenantId);
 
             // Added to the same tracked context rather than via IAuditService.LogAsync
             // (which does its own immediate SaveChangesAsync) — riding along in the
@@ -315,6 +337,26 @@ public class OrdersController(
             Channel = NotificationChannel.InApp,
             ActionUrl = $"/orders/{order.Id}",
         });
+    }
+
+    /// <summary>Fires the moment a new order is placed (fired to the kitchen) — this is
+    /// the ONLY notification category Chef/KitchenStaff logins see (see
+    /// NotificationsController.List's role filter); everyone else sees this alongside
+    /// every other category exactly as before.</summary>
+    private void NotifyOrderPlaced(Order order, int? explicitTenantId)
+    {
+        var notification = new AppNotification
+        {
+            Title = "New order placed",
+            Body = $"{order.Title} — {order.Items.Count} item{(order.Items.Count == 1 ? "" : "s")}, ₹{order.Total:0.00}.",
+            Category = NotificationCategory.OrderPlaced,
+            Channel = NotificationChannel.InApp,
+            ActionUrl = $"/orders/{order.Id}",
+        };
+        // Anonymous QR orders have no JWT to auto-stamp the tenant from — same reason
+        // order.TenantId is set explicitly a few lines up in BuildOrderAsync.
+        if (explicitTenantId is int tid) notification.TenantId = tid;
+        db.Notifications.Add(notification);
     }
 
     /// <summary>
@@ -437,19 +479,42 @@ public class OrdersController(
         }
     }
 
-    private async Task<Customer> FindOrCreateCustomerAsync(string guestName, int? explicitTenantId = null)
+    /// <summary>
+    /// Identifies a returning customer primarily by phone number (guestPhone, already
+    /// digits-only from Create()'s normalization) — a name alone is unreliable, since two
+    /// guests can share one and the same guest can spell theirs differently across visits.
+    /// Falls back to a name match only when no phone is available (the anonymous QR flow,
+    /// which has no phone field yet) — and backfills the phone onto that record once one
+    /// does show up, so identity converges onto phone over time instead of staying split.
+    /// </summary>
+    private async Task<Customer> FindOrCreateCustomerAsync(string guestName, string? guestPhone, int? explicitTenantId = null)
     {
         // Includes FavoriteItems so TrackFavoritesAsync can reuse this same result
         // instead of paying its own separate round trip right after.
-        var customer = await TenantScoped(db.Customers, explicitTenantId)
-            .Include(c => c.FavoriteItems)
-            .FirstOrDefaultAsync(c => c.Name == guestName);
-        if (customer is not null) return customer;
+        var customersQuery = TenantScoped(db.Customers, explicitTenantId).Include(c => c.FavoriteItems);
+
+        Customer? customer = null;
+        if (guestPhone is not null)
+            customer = await customersQuery.FirstOrDefaultAsync(c => c.Phone == guestPhone);
+
+        if (customer is null)
+        {
+            var normalizedName = guestName.Trim().ToLower();
+            customer = await customersQuery.FirstOrDefaultAsync(c => c.Name.ToLower() == normalizedName);
+        }
+
+        if (customer is not null)
+        {
+            // Backfill: a legacy/no-phone record just supplied one for the first time.
+            if (guestPhone is not null && customer.Phone is null) customer.Phone = guestPhone;
+            return customer;
+        }
 
         var slug = new string(guestName.Where(char.IsLetter).ToArray()).ToUpperInvariant();
         customer = new Customer
         {
             Name = guestName,
+            Phone = guestPhone,
             ReferralCode = $"{(slug.Length >= 4 ? slug[..4] : slug.PadRight(4, 'X'))}{Random.Shared.Next(100, 999)}",
         };
         if (explicitTenantId is int tid) customer.TenantId = tid;

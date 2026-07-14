@@ -21,8 +21,33 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/public")]
 [AllowAnonymous]
-public class PublicController(CafePosDbContext db, QrTokenService qrTokens) : ControllerBase
+public class PublicController(CafePosDbContext db, QrTokenService qrTokens, ReceiptTokenService receiptTokens) : ControllerBase
 {
+    /// <summary>
+    /// The bill-PDF link sent over WhatsApp after an order is paid — see
+    /// ReceiptTokenService for why the order id is never exposed in plain text here.
+    /// Generated fresh on every request straight from the order's current DB state
+    /// (see ReceiptPdfBuilder) rather than a stored file, so it can never go stale.
+    /// </summary>
+    [HttpGet("receipt/{token}")]
+    public async Task<IActionResult> GetReceipt(string token)
+    {
+        var decoded = receiptTokens.TryDecode(token);
+        if (decoded is null) return NotFound();
+        var (tenantId, orderId) = decoded.Value;
+
+        var order = await db.Orders.IgnoreQueryFilters().Include(o => o.Items)
+            .FirstOrDefaultAsync(o => o.TenantId == tenantId && o.Id == orderId);
+        if (order is null) return NotFound();
+
+        var settings = await db.Settings.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == tenantId);
+        if (settings is null) return NotFound();
+
+        var pdfBytes = ReceiptPdfBuilder.Build(settings, order);
+        return File(pdfBytes, "application/pdf");
+    }
+
+
     [HttpGet("{token}/table")]
     public async Task<ActionResult<object>> GetTable(string token)
     {
