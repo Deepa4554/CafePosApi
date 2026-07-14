@@ -425,6 +425,21 @@ public class CustomersController(CafePosDbContext db) : ControllerBase
         return GiftCardDto.From(card);
     }
 
+    /// <summary>Validates a gift card code without touching its balance — used by POS
+    /// checkout the same way ApplyCoupon is. The real debit happens atomically at order
+    /// creation in OrdersController.BuildOrderAsync, not here.</summary>
+    [HttpPost("gift-cards/check")]
+    public async Task<ActionResult<CheckGiftCardResult>> CheckGiftCard(CheckGiftCardRequest req)
+    {
+        var card = await db.GiftCards.FirstOrDefaultAsync(g => g.Code == req.Code.ToUpperInvariant());
+        if (card is null) return new CheckGiftCardResult(false, "Gift card code not found.", 0);
+        if (card.Status != GiftCardStatus.Active) return new CheckGiftCardResult(false, "Gift card is not active.", 0);
+        if (card.ExpiresAt < DateTime.UtcNow) return new CheckGiftCardResult(false, "Gift card has expired.", 0);
+        if (card.Balance <= 0) return new CheckGiftCardResult(false, "Gift card has no balance left.", 0);
+
+        return new CheckGiftCardResult(true, null, card.Balance);
+    }
+
     [HttpPost("gift-cards/redeem")]
     public async Task<ActionResult<GiftCardDto>> RedeemGiftCard(RedeemGiftCardRequest req)
     {

@@ -85,6 +85,12 @@ public class Order : ITenantScoped
     public decimal DiscountAmount { get; set; }
     public decimal Tax { get; set; }
     public decimal Total { get; set; }
+    /// <summary>Set when a gift card was redeemed against this order — its value is
+    /// already folded into DiscountAmount above (same pre-tax mechanism as a coupon,
+    /// see OrdersController.BuildOrderAsync); kept here separately purely for display/
+    /// audit ("which gift card paid for this"), not as a second discount.</summary>
+    public string? GiftCardCode { get; set; }
+    public decimal GiftCardAmountApplied { get; set; }
     public OrderStatus Status { get; set; } = OrderStatus.New;
     public bool Paid { get; set; }
     public bool Refunded { get; set; }

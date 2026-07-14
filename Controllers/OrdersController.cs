@@ -120,7 +120,7 @@ public class OrdersController(
         if (normalizedPhone is null || normalizedPhone.Length != 10)
             throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
 
-        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId);
+        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId, giftCardCode: req.GiftCardCode);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -163,7 +163,7 @@ public class OrdersController(
     private async Task<Order> BuildOrderAsync(
         string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
         decimal discountPct, string? couponCode, int? explicitTenantId = null, int? branchId = null, string? guestPhone = null,
-        int? servedByStaffId = null)
+        int? servedByStaffId = null, string? giftCardCode = null)
     {
         if (items.Count == 0)
             throw new ApiValidationException("Order must contain at least one item.");
@@ -244,6 +244,21 @@ public class OrdersController(
             discountAmount += couponDiscount;
         }
 
+        GiftCard? giftCard = null;
+        decimal giftCardRedeemAmount = 0;
+        if (!string.IsNullOrWhiteSpace(giftCardCode))
+        {
+            giftCard = await TenantScoped(db.GiftCards, explicitTenantId).FirstOrDefaultAsync(g => g.Code == giftCardCode.ToUpperInvariant());
+            if (giftCard is null) throw new ApiValidationException("Gift card code not found.");
+            if (giftCard.Status != GiftCardStatus.Active) throw new ApiConflictException("Gift card is not active.");
+            if (giftCard.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Gift card has expired.");
+
+            // Only redeem as much as this order can actually absorb — never debit the
+            // card for more than what benefited the customer on this bill.
+            giftCardRedeemAmount = Math.Min(giftCard.Balance, Math.Max(0, subtotal - discountAmount));
+            discountAmount += giftCardRedeemAmount;
+        }
+
         var taxable = Math.Max(0, subtotal - discountAmount);
         var tax = Math.Round(taxable * taxRatePct / 100, 2);
 
@@ -305,6 +320,8 @@ public class OrdersController(
             CreatedByName = createdByName,
             ServedByStaffId = servedBy?.Id,
             ServedByName = servedBy?.Name,
+            GiftCardCode = giftCard?.Code,
+            GiftCardAmountApplied = giftCardRedeemAmount,
         };
         // Anonymous QR orders have no JWT, so the DbContext's auto-stamp (which reads
         // the ambient tenant from the token) would default to tenant 1 — set it
@@ -322,6 +339,11 @@ public class OrdersController(
         TrackFavorites(customer, orderItems, explicitTenantId);
 
         if (coupon is not null) coupon.IsUsed = true;
+        if (giftCard is not null && giftCardRedeemAmount > 0)
+        {
+            giftCard.Balance -= giftCardRedeemAmount;
+            if (giftCard.Balance <= 0) giftCard.Status = GiftCardStatus.Used;
+        }
 
         // Explicit transaction (relational providers only — InMemory, used when no
         // Postgres connection string is configured, doesn't support transactions) so

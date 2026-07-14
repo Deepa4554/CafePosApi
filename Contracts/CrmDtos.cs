@@ -51,6 +51,11 @@ public record GiftCardDto(int Id, string Code, decimal Balance, decimal Original
 }
 public record IssueGiftCardRequest(decimal Amount, int? CustomerId, string? PurchasedBy, int ValidDays = 365);
 public record RedeemGiftCardRequest(string Code, decimal Amount);
+/// <summary>Validate-only check — mirrors ApplyCouponRequest/Result. No balance is
+/// touched here; the actual debit happens atomically at order-creation time in
+/// OrdersController.BuildOrderAsync, same pattern as coupon's IsUsed flip.</summary>
+public record CheckGiftCardRequest(string Code);
+public record CheckGiftCardResult(bool Valid, string? Error, decimal Balance);
 
 public record FavoriteItemDto(int MenuItemId, string Name, decimal Price, int OrderCount);
 
