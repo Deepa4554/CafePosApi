@@ -1,35 +1,37 @@
-using Microsoft.AspNetCore.DataProtection;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace CafePOS.Api.Infrastructure;
 
 /// <summary>
-/// Turns (tenantId, orderId) into one opaque, tamper-proof token for the public bill-PDF
-/// link sent over WhatsApp — an order id is otherwise small and sequential, so a plain
-/// /orders/{id}/receipt.pdf URL would let anyone enumerate and view other customers'
-/// bills. Same idea as QrTokenService but a separate DataProtection "purpose" string, so
-/// the two token schemes are never interchangeable.
+/// Turns an orderId into one short, tamper-evident token for the public bill-PDF link sent
+/// over WhatsApp — a plain /orders/{id}/receipt.pdf URL would let anyone enumerate and view
+/// other customers' bills, but a bill isn't sensitive enough to warrant a full encrypted
+/// DataProtection token (which runs 130+ characters and made the WhatsApp link/message look
+/// broken). An 8-hex-char HMAC-SHA256 signature over the id is short (whole token ~12 chars)
+/// and still can't be forged or guessed without the signing key.
+///
+/// No tenantId in the token: Order.Id is a single globally-unique identity column (not
+/// scoped per-tenant), so the id alone is enough to look the order up correctly.
 /// </summary>
-public class ReceiptTokenService(IDataProtectionProvider provider)
+public class ReceiptTokenService(IConfiguration config)
 {
-    private readonly IDataProtector _protector = provider.CreateProtector("CafePOS.ReceiptToken.v1");
+    private readonly byte[] _key = Encoding.UTF8.GetBytes(
+        string.IsNullOrWhiteSpace(config["Jwt:Secret"])
+            ? "dev-only-insecure-secret-key-change-me-before-prod-32chars!"
+            : config["Jwt:Secret"]!);
 
-    public string Encode(int tenantId, int orderId) => _protector.Protect($"{tenantId}:{orderId}");
+    private string Sign(int orderId) =>
+        Convert.ToHexString(HMACSHA256.HashData(_key, Encoding.UTF8.GetBytes(orderId.ToString())))[..8].ToLowerInvariant();
 
-    /// <summary>Null if the token is malformed, tampered with, or from a different key
-    /// generation — callers should treat that identically to "receipt not found".</summary>
-    public (int TenantId, int OrderId)? TryDecode(string token)
+    public string Encode(int orderId) => $"{orderId}-{Sign(orderId)}";
+
+    /// <summary>Null if the token is malformed or the signature doesn't match — callers
+    /// should treat that identically to "receipt not found".</summary>
+    public int? TryDecode(string token)
     {
-        try
-        {
-            var raw = _protector.Unprotect(token);
-            var parts = raw.Split(':', 2);
-            if (parts.Length != 2 || !int.TryParse(parts[0], out var tenantId) || !int.TryParse(parts[1], out var orderId))
-                return null;
-            return (tenantId, orderId);
-        }
-        catch
-        {
-            return null;
-        }
+        var parts = token.Split('-', 2);
+        if (parts.Length != 2 || !int.TryParse(parts[0], out var orderId)) return null;
+        return string.Equals(Sign(orderId), parts[1], StringComparison.OrdinalIgnoreCase) ? orderId : null;
     }
 }

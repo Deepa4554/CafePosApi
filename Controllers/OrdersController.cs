@@ -53,7 +53,7 @@ public class OrdersController(
     {
         var exists = await db.Orders.AnyAsync(o => o.Id == id);
         if (!exists) return NotFound();
-        return new { token = receiptTokens.Encode(tenantContext.TenantIdOrDefault, id) };
+        return new { token = receiptTokens.Encode(id) };
     }
 
     /// <summary>

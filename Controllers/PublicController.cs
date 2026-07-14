@@ -32,15 +32,14 @@ public class PublicController(CafePosDbContext db, QrTokenService qrTokens, Rece
     [HttpGet("receipt/{token}")]
     public async Task<IActionResult> GetReceipt(string token)
     {
-        var decoded = receiptTokens.TryDecode(token);
-        if (decoded is null) return NotFound();
-        var (tenantId, orderId) = decoded.Value;
+        var orderId = receiptTokens.TryDecode(token);
+        if (orderId is null) return NotFound();
 
         var order = await db.Orders.IgnoreQueryFilters().Include(o => o.Items)
-            .FirstOrDefaultAsync(o => o.TenantId == tenantId && o.Id == orderId);
+            .FirstOrDefaultAsync(o => o.Id == orderId.Value);
         if (order is null) return NotFound();
 
-        var settings = await db.Settings.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == tenantId);
+        var settings = await db.Settings.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == order.TenantId);
         if (settings is null) return NotFound();
 
         var pdfBytes = ReceiptPdfBuilder.Build(settings, order);
