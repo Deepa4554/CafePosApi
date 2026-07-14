@@ -30,6 +30,21 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return staff is null ? NotFound() : StaffDto.From(staff);
     }
 
+    /// <summary>Resolves the logged-in user's own StaffMember record, if any — powers
+    /// the POS Checkout "Waiter" picker's self-service default, so a waiter taking
+    /// their own order doesn't have to pick themselves from a list every time. 404
+    /// when this login isn't linked to a roster entry (e.g. an Owner with no HR row).</summary>
+    [HttpGet("me")]
+    public async Task<ActionResult<StaffDto>> Me()
+    {
+        var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+            ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (idClaim is null || !int.TryParse(idClaim, out var userId)) return NotFound();
+
+        var staff = await db.Staff.FirstOrDefaultAsync(s => s.UserId == userId);
+        return staff is null ? NotFound() : StaffDto.From(staff);
+    }
+
     /// <summary>
     /// Creates the HR roster entry and, if Password/LoginRole are supplied, a real app
     /// login for this same staff member — tied to the creator's own tenant (AppUser is
@@ -315,18 +330,20 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
     /// <summary>
     /// Real performance, computed from actual Orders and Shifts — not a manually
-    /// submitted "review". OrdersHandled/TotalRevenue come from Order.CreatedByUserId
-    /// (set when the order was rung up); AttendanceRatePct compares each staff
-    /// member's completed shifts against real evidence they were actually working —
-    /// a Login audit entry or an order they created — inside that shift's window.
-    /// Staff with no completed shifts yet get a null attendance rate rather than a
-    /// fabricated number.
+    /// submitted "review". OrdersHandled/TotalRevenue come from Order.ServedByStaffId
+    /// (who actually took/served the order — not necessarily whoever was logged into
+    /// a shared counter POS, see Order.ServedByStaffId's doc comment), so this works
+    /// for every staff member on the roster whether or not they have an app login.
+    /// AttendanceRatePct compares each staff member's completed shifts against real
+    /// evidence they were actually working — a Login audit entry (if they have a
+    /// login) or an order they served — inside that shift's window. Staff with no
+    /// completed shifts yet get a null attendance rate rather than a fabricated number.
     /// </summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("performance")]
     public async Task<IEnumerable<StaffPerformanceSummaryDto>> ListAllPerformance()
     {
-        var staffList = await db.Staff.Where(s => s.UserId != null).OrderBy(s => s.Name).ToListAsync();
+        var staffList = await db.Staff.OrderBy(s => s.Name).ToListAsync();
         return (await ComputePerformanceAsync(staffList)).OrderByDescending(x => x.TotalRevenue).ToList();
     }
 
@@ -336,7 +353,6 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     {
         var staff = await db.Staff.FindAsync(id);
         if (staff is null) return NotFound();
-        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access, so there's no order/attendance activity to measure.");
 
         var results = await ComputePerformanceAsync([staff]);
         return results[0];
@@ -344,18 +360,18 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
     private async Task<List<StaffPerformanceSummaryDto>> ComputePerformanceAsync(List<StaffMember> staffList)
     {
-        var userIds = staffList.Where(s => s.UserId != null).Select(s => s.UserId!.Value).ToList();
-        if (userIds.Count == 0) return [];
+        if (staffList.Count == 0) return [];
+        var staffIds = staffList.Select(s => s.Id).ToList();
 
         var orders = await db.Orders
-            .Where(o => o.CreatedByUserId != null && userIds.Contains(o.CreatedByUserId.Value))
-            .Select(o => new { o.CreatedByUserId, o.CreatedAt, o.Total, o.Paid, o.Refunded })
+            .Where(o => o.ServedByStaffId != null && staffIds.Contains(o.ServedByStaffId.Value))
+            .Select(o => new { o.ServedByStaffId, o.CreatedAt, o.Total, o.Paid, o.Refunded })
             .ToListAsync();
 
         var now = DateTime.UtcNow;
-        var staffIds = staffList.Select(s => s.Id).ToList();
         var pastShifts = await db.Shifts.Where(s => staffIds.Contains(s.StaffId) && s.EndsAt <= now).ToListAsync();
 
+        var userIds = staffList.Where(s => s.UserId != null).Select(s => s.UserId!.Value).ToList();
         var logins = await db.AuditLog
             .Where(a => a.Action == AuditAction.Login && a.UserId != null && userIds.Contains(a.UserId.Value))
             .Select(a => new { a.UserId, a.Timestamp })
@@ -363,7 +379,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
         return staffList.Select(s =>
         {
-            var myOrders = orders.Where(o => o.CreatedByUserId == s.UserId).ToList();
+            var myOrders = orders.Where(o => o.ServedByStaffId == s.Id).ToList();
             var billedOrders = myOrders.Where(o => o.Paid && !o.Refunded).ToList();
 
             var myShifts = pastShifts.Where(sh => sh.StaffId == s.Id).ToList();

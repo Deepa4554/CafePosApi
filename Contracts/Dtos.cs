@@ -14,7 +14,11 @@ public record CreateOrderRequest(
     decimal DiscountPct = 0,
     string? CouponCode = null,
     int? BranchId = null,
-    string? GuestPhone = null);
+    string? GuestPhone = null,
+    // Who actually took/served this order — omit to default to the logged-in user's
+    // own StaffMember record (self-service waiter); explicit when a Cashier/Manager/
+    // Owner rings up an order on behalf of a different waiter from a shared counter POS.
+    int? ServedByStaffId = null);
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
 
@@ -58,7 +62,8 @@ public record OrderDto(
     decimal? RefundedAmount,
     DateTime CreatedAt,
     int? BranchId,
-    string? CreatedByName)
+    string? CreatedByName,
+    string? ServedByName)
 {
     public static OrderDto From(Order o) => new(
         o.Id,
@@ -81,7 +86,8 @@ public record OrderDto(
         o.RefundedAmount,
         o.CreatedAt,
         o.BranchId,
-        o.CreatedByName);
+        o.CreatedByName,
+        o.ServedByName);
 }
 
 public record SetStatusRequest(string Status);

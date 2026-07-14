@@ -92,13 +92,21 @@ public class Order : ITenantScoped
     public string? RefundReason { get; set; }
     public DateTime? RefundedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    /// <summary>The logged-in staff member who rang up this order — null for guest
-    /// self-orders placed via the QR/public flow, where there's no staff account
-    /// involved. Powers per-staff performance (orders handled, revenue generated).
-    /// Name is denormalized alongside the id so it still displays correctly even if
-    /// that staff account is later deleted.</summary>
+    /// <summary>Whoever was logged in when this order was rung up — the till operator,
+    /// not necessarily the waiter who actually took it (a shared counter POS is often
+    /// run by a Cashier/Manager while a different person serves the table). Null for
+    /// guest self-orders placed via the QR/public flow. Kept for transaction/audit
+    /// accountability; performance is measured via ServedByStaffId instead.</summary>
     public int? CreatedByUserId { get; set; }
     public string? CreatedByName { get; set; }
+    /// <summary>The staff member who actually took/served this order — references
+    /// StaffMember, not AppUser, since a waiter doesn't need an app login to be
+    /// credited here (the till operator picks them from the roster). Defaults to the
+    /// logged-in user's own StaffMember record when they're a self-service waiter;
+    /// otherwise set explicitly by whoever's operating the POS. Drives per-staff
+    /// orders/revenue/attendance in StaffController's performance endpoints.</summary>
+    public int? ServedByStaffId { get; set; }
+    public string? ServedByName { get; set; }
     public List<OrderItem> Items { get; set; } = [];
 }
 

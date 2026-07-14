@@ -120,7 +120,7 @@ public class OrdersController(
         if (normalizedPhone is null || normalizedPhone.Length != 10)
             throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
 
-        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: normalizedPhone);
+        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -162,7 +162,8 @@ public class OrdersController(
     /// </summary>
     private async Task<Order> BuildOrderAsync(
         string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
-        decimal discountPct, string? couponCode, int? explicitTenantId = null, int? branchId = null, string? guestPhone = null)
+        decimal discountPct, string? couponCode, int? explicitTenantId = null, int? branchId = null, string? guestPhone = null,
+        int? servedByStaffId = null)
     {
         if (items.Count == 0)
             throw new ApiValidationException("Order must contain at least one item.");
@@ -251,6 +252,7 @@ public class OrdersController(
         // ordering from their own table with no staff involvement.
         int? createdByUserId = null;
         string? createdByName = null;
+        StaffMember? servedBy = null;
         if (explicitTenantId is null)
         {
             var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
@@ -261,6 +263,16 @@ public class OrdersController(
                 createdByUserId = currentUser?.Id;
                 createdByName = currentUser?.Name;
             }
+
+            // Who actually served this order: explicit pick (a Cashier/Manager ringing
+            // up on behalf of a waiter from a shared counter POS) takes priority; with
+            // none given, default to the logged-in user's own StaffMember record — the
+            // common case of a waiter taking their own order on their own login.
+            servedBy = servedByStaffId is int sid
+                ? await db.Staff.FirstOrDefaultAsync(s => s.Id == sid)
+                : await db.Staff.FirstOrDefaultAsync(s => s.UserId == createdByUserId);
+            if (servedByStaffId is int explicitSid && servedBy is null)
+                throw new ApiValidationException("Selected waiter not found.");
         }
 
         var guest = string.IsNullOrWhiteSpace(guestName) ? null : guestName.Trim();
@@ -291,6 +303,8 @@ public class OrdersController(
             Total = taxable + tax,
             CreatedByUserId = createdByUserId,
             CreatedByName = createdByName,
+            ServedByStaffId = servedBy?.Id,
+            ServedByName = servedBy?.Name,
         };
         // Anonymous QR orders have no JWT, so the DbContext's auto-stamp (which reads
         // the ambient tenant from the token) would default to tenant 1 — set it
