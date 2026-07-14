@@ -339,41 +339,51 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// login) or an order they served — inside that shift's window. Staff with no
     /// completed shifts yet get a null attendance rate rather than a fabricated number.
     /// </summary>
+    /// <param name="periodStart">Omit both period params for all-time (unbounded). The
+    /// Team Portal's date-range pills (Today/This Week/This Month) resolve to local IST
+    /// boundaries client-side and pass them here as UTC instants.</param>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("performance")]
-    public async Task<IEnumerable<StaffPerformanceSummaryDto>> ListAllPerformance()
+    public async Task<IEnumerable<StaffPerformanceSummaryDto>> ListAllPerformance([FromQuery] DateTime? periodStart, [FromQuery] DateTime? periodEnd)
     {
         var staffList = await db.Staff.OrderBy(s => s.Name).ToListAsync();
-        return (await ComputePerformanceAsync(staffList)).OrderByDescending(x => x.TotalRevenue).ToList();
+        return (await ComputePerformanceAsync(staffList, periodStart, periodEnd)).OrderByDescending(x => x.TotalRevenue).ToList();
     }
 
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("{id:int}/performance")]
-    public async Task<ActionResult<StaffPerformanceSummaryDto>> Performance(int id)
+    public async Task<ActionResult<StaffPerformanceSummaryDto>> Performance(int id, [FromQuery] DateTime? periodStart, [FromQuery] DateTime? periodEnd)
     {
         var staff = await db.Staff.FindAsync(id);
         if (staff is null) return NotFound();
 
-        var results = await ComputePerformanceAsync([staff]);
+        var results = await ComputePerformanceAsync([staff], periodStart, periodEnd);
         return results[0];
     }
 
-    private async Task<List<StaffPerformanceSummaryDto>> ComputePerformanceAsync(List<StaffMember> staffList)
+    private async Task<List<StaffPerformanceSummaryDto>> ComputePerformanceAsync(List<StaffMember> staffList, DateTime? periodStart, DateTime? periodEnd)
     {
         if (staffList.Count == 0) return [];
         var staffIds = staffList.Select(s => s.Id).ToList();
 
-        var orders = await db.Orders
-            .Where(o => o.ServedByStaffId != null && staffIds.Contains(o.ServedByStaffId.Value))
+        var ordersQuery = db.Orders.Where(o => o.ServedByStaffId != null && staffIds.Contains(o.ServedByStaffId.Value));
+        if (periodStart is DateTime ps) ordersQuery = ordersQuery.Where(o => o.CreatedAt >= ps);
+        if (periodEnd is DateTime pe) ordersQuery = ordersQuery.Where(o => o.CreatedAt <= pe);
+        var orders = await ordersQuery
             .Select(o => new { o.ServedByStaffId, o.CreatedAt, o.Total, o.Paid, o.Refunded })
             .ToListAsync();
 
         var now = DateTime.UtcNow;
-        var pastShifts = await db.Shifts.Where(s => staffIds.Contains(s.StaffId) && s.EndsAt <= now).ToListAsync();
+        var shiftsQuery = db.Shifts.Where(s => staffIds.Contains(s.StaffId) && s.EndsAt <= now);
+        if (periodStart is DateTime ss) shiftsQuery = shiftsQuery.Where(s => s.StartsAt >= ss);
+        if (periodEnd is DateTime se) shiftsQuery = shiftsQuery.Where(s => s.EndsAt <= se);
+        var pastShifts = await shiftsQuery.ToListAsync();
 
         var userIds = staffList.Where(s => s.UserId != null).Select(s => s.UserId!.Value).ToList();
-        var logins = await db.AuditLog
-            .Where(a => a.Action == AuditAction.Login && a.UserId != null && userIds.Contains(a.UserId.Value))
+        var loginsQuery = db.AuditLog.Where(a => a.Action == AuditAction.Login && a.UserId != null && userIds.Contains(a.UserId.Value));
+        if (periodStart is DateTime ls) loginsQuery = loginsQuery.Where(a => a.Timestamp >= ls);
+        if (periodEnd is DateTime le) loginsQuery = loginsQuery.Where(a => a.Timestamp <= le);
+        var logins = await loginsQuery
             .Select(a => new { a.UserId, a.Timestamp })
             .ToListAsync();
 
