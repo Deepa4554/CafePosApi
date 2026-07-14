@@ -88,6 +88,23 @@ public class GiftCard : ITenantScoped
     public string? PurchasedBy { get; set; }
 }
 
+/// <summary>A cafe-defined item its own loyalty points can be redeemed for (the Points
+/// screen's "Reward Catalog") — was a hardcoded 4-item constant before, now owned per-tenant
+/// like Menu items/Coupons/everything else a cafe customizes.</summary>
+public class Reward : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Name { get; set; }
+    public int PointsCost { get; set; }
+    /// <summary>MaterialCommunityIcons name — matches the icon-driven card style already
+    /// used for the reward grid, no image upload needed for something this small.</summary>
+    public string Icon { get; set; } = "gift-outline";
+    /// <summary>Soft-hide instead of delete, so a reward tied to loyalty history/old
+    /// receipts isn't yanked out from under past redemptions.</summary>
+    public bool IsActive { get; set; } = true;
+}
+
 public class FavoriteItem : ITenantScoped
 {
     public int Id { get; set; }

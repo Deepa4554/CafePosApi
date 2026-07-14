@@ -13,14 +13,6 @@ namespace CafePOS.Api.Controllers;
 [Authorize(Policy = Policies.RequirePlus)]
 public class DashboardController(CafePosDbContext db) : ControllerBase
 {
-    private static readonly (string Label, int StartHour, int EndHour)[] HourBuckets =
-    [
-        ("08:00", 6, 10),
-        ("12:00", 10, 14),
-        ("15:00", 14, 17),
-        ("19:00", 17, 21),
-    ];
-
     /// <summary>
     /// Real revenue/sales/inventory/peak-hour analytics computed from actual orders —
     /// replaces the Dashboard screen's previously-hardcoded ANALYTICS_DATA constant.
@@ -91,11 +83,11 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
             return new DailyRevenueDto(daySpan <= 7 ? day.ToString("ddd").ToUpperInvariant() : day.ToString("d MMM"), dayRevenue);
         }).ToList();
 
-        var hourCounts = HourBuckets
+        var hourCounts = DaypartBuckets.All
             .Select(b => currentPaid.Count(o => o.CreatedAt.Hour >= b.StartHour && o.CreatedAt.Hour < b.EndHour))
             .ToList();
         var maxHourCount = Math.Max(1, hourCounts.Count > 0 ? hourCounts.Max() : 0);
-        var peakHours = HourBuckets
+        var peakHours = DaypartBuckets.All
             .Select((b, i) => new HourlyLoadDto(b.Label, hourCounts[i], (int)Math.Round(hourCounts[i] * 100.0 / maxHourCount)))
             .ToList();
 

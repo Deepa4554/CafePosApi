@@ -54,19 +54,28 @@ public record RedeemGiftCardRequest(string Code, decimal Amount);
 
 public record FavoriteItemDto(int MenuItemId, string Name, decimal Price, int OrderCount);
 
+// ---------- Reward Catalog (cafe-owned, replaces the old hardcoded 4-item list) ----------
+
+public record RewardDto(int Id, string Name, int PointsCost, string Icon, bool IsActive)
+{
+    public static RewardDto From(Reward r) => new(r.Id, r.Name, r.PointsCost, r.Icon, r.IsActive);
+}
+public record CreateRewardRequest(string Name, int PointsCost, string? Icon);
+public record UpdateRewardRequest(string? Name, int? PointsCost, string? Icon, bool? IsActive);
+
 // ---------- CRM Insights (real customer analytics — replaces the old hardcoded screen) ----------
 
 public record CrmGrowthPointDto(string Day, int NewCustomers, int ReturningCustomers);
 public record CrmRedemptionDto(string Title, int Issued, int Redeemed, int Pct);
 public record CrmSegmentDto(string Name, string Description, int CustomerCount, decimal AvgSpent, List<string> Tags);
 
-/// <summary>Suggestion is the only Gemini-generated field here — everything else is
-/// real math on real customer/order/coupon data. Null if AI isn't configured or the
-/// call fails; the rest of the screen still works fine without it.</summary>
+/// <summary>Suggestions are rule-matched against real customer/order/coupon data (see
+/// CustomersController.BuildSuggestions) — no LLM involved. Up to 2, led by the single
+/// highest-priority real signal; empty if there's no customer data yet.</summary>
 public record CrmInsightsDto(
     double RetentionRatePct,
     decimal AvgLifetimeValue,
     List<CrmGrowthPointDto> Growth,
     List<CrmRedemptionDto> Redemption,
     List<CrmSegmentDto> Segments,
-    string? Suggestion);
+    List<string> Suggestions);

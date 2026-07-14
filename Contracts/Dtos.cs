@@ -18,6 +18,17 @@ public record CreateOrderRequest(
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
 
+/// <summary>
+/// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData
+/// false means fewer than 3 distinct days of paid-order history exist yet, the honest
+/// answer being "too early to tell" rather than a guess dressed up as a prediction.
+/// </summary>
+public record RushForecastDto(
+    bool HasEnoughData,
+    bool RushExpected,
+    string? NextDaypartLabel,
+    double? NextDaypartAvgOrders);
+
 /// <summary>Customer self-ordering from the QR table page — always dine-in, no
 /// discounts/coupons. No TableCode here on purpose: the table comes from the
 /// encrypted QrToken in the route, never from client-supplied input (a public/

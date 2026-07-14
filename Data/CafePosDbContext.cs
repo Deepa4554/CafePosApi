@@ -51,6 +51,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<Coupon> Coupons => Set<Coupon>();
     public DbSet<GiftCard> GiftCards => Set<GiftCard>();
+    public DbSet<Reward> Rewards => Set<Reward>();
     public DbSet<FavoriteItem> FavoriteItems => Set<FavoriteItem>();
 
     // Management

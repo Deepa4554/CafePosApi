@@ -52,6 +52,18 @@ public static class SeedData
                 new Integration { Name = "Stripe", Category = "Payments" });
         }
 
+        // Starting catalog matches the old hardcoded 4-item list the Points screen used to
+        // show every tenant identically — seeded once so existing demo behavior is
+        // preserved, but every cafe can now add/edit/remove its own from here.
+        if (!db.Rewards.Any())
+        {
+            db.Rewards.AddRange(
+                new Reward { Name = "Free Latte", PointsCost = 500, Icon = "coffee" },
+                new Reward { Name = "Pastry Box", PointsCost = 750, Icon = "food-croissant" },
+                new Reward { Name = "10% Off Order", PointsCost = 300, Icon = "tag-outline" },
+                new Reward { Name = "Buy 1 Get 1", PointsCost = 900, Icon = "gift-outline" });
+        }
+
         if (!db.MenuItems.Any())
         {
             db.MenuItems.AddRange(

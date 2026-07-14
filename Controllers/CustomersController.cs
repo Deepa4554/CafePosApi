@@ -13,7 +13,7 @@ namespace CafePOS.Api.Controllers;
 // work for every plan tier — only the CRM-directory/issuing actions below are Plus+.
 [ApiController]
 [Route("api/customers")]
-public class CustomersController(CafePosDbContext db, IGeminiService gemini) : ControllerBase
+public class CustomersController(CafePosDbContext db) : ControllerBase
 {
     private static readonly Regex EmailPattern = new(@"^[^\s@]+@[^\s@]+\.[^\s@]+$", RegexOptions.Compiled);
     private static readonly Regex PhonePattern = new(@"^\d{10}$", RegexOptions.Compiled);
@@ -32,11 +32,10 @@ public class CustomersController(CafePosDbContext db, IGeminiService gemini) : C
 
     /// <summary>
     /// Real CRM analytics — replaces the old CRMInsightsScreen's fully hardcoded
-    /// SEGMENTS/NEW_DATA/RETURNING_DATA/REDEMPTION constants. Every number here is
-    /// computed from real Customer/Order/Coupon rows; only the closing "Suggestion"
-    /// line is Gemini-generated (and only as a plain-English phrasing of the real
-    /// segment numbers above it — the model is given the real figures, not asked to
-    /// invent any).
+    /// SEGMENTS/NEW_DATA/RETURNING_DATA/REDEMPTION constants. Every number here, including
+    /// the closing "Suggestion" line, is computed straight from real Customer/Order/Coupon
+    /// rows — see BuildSuggestion for the rule-matching (no LLM call, ₹0 cost, always
+    /// available instead of occasionally missing on a Gemini failure).
     /// </summary>
     [Authorize(Policy = Policies.RequirePlus)]
     [HttpGet("insights")]
@@ -84,24 +83,123 @@ public class CustomersController(CafePosDbContext db, IGeminiService gemini) : C
             new("At Risk", "2+ visits before, none in the last 30 days", atRisk.Count, atRisk.Count > 0 ? Math.Round(atRisk.Average(c => c.TotalSpent), 2) : 0, ["LAPSING"]),
         };
 
-        string? suggestion = null;
-        if (gemini.IsConfigured && segments.Any(s => s.CustomerCount > 0))
+        var suggestions = BuildSuggestions(totalCustomers, retentionRate, avgLtv, frequent, newCustomers30d, atRisk, redemptionDtos, growth);
+
+        return new CrmInsightsDto(Math.Round(retentionRate, 1), Math.Round(avgLtv, 2), growth, redemptionDtos, segments, suggestions);
+    }
+
+    /// <summary>
+    /// Up to 2 actionable tips, picked by matching real numbers against a priority-ordered
+    /// list of conditions — no LLM, deterministic, free to compute. Two improvements over a
+    /// naive "first match wins": (1) thresholds are scaled to the cafe's own customer count
+    /// (percentages, not fixed numbers) so a 10-customer cafe and a 500-customer one each
+    /// get thresholds that mean something for their size; (2) every matching condition is
+    /// collected rather than stopping at the first, then the single highest-priority one
+    /// always leads and a second slot rotates (by day-of-year) among the rest — so a cafe
+    /// with several real signals at once doesn't see the exact same pair every single day.
+    /// </summary>
+    private static List<string> BuildSuggestions(
+        int totalCustomers, double retentionRate, decimal avgLtv,
+        List<Customer> frequent, List<Customer> newCustomers30d, List<Customer> atRisk,
+        List<CrmRedemptionDto> redemption, List<CrmGrowthPointDto> growth)
+    {
+        if (totalCustomers == 0) return []; // nothing to say yet — matches the screen's other empty states
+
+        decimal AvgSpend(List<Customer> list) => list.Count > 0 ? Math.Round(list.Average(c => c.TotalSpent), 0) : 0;
+        var atRiskAvg = AvgSpend(atRisk);
+        var frequentAvg = AvgSpend(frequent);
+        var atRiskPct = atRisk.Count * 100.0 / totalCustomers;
+        var frequentPct = frequent.Count * 100.0 / totalCustomers;
+        var newPct = newCustomers30d.Count * 100.0 / totalCustomers;
+
+        // Ordered highest-value action first — position in this list is what "priority"
+        // means below (candidates[0] always leads; see the rotation at the bottom).
+        var candidates = new List<string>();
+
+        // --- Win-back (At Risk) — usually the highest-ROI action a small cafe can take.
+        // Percentage-of-base + a small absolute floor, so 2 at-risk customers out of 4
+        // don't trigger the same alarm as 2 out of 400.
+        if (atRisk.Count >= 3 && atRiskPct >= 25)
+            candidates.Add($"{atRisk.Count} of your customers ({atRiskPct:0}%) haven't visited in 30+ days — a 15% win-back coupon could bring a good chunk of them back.");
+        else if (atRisk.Count >= 2 && atRiskPct >= 12)
+            candidates.Add($"{atRisk.Count} regulars haven't visited in over a month — a 10% comeback coupon could bring them back.");
+        if (atRisk.Count >= 2 && avgLtv > 0 && atRiskAvg > avgLtv * 1.3m)
+            candidates.Add($"Your at-risk customers spend above average (₹{atRiskAvg} vs ₹{avgLtv:0} overall) — worth a bigger win-back offer for this group specifically.");
+        if (atRisk.Count is >= 1 and <= 3)
+            candidates.Add($"A few regulars are slipping away ({atRisk.Count}) — a personal WhatsApp check-in may work better than a blanket coupon at this scale.");
+
+        // --- Retention health ---
+        if (totalCustomers >= 8 && retentionRate < 30)
+            candidates.Add($"Retention is low ({retentionRate:0}%) — prioritize a comeback campaign before spending on new-customer offers.");
+        if (totalCustomers >= 8 && retentionRate >= 70)
+            candidates.Add($"Retention is strong ({retentionRate:0}%) — focus on average order value next, e.g. a combo or upsell offer.");
+
+        // --- New customer conversion — also scaled to the cafe's own base ---
+        if (totalCustomers >= 5 && newPct >= 30 && retentionRate < 40)
+            candidates.Add($"You gained {newCustomers30d.Count} new customers this month but repeat visits are low ({retentionRate:0}%) — a 2nd-visit discount could convert more of them.");
+        else if (totalCustomers >= 5 && newPct >= 30)
+            candidates.Add($"{newCustomers30d.Count} new customers joined this month — a first-return offer helps turn them into regulars.");
+        if (totalCustomers >= 8 && newPct < 5)
+            candidates.Add("New customer growth is slow this month — a referral or first-visit offer could help attract more.");
+
+        // --- Coupon performance ---
+        var deadCoupon = redemption.FirstOrDefault(r => r.Issued >= 5 && r.Pct == 0);
+        if (deadCoupon is not null)
+            candidates.Add($"'{deadCoupon.Title}' has been issued {deadCoupon.Issued} times with 0% redemption — the offer or its visibility may need a rethink.");
+        var hotCoupon = redemption.FirstOrDefault(r => r.Pct >= 60);
+        if (hotCoupon is not null)
+            candidates.Add($"'{hotCoupon.Title}' is working well ({hotCoupon.Pct}% redeemed) — consider extending or repeating it.");
+        if (redemption.Count == 0 && totalCustomers >= 3)
+            candidates.Add("You haven't issued any coupons yet — a simple 10% first-time offer is an easy way to start.");
+
+        // --- Frequent-visitor loyalty ---
+        if (frequent.Count >= 3 && frequentPct >= 20)
+            candidates.Add($"{frequent.Count} of your customers ({frequentPct:0}%) are frequent visitors — reward them with a loyalty perk, like a free item on their next visit.");
+        if (frequent.Count >= 3 && avgLtv > 0 && frequentAvg > avgLtv * 1.5m)
+            candidates.Add($"Your frequent visitors average ₹{frequentAvg} — a VIP tier or exclusive perk could deepen that further.");
+
+        // --- Growth trend, last 7 days ---
+        if (growth.Count == 7 && growth.All(g => g.NewCustomers == 0 && g.ReturningCustomers == 0))
+            candidates.Add("No customer visits recorded this week — worth checking that QR ordering and walk-in tracking are both working.");
+        else if (growth.Count == 7)
         {
-            try
-            {
-                var segmentSummary = string.Join("; ", segments.Where(s => s.CustomerCount > 0).Select(s => $"{s.Name}: {s.CustomerCount} customers, avg lifetime spend Rs.{s.AvgSpent:0}"));
-                var prompt = $"A cafe's real customer segments right now: {segmentSummary}. Overall retention rate: {retentionRate:0}%. " +
-                    "In one short sentence (under 30 words), suggest one specific, actionable promotion targeting whichever segment is most worth focusing on. " +
-                    "No preamble, no markdown — just the suggestion itself.";
-                suggestion = await gemini.GenerateAsync(prompt);
-            }
-            catch
-            {
-                suggestion = null; // the suggestion is a bonus — every number above it is real regardless of whether this call succeeds
-            }
+            var earlyWeekNew = growth.Take(3).Sum(g => g.NewCustomers);
+            var lateWeekNew = growth.Skip(4).Sum(g => g.NewCustomers);
+            if (lateWeekNew >= 3 && lateWeekNew > earlyWeekNew * 1.5)
+                candidates.Add("New customer visits are trending up this week — a good time to launch a referral program.");
+
+            var totalReturning = growth.Sum(g => g.ReturningCustomers);
+            var totalNew = growth.Sum(g => g.NewCustomers);
+            if (totalReturning >= 4 && totalReturning > totalNew * 3)
+                candidates.Add("Your traffic this week is mostly repeat customers — a loyalty points multiplier could reward that further.");
         }
 
-        return new CrmInsightsDto(Math.Round(retentionRate, 1), Math.Round(avgLtv, 2), growth, redemptionDtos, segments, suggestion);
+        // --- Lifetime value ---
+        if (totalCustomers >= 8 && avgLtv >= 500)
+            candidates.Add($"Average customer lifetime value is strong (₹{avgLtv:0}) — a referral incentive could bring in more customers like them.");
+        if (totalCustomers >= 8 && avgLtv is > 0 and < 150)
+            candidates.Add($"Average spend per customer is on the lower side (₹{avgLtv:0}) — a combo or bundle offer could help raise it.");
+
+        // --- Small/new cafe starter tips — most conditions above need enough customers to
+        // be statistically meaningful; below that floor, give advice suited to a cafe still
+        // building its base instead of falling straight through to the generic fallback.
+        if (totalCustomers < 8)
+        {
+            candidates.Add(retentionRate == 0
+                ? "No repeat customers yet — personally greeting regulars by name is the highest-leverage retention tool at this stage."
+                : "Small but promising customer base — a quick WhatsApp thank-you to repeat visitors goes a long way before you're ready for automated campaigns.");
+        }
+
+        if (candidates.Count == 0)
+            candidates.Add("Keep an eye on your At Risk segment as it grows — a timely win-back offer is usually the highest-return move for a cafe.");
+
+        if (candidates.Count <= 2) return candidates;
+
+        // Always lead with the single most important signal; rotate the second slot by
+        // day-of-year among the rest — deterministic (same day = same pair every time it's
+        // viewed) but not frozen on the same two forever the way a fixed top-2 would be.
+        var secondIndex = 1 + DateTime.UtcNow.DayOfYear % (candidates.Count - 1);
+        return [candidates[0], candidates[secondIndex]];
     }
 
     [Authorize(Policy = Policies.RequirePlus)]

@@ -44,6 +44,52 @@ public class OrdersController(
         return order is null ? NotFound() : OrderDto.From(order);
     }
 
+    /// <summary>
+    /// Real math on real order history for the KDS "busy period ahead" card — not AI, just
+    /// an average order count per DaypartBuckets slot over the last 14 days, compared
+    /// against the upcoming slot. Deliberately its own free-tier endpoint rather than
+    /// reusing DashboardController's peak-hours chart, which is Plus-gated; KDS (and the
+    /// Chef/KitchenStaff logins that only see KDS) needs this on every plan.
+    /// </summary>
+    [HttpGet("rush-forecast")]
+    public async Task<RushForecastDto> RushForecast()
+    {
+        const int historyDays = 14;
+        const int minHistoryDays = 3;
+        var since = DateTime.UtcNow.AddDays(-historyDays);
+
+        // Cafe local time (Asia/Kolkata, IST = UTC+5:30, no DST) — CreatedAt is stored UTC,
+        // and "which part of the day" only means anything in the cafe's own clock.
+        var createdAtIst = await db.Orders
+            .Where(o => o.Paid && o.CreatedAt >= since)
+            .Select(o => o.CreatedAt.AddHours(5.5))
+            .ToListAsync();
+
+        var daysWithData = createdAtIst.Select(d => d.Date).Distinct().Count();
+        if (daysWithData < minHistoryDays)
+            return new RushForecastDto(false, false, null, null);
+
+        var buckets = DaypartBuckets.All;
+        var avgCounts = buckets
+            .Select(b => createdAtIst.Count(d => d.Hour >= b.StartHour && d.Hour < b.EndHour) / (double)daysWithData)
+            .ToList();
+
+        var nowIst = DateTime.UtcNow.AddHours(5.5);
+        var currentIdx = Array.FindIndex(buckets, b => nowIst.Hour >= b.StartHour && nowIst.Hour < b.EndHour);
+        var currentAvg = currentIdx >= 0 ? avgCounts[currentIdx] : 0;
+        var nextIdx = Array.FindIndex(buckets, b => b.StartHour > nowIst.Hour);
+
+        if (nextIdx < 0)
+            return new RushForecastDto(true, false, null, null); // last daypart of the day has already started
+
+        var nextAvg = avgCounts[nextIdx];
+        // "Meaningfully busier" — at least 2 orders/day average (so a single noisy day
+        // doesn't trigger it) and at least 30% above the current slot.
+        var rushExpected = nextAvg >= 2 && nextAvg > currentAvg * 1.3;
+
+        return new RushForecastDto(true, rushExpected, buckets[nextIdx].DisplayLabel, Math.Round(nextAvg, 1));
+    }
+
     /// <summary>The token half of the WhatsApp bill-PDF link — pair with
     /// "{apiBaseUrl}/api/public/receipt/{token}" client-side to get the full shareable
     /// URL. Kept as just the token (not the full URL) so the API never has to know or
