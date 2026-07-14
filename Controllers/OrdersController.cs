@@ -246,6 +246,23 @@ public class OrdersController(
         var taxable = Math.Max(0, subtotal - discountAmount);
         var tax = Math.Round(taxable * taxRatePct / 100, 2);
 
+        // Anonymous QR self-orders (explicitTenantId set) have no JWT/logged-in staff
+        // member at all — CreatedByUserId stays null for those, same as a guest
+        // ordering from their own table with no staff involvement.
+        int? createdByUserId = null;
+        string? createdByName = null;
+        if (explicitTenantId is null)
+        {
+            var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+                ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (idClaim is not null && int.TryParse(idClaim, out var currentUserId))
+            {
+                var currentUser = await db.Users.FindAsync(currentUserId);
+                createdByUserId = currentUser?.Id;
+                createdByName = currentUser?.Name;
+            }
+        }
+
         var guest = string.IsNullOrWhiteSpace(guestName) ? null : guestName.Trim();
         var guestSuffix = guest is null ? "" : $" – {guest}";
         var typeLabel = orderType switch
@@ -272,6 +289,8 @@ public class OrdersController(
             DiscountAmount = discountAmount,
             Tax = tax,
             Total = taxable + tax,
+            CreatedByUserId = createdByUserId,
+            CreatedByName = createdByName,
         };
         // Anonymous QR orders have no JWT, so the DbContext's auto-stamp (which reads
         // the ambient tenant from the token) would default to tenant 1 — set it

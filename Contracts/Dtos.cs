@@ -57,7 +57,8 @@ public record OrderDto(
     bool Refunded,
     decimal? RefundedAmount,
     DateTime CreatedAt,
-    int? BranchId)
+    int? BranchId,
+    string? CreatedByName)
 {
     public static OrderDto From(Order o) => new(
         o.Id,
@@ -79,7 +80,8 @@ public record OrderDto(
         o.Refunded,
         o.RefundedAmount,
         o.CreatedAt,
-        o.BranchId);
+        o.BranchId,
+        o.CreatedByName);
 }
 
 public record SetStatusRequest(string Status);

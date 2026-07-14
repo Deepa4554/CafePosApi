@@ -92,6 +92,13 @@ public class Order : ITenantScoped
     public string? RefundReason { get; set; }
     public DateTime? RefundedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    /// <summary>The logged-in staff member who rang up this order — null for guest
+    /// self-orders placed via the QR/public flow, where there's no staff account
+    /// involved. Powers per-staff performance (orders handled, revenue generated).
+    /// Name is denormalized alongside the id so it still displays correctly even if
+    /// that staff account is later deleted.</summary>
+    public int? CreatedByUserId { get; set; }
+    public string? CreatedByName { get; set; }
     public List<OrderItem> Items { get; set; } = [];
 }
 

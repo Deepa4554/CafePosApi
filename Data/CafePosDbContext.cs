@@ -63,7 +63,6 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Shift> Shifts => Set<Shift>();
     public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
     public DbSet<CafeExpense> CafeExpenses => Set<CafeExpense>();
-    public DbSet<PerformanceReview> PerformanceReviews => Set<PerformanceReview>();
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<Subscription> Subscriptions => Set<Subscription>();
     public DbSet<Integration> Integrations => Set<Integration>();

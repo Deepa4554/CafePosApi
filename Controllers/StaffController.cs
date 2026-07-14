@@ -313,37 +313,73 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
     // ---------- Performance & Payroll ----------
 
-    /// <summary>Every staff member's reviews rolled up and ranked by rating — powers
-    /// the Performance Reports leaderboard. Staff with no reviews yet are simply
-    /// absent rather than shown with fabricated zeros.</summary>
+    /// <summary>
+    /// Real performance, computed from actual Orders and Shifts — not a manually
+    /// submitted "review". OrdersHandled/TotalRevenue come from Order.CreatedByUserId
+    /// (set when the order was rung up); AttendanceRatePct compares each staff
+    /// member's completed shifts against real evidence they were actually working —
+    /// a Login audit entry or an order they created — inside that shift's window.
+    /// Staff with no completed shifts yet get a null attendance rate rather than a
+    /// fabricated number.
+    /// </summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("performance")]
     public async Task<IEnumerable<StaffPerformanceSummaryDto>> ListAllPerformance()
     {
-        var reviews = await db.PerformanceReviews.ToListAsync();
-        var staffIds = reviews.Select(r => r.StaffId).Distinct().ToList();
-        var staffMap = await db.Staff.Where(s => staffIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id);
-
-        return reviews
-            .GroupBy(r => r.StaffId)
-            .Select(g => new StaffPerformanceSummaryDto(
-                g.Key,
-                staffMap.GetValueOrDefault(g.Key)?.Name ?? "Unknown",
-                staffMap.GetValueOrDefault(g.Key)?.Role ?? "",
-                g.Sum(r => r.OrdersHandled),
-                g.Sum(r => r.RevenueGenerated),
-                g.Average(r => r.AttendanceRatePct),
-                g.Average(r => r.RatingOutOf5)))
-            .OrderByDescending(x => x.AvgRating)
-            .ToList();
+        var staffList = await db.Staff.Where(s => s.UserId != null).OrderBy(s => s.Name).ToListAsync();
+        return (await ComputePerformanceAsync(staffList)).OrderByDescending(x => x.TotalRevenue).ToList();
     }
 
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("{id:int}/performance")]
-    public async Task<IEnumerable<PerformanceReviewDto>> Performance(int id)
+    public async Task<ActionResult<StaffPerformanceSummaryDto>> Performance(int id)
     {
-        var reviews = await db.PerformanceReviews.Where(p => p.StaffId == id).OrderByDescending(p => p.PeriodEnd).ToListAsync();
-        return reviews.Select(PerformanceReviewDto.From);
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access, so there's no order/attendance activity to measure.");
+
+        var results = await ComputePerformanceAsync([staff]);
+        return results[0];
+    }
+
+    private async Task<List<StaffPerformanceSummaryDto>> ComputePerformanceAsync(List<StaffMember> staffList)
+    {
+        var userIds = staffList.Where(s => s.UserId != null).Select(s => s.UserId!.Value).ToList();
+        if (userIds.Count == 0) return [];
+
+        var orders = await db.Orders
+            .Where(o => o.CreatedByUserId != null && userIds.Contains(o.CreatedByUserId.Value))
+            .Select(o => new { o.CreatedByUserId, o.CreatedAt, o.Total, o.Paid, o.Refunded })
+            .ToListAsync();
+
+        var now = DateTime.UtcNow;
+        var staffIds = staffList.Select(s => s.Id).ToList();
+        var pastShifts = await db.Shifts.Where(s => staffIds.Contains(s.StaffId) && s.EndsAt <= now).ToListAsync();
+
+        var logins = await db.AuditLog
+            .Where(a => a.Action == AuditAction.Login && a.UserId != null && userIds.Contains(a.UserId.Value))
+            .Select(a => new { a.UserId, a.Timestamp })
+            .ToListAsync();
+
+        return staffList.Select(s =>
+        {
+            var myOrders = orders.Where(o => o.CreatedByUserId == s.UserId).ToList();
+            var billedOrders = myOrders.Where(o => o.Paid && !o.Refunded).ToList();
+
+            var myShifts = pastShifts.Where(sh => sh.StaffId == s.Id).ToList();
+            double? attendancePct = null;
+            if (myShifts.Count > 0)
+            {
+                var myLoginTimes = logins.Where(l => l.UserId == s.UserId).Select(l => l.Timestamp).ToList();
+                var myOrderTimes = myOrders.Select(o => o.CreatedAt).ToList();
+                var present = myShifts.Count(sh =>
+                    myLoginTimes.Any(t => t >= sh.StartsAt.AddMinutes(-30) && t <= sh.EndsAt) ||
+                    myOrderTimes.Any(t => t >= sh.StartsAt && t <= sh.EndsAt));
+                attendancePct = Math.Round(present / (double)myShifts.Count * 100, 1);
+            }
+
+            return new StaffPerformanceSummaryDto(s.Id, s.Name, s.Role, billedOrders.Count, billedOrders.Sum(o => o.Total), attendancePct);
+        }).ToList();
     }
 
     [Authorize(Policy = Policies.OwnerOrManager)]

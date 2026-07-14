@@ -176,19 +176,6 @@ public class CafeExpense : ITenantScoped
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
-public class PerformanceReview : ITenantScoped
-{
-    public int Id { get; set; }
-    public int TenantId { get; set; }
-    public int StaffId { get; set; }
-    public DateTime PeriodStart { get; set; }
-    public DateTime PeriodEnd { get; set; }
-    public int OrdersHandled { get; set; }
-    public decimal RevenueGenerated { get; set; }
-    public double AttendanceRatePct { get; set; }
-    public double RatingOutOf5 { get; set; }
-}
-
 // ---------- Branches / Tenant / Subscription ----------
 
 public class Branch : ITenantScoped

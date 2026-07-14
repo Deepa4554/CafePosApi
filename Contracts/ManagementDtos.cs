@@ -69,9 +69,10 @@ public record CreateShiftRequest(int StaffId, DateTime StartsAt, DateTime EndsAt
 public record ShiftWithStaffDto(int Id, int StaffId, string StaffName, string StaffRole, DateTime StartsAt, DateTime EndsAt, string? Notes);
 
 /// <summary>Powers the Performance Reports leaderboard — every staff member's reviews
-/// rolled up into one row, ranked by rating server-side so the screen just renders
-/// top to bottom.</summary>
-public record StaffPerformanceSummaryDto(int StaffId, string StaffName, string StaffRole, int TotalOrders, decimal TotalRevenue, double AvgAttendancePct, double AvgRating);
+/// rolled up into one row, ranked by revenue server-side so the screen just renders
+/// top to bottom. AttendanceRatePct is null when the staff member has no completed
+/// shifts yet — there's nothing to measure attendance against.</summary>
+public record StaffPerformanceSummaryDto(int StaffId, string StaffName, string StaffRole, int TotalOrders, decimal TotalRevenue, double? AttendanceRatePct);
 
 public record LeaveRequestDto(
     int Id, int StaffId, string StaffName, DateOnly StartDate, DateOnly EndDate, string Type,
@@ -91,11 +92,6 @@ public record CafeExpenseDto(int Id, decimal Amount, string Category, string Pur
 public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt);
 public record CategoryTotalDto(string Category, decimal Total);
 public record CafeExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth, List<CategoryTotalDto> ByCategoryThisMonth, List<CafeExpenseDto> Recent);
-
-public record PerformanceReviewDto(int Id, int StaffId, DateTime PeriodStart, DateTime PeriodEnd, int OrdersHandled, decimal RevenueGenerated, double AttendanceRatePct, double RatingOutOf5)
-{
-    public static PerformanceReviewDto From(PerformanceReview p) => new(p.Id, p.StaffId, p.PeriodStart, p.PeriodEnd, p.OrdersHandled, p.RevenueGenerated, p.AttendanceRatePct, p.RatingOutOf5);
-}
 
 public record PayrollLineDto(int StaffId, string StaffName, decimal HourlyRate, double HoursWorked, decimal GrossPay);
 
