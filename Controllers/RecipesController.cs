@@ -13,6 +13,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/menu-items/{menuItemId:int}/recipe")]
 [Authorize(Policy = Policies.OwnerOrManager)]
+[Authorize(Policy = Policies.RequirePlus)]
 public class RecipesController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]

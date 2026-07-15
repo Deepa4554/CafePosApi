@@ -14,6 +14,7 @@ namespace CafePOS.Api.Controllers;
 /// real data, not AI, and live in their own domain controllers (Dashboard/Staff).</summary>
 [ApiController]
 [Route("api/ai")]
+[Authorize(Policy = Policies.RequirePlus)]
 public class AIController(IGeminiService gemini, CafePosDbContext db) : ControllerBase
 {
     [HttpPost("chat")]

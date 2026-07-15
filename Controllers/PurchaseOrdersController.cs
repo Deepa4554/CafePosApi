@@ -13,6 +13,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/purchase-orders")]
 [Authorize(Policy = Policies.OwnerOrManager)]
+[Authorize(Policy = Policies.RequirePlus)]
 public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]
