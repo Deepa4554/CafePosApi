@@ -13,6 +13,9 @@ public record ForgotPasswordRequest(string Email);
 public record ResetPasswordRequest(string Email, string Otp, string NewPassword);
 public record LoginRequest(string Email, string Password);
 public record RefreshRequest(string RefreshToken);
+// Only revokes this one device's session — omit to just no-op the revoke (still
+// clears local storage client-side either way).
+public record LogoutRequest(string? RefreshToken);
 public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 
 public record UserDto(int Id, string Email, string? Phone, string Name, string Role, string? ProfilePhoto, int TenantId, bool IsPlatformAdmin)

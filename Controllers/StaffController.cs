@@ -158,8 +158,10 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         if (user is null) throw new ApiValidationException("This staff member doesn't have app access.");
 
         user.PasswordHash = hasher.HashPassword(user, req.NewPassword);
-        user.RefreshToken = null;
-        user.RefreshTokenExpiresAt = null;
+        // "Log out everywhere" — mirrors AuthController.ResetPassword's own revoke-all,
+        // since RefreshTokenEntry is one row per device now, not a single field to null out.
+        var activeSessions = await db.RefreshTokens.Where(t => t.UserId == user.Id && t.RevokedAt == null).ToListAsync();
+        foreach (var entry in activeSessions) entry.RevokedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
 
         var actor = await CurrentUserAsync();

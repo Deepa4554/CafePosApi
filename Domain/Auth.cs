@@ -40,6 +40,25 @@ public class AppUser
     public string? ProfilePhoto { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    public string? RefreshToken { get; set; }
-    public DateTime? RefreshTokenExpiresAt { get; set; }
+}
+
+/// <summary>
+/// One row per logged-in device/browser, not one per user — this is what lets the
+/// same account stay signed in on a phone, a second phone, and a web tab all at
+/// once. Previously AppUser had a single RefreshToken field, so every new login or
+/// silent refresh (anywhere) overwrote it and silently kicked out every other
+/// device; see AuthController.Refresh/Logout for how sessions are now looked up
+/// and revoked individually instead. Rotated on every /auth/refresh call (the used
+/// row is marked RevokedAt and a fresh row takes its place for that same device) —
+/// reusing an already-revoked token is treated as invalid, never as "log back in
+/// the old session".
+/// </summary>
+public class RefreshTokenEntry
+{
+    public int Id { get; set; }
+    public int UserId { get; set; }
+    public required string Token { get; set; }
+    public DateTime ExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? RevokedAt { get; set; }
 }

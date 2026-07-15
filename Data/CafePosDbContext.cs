@@ -45,6 +45,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
 
     // Auth
     public DbSet<AppUser> Users => Set<AppUser>();
+    public DbSet<RefreshTokenEntry> RefreshTokens => Set<RefreshTokenEntry>();
     public DbSet<EmailOtp> EmailOtps => Set<EmailOtp>();
 
     // CRM
@@ -162,6 +163,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // One recipe per menu item per tenant.
         modelBuilder.Entity<Recipe>().HasIndex(r => new { r.TenantId, r.MenuItemId }).IsUnique();
         modelBuilder.Entity<MenuItemImage>().HasIndex(i => i.MenuItemId);
+        // Looked up on every single authenticated request that needs a token refresh.
+        modelBuilder.Entity<RefreshTokenEntry>().HasIndex(t => t.Token).IsUnique();
+        modelBuilder.Entity<RefreshTokenEntry>().HasIndex(t => t.UserId);
 
         ApplyTenantIsolation(modelBuilder);
     }

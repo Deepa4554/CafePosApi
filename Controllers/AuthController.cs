@@ -68,8 +68,8 @@ public class AuthController(
     }
 
     /// <summary>Step 2 of password reset: verifies the code and sets the new password.
-    /// Also revokes the refresh token, so a reset logs the account out everywhere —
-    /// otherwise a stolen device/session would survive a password change.</summary>
+    /// Also revokes every device's refresh token, so a reset logs the account out
+    /// everywhere — otherwise a stolen device/session would survive a password change.</summary>
     [AllowAnonymous]
     [HttpPost("forgot-password/reset")]
     public async Task<IActionResult> ResetPassword(ResetPasswordRequest req)
@@ -86,8 +86,7 @@ public class AuthController(
         await ConsumeOtpAsync(normalizedEmail, req.Otp);
 
         user.PasswordHash = hasher.HashPassword(user, req.NewPassword);
-        user.RefreshToken = null;
-        user.RefreshTokenExpiresAt = null;
+        await RevokeAllSessionsAsync(user.Id);
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.PasswordChange, AuditResource.Auth, user.Id.ToString(),
             $"{user.Name} reset their password via email verification.", AuditSeverity.High, user.Id, user.Name, user.TenantId);
@@ -165,10 +164,11 @@ public class AuthController(
         user.PasswordHash = hasher.HashPassword(user, req.Password);
 
         db.Users.Add(user);
-        await IssueTokensAsync(user);
+        await db.SaveChangesAsync(); // assigns user.Id before IssueTokensAsync references it
+        var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user)));
+        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
     }
 
     /// <summary>
@@ -224,10 +224,11 @@ public class AuthController(
             PlanExpiresAt = DateTime.UtcNow.AddDays(7),
         });
 
-        await IssueTokensAsync(user);
+        await db.SaveChangesAsync(); // assigns user.Id before IssueTokensAsync references it
+        var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user)));
+        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
     }
 
     private async Task<string> GenerateUniqueSlugAsync(string cafeName)
@@ -263,34 +264,54 @@ public class AuthController(
             throw new UnauthorizedAccessException("Invalid email or password.");
         }
 
-        await IssueTokensAsync(user);
+        var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Login, AuditResource.Auth, user.Id.ToString(), $"{user.Name} signed in.", AuditSeverity.Low, user.Id, user.Name, user.TenantId);
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user)));
+        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
     }
 
+    /// <summary>
+    /// Rotates this one device's session: the presented token is marked revoked and
+    /// a fresh one takes its place for the same device, so every other device's own
+    /// session (see RefreshTokenEntry's doc comment) is completely untouched. A
+    /// revoked or expired token — including one that's already been rotated away by
+    /// this same device a moment earlier — is always just "invalid", never silently
+    /// re-accepted.
+    /// </summary>
     [AllowAnonymous]
     [HttpPost("refresh")]
     public async Task<ActionResult<AuthResponse>> Refresh(RefreshRequest req)
     {
-        var user = await db.Users.FirstOrDefaultAsync(u => u.RefreshToken == req.RefreshToken);
-        if (user is null || user.RefreshTokenExpiresAt is null || user.RefreshTokenExpiresAt < DateTime.UtcNow)
+        var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == req.RefreshToken);
+        if (entry is null || entry.RevokedAt is not null || entry.ExpiresAt < DateTime.UtcNow)
             throw new UnauthorizedAccessException("Refresh token is invalid or expired.");
 
-        await IssueTokensAsync(user);
+        var user = await db.Users.FindAsync(entry.UserId);
+        if (user is null || !user.IsActive)
+            throw new UnauthorizedAccessException("Refresh token is invalid or expired.");
+
+        entry.RevokedAt = DateTime.UtcNow;
+        var newRefreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user)));
+        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), newRefreshToken));
     }
 
+    /// <summary>Revokes only the calling device's own session — every other device
+    /// this account is logged in on stays signed in. RefreshToken is optional only
+    /// so an already-cleared client (e.g. local storage wiped some other way) can
+    /// still call this without erroring; the server side has nothing to revoke then.</summary>
     [Authorize]
     [HttpPost("logout")]
-    public async Task<IActionResult> Logout()
+    public async Task<IActionResult> Logout(LogoutRequest req)
     {
         var user = await CurrentUserAsync();
-        user.RefreshToken = null;
-        user.RefreshTokenExpiresAt = null;
+        if (!string.IsNullOrWhiteSpace(req.RefreshToken))
+        {
+            var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == req.RefreshToken && t.UserId == user.Id);
+            if (entry is not null) entry.RevokedAt = DateTime.UtcNow;
+        }
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Logout, AuditResource.Auth, user.Id.ToString(), $"{user.Name} signed out.", AuditSeverity.Low, user.Id, user.Name);
         return NoContent();
@@ -328,13 +349,29 @@ public class AuthController(
         return await db.Users.FindAsync(id) ?? throw new KeyNotFoundException("User not found.");
     }
 
-    private async Task IssueTokensAsync(AppUser user)
+    /// <summary>Adds a brand-new session row for this device rather than overwriting
+    /// any existing one — see RefreshTokenEntry's doc comment.</summary>
+    private async Task<string> IssueTokensAsync(AppUser user)
     {
-        user.RefreshToken = tokenService.CreateRefreshToken();
-        user.RefreshTokenExpiresAt = DateTime.UtcNow.AddDays(jwtOptions.Value.RefreshTokenDays);
+        var token = tokenService.CreateRefreshToken();
+        db.RefreshTokens.Add(new RefreshTokenEntry
+        {
+            UserId = user.Id,
+            Token = token,
+            ExpiresAt = DateTime.UtcNow.AddDays(jwtOptions.Value.RefreshTokenDays),
+        });
         await Task.CompletedTask;
+        return token;
     }
 
-    private static AuthResponse BuildResponse(AppUser user, string accessToken) =>
-        new(accessToken, user.RefreshToken!, UserDto.From(user));
+    /// <summary>"Log out everywhere" — used after a password reset/change so a
+    /// stolen device/session can't survive it. Only touches this user's own rows.</summary>
+    private async Task RevokeAllSessionsAsync(int userId)
+    {
+        var active = await db.RefreshTokens.Where(t => t.UserId == userId && t.RevokedAt == null).ToListAsync();
+        foreach (var entry in active) entry.RevokedAt = DateTime.UtcNow;
+    }
+
+    private static AuthResponse BuildResponse(AppUser user, string accessToken, string refreshToken) =>
+        new(accessToken, refreshToken, UserDto.From(user));
 }
