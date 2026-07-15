@@ -7,10 +7,15 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CafePOS.Api.Controllers;
 
+/// <summary>
+/// Analytics() is deliberately NOT Plus-gated — "how much did I sell today" is core
+/// day-1 POS visibility, not an upsell, same reasoning as StaffController's roster
+/// split. Only Forecast() (predictive, not just visibility) carries its own explicit
+/// RequirePlus.
+/// </summary>
 [ApiController]
 [Route("api/dashboard")]
 [Authorize(Policy = Policies.OwnerOrManager)]
-[Authorize(Policy = Policies.RequirePlus)]
 public class DashboardController(CafePosDbContext db) : ControllerBase
 {
     /// <summary>
@@ -110,6 +115,7 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
     /// Needs at least 3 days of history to fit a meaningful line — below that it just
     /// repeats the flat average, which is the honest answer when there's too little data.
     /// </summary>
+    [Authorize(Policy = Policies.RequirePlus)]
     [HttpGet("forecast")]
     public async Task<SalesForecastDto> Forecast([FromQuery] int forecastDays = 7)
     {
