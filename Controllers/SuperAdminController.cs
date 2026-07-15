@@ -240,4 +240,21 @@ public class SuperAdminController(CafePosDbContext db) : ControllerBase
         await db.SaveChangesAsync();
         return NoContent();
     }
+
+    /// <summary>Every failed request across every tenant — see ApiFailureLog's doc
+    /// comment. Filterable so a spike of routine 401s (e.g. everyone re-logging-in
+    /// after a session-model change) doesn't bury a real 500.</summary>
+    [HttpGet("api-failures")]
+    public async Task<PagedResult<ApiFailureLogDto>> ListApiFailures(
+        [FromQuery] int? statusCode, [FromQuery] int? tenantId, [FromQuery] DateTime? since,
+        [FromQuery] int page = 1, [FromQuery] int pageSize = 50)
+    {
+        var query = db.ApiFailureLogs.AsQueryable();
+        if (statusCode is not null) query = query.Where(f => f.StatusCode == statusCode);
+        if (tenantId is not null) query = query.Where(f => f.TenantId == tenantId);
+        if (since is not null) query = query.Where(f => f.Timestamp >= since);
+
+        var paged = await query.OrderByDescending(f => f.Timestamp).ToPagedResultAsync(page, pageSize);
+        return new PagedResult<ApiFailureLogDto>(paged.Items.Select(ApiFailureLogDto.From).ToList(), paged.Page, paged.PageSize, paged.TotalCount);
+    }
 }

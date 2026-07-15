@@ -60,6 +60,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<AppNotification> Notifications => Set<AppNotification>();
     public DbSet<ApprovalRequest> Approvals => Set<ApprovalRequest>();
     public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
+    public DbSet<ApiFailureLog> ApiFailureLogs => Set<ApiFailureLog>();
     public DbSet<StaffMember> Staff => Set<StaffMember>();
     public DbSet<Shift> Shifts => Set<Shift>();
     public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
@@ -166,6 +167,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // Looked up on every single authenticated request that needs a token refresh.
         modelBuilder.Entity<RefreshTokenEntry>().HasIndex(t => t.Token).IsUnique();
         modelBuilder.Entity<RefreshTokenEntry>().HasIndex(t => t.UserId);
+        // Always sorted newest-first and commonly filtered by status — this table
+        // grows with every failed request, so both need to stay index-backed.
+        modelBuilder.Entity<ApiFailureLog>().HasIndex(f => f.Timestamp);
+        modelBuilder.Entity<ApiFailureLog>().HasIndex(f => f.StatusCode);
 
         ApplyTenantIsolation(modelBuilder);
     }

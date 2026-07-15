@@ -97,6 +97,33 @@ public class AuditLogEntry : ITenantScoped
     public AuditSeverity Severity { get; set; } = AuditSeverity.Low;
 }
 
+// ---------- API Failure Log ----------
+
+/// <summary>
+/// Every failed request the backend actually saw — not just 500s. Written once,
+/// centrally, from GlobalExceptionHandler, so nothing has to remember to log a
+/// failure itself. Deliberately NOT ITenantScoped: a failed login or a request with
+/// a bad/missing token happens before any tenant is known, and this table needs to
+/// capture those too. TenantId/UserId are just best-effort context pulled from the
+/// JWT claims when they're present, not a hard requirement.
+/// </summary>
+public class ApiFailureLog
+{
+    public int Id { get; set; }
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public required string Method { get; set; }
+    public required string Path { get; set; }
+    public int StatusCode { get; set; }
+    public required string ExceptionType { get; set; }
+    public required string Reason { get; set; }
+    /// <summary>Only kept for 500s — routine 400/401/404/409s don't need a stack
+    /// trace, and skipping it keeps this table from ballooning on ordinary traffic.</summary>
+    public string? StackTrace { get; set; }
+    public int? TenantId { get; set; }
+    public int? UserId { get; set; }
+    public string? UserName { get; set; }
+}
+
 // ---------- Staff / Team ----------
 
 public enum StaffStatus { Active, Suspended, OnLeave, Terminated }

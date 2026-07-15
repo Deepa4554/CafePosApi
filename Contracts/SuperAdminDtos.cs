@@ -36,3 +36,13 @@ public record PlatformExpenseDto(int Id, decimal Amount, string SpentBy, string 
 public record CreatePlatformExpenseRequest(decimal Amount, string SpentBy, string Purpose, DateTime? SpentAt);
 
 public record PlatformExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth, List<PlatformExpenseDto> Recent);
+
+// ---------- API Failure Log ----------
+
+public record ApiFailureLogDto(
+    int Id, DateTime Timestamp, string Method, string Path, int StatusCode,
+    string ExceptionType, string Reason, int? TenantId, int? UserId, string? UserName)
+{
+    public static ApiFailureLogDto From(ApiFailureLog f) => new(
+        f.Id, f.Timestamp, f.Method, f.Path, f.StatusCode, f.ExceptionType, f.Reason, f.TenantId, f.UserId, f.UserName);
+}
