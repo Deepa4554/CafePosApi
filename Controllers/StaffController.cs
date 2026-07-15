@@ -9,9 +9,15 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CafePOS.Api.Controllers;
 
+/// <summary>
+/// Roster, app-login, and password-reset endpoints in here are deliberately NOT
+/// Plus-gated — giving a Waiter/Cashier a login and being able to reset it is basic
+/// day-1 operating necessity, not an upsell. Only the HR/analytics tooling further
+/// down (shifts, shift-optimization, leave requests, performance, payroll) carries
+/// its own explicit [Authorize(Policy = Policies.RequirePlus)] per endpoint.
+/// </summary>
 [ApiController]
 [Route("api/staff")]
-[Authorize(Policy = Policies.RequirePlus)]
 public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher, IImageStorageService imageStorage, IAuditService audit) : ControllerBase
 {
     [HttpGet]
@@ -198,6 +204,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// <summary>Every shift across every staff member on a given day — powers the Team
     /// Schedule day view. `{id:int}/shifts` below stays for a single staff member's
     /// history (Staff Profile screen); this one is tenant-wide for a specific date.</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
     [HttpGet("shifts")]
     public async Task<IEnumerable<ShiftWithStaffDto>> ListAllShifts([FromQuery] DateTime date)
     {
@@ -233,6 +240,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// days), so it's useful whether you're checking today's coverage or planning a
     /// future day's schedule against realistic demand.
     /// </summary>
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("shift-optimization")]
     public async Task<ShiftOptimizationDto> ShiftOptimization([FromQuery] DateTime? date)
@@ -297,6 +305,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return new ShiftOptimizationDto(finalWindows, suggestions);
     }
 
+    [Authorize(Policy = Policies.RequirePlus)]
     [HttpGet("{id:int}/shifts")]
     public async Task<IEnumerable<ShiftDto>> ListShifts(int id)
     {
@@ -304,6 +313,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return shifts.Select(ShiftDto.From);
     }
 
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("shifts")]
     public async Task<ActionResult<ShiftDto>> CreateShift(CreateShiftRequest req)
@@ -317,6 +327,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return ShiftDto.From(shift);
     }
 
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpDelete("shifts/{shiftId:int}")]
     public async Task<IActionResult> DeleteShift(int shiftId)
@@ -344,6 +355,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// <param name="periodStart">Omit both period params for all-time (unbounded). The
     /// Team Portal's date-range pills (Today/This Week/This Month) resolve to local IST
     /// boundaries client-side and pass them here as UTC instants.</param>
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("performance")]
     public async Task<IEnumerable<StaffPerformanceSummaryDto>> ListAllPerformance([FromQuery] DateTime? periodStart, [FromQuery] DateTime? periodEnd)
@@ -352,6 +364,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return (await ComputePerformanceAsync(staffList, periodStart, periodEnd)).OrderByDescending(x => x.TotalRevenue).ToList();
     }
 
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("{id:int}/performance")]
     public async Task<ActionResult<StaffPerformanceSummaryDto>> Performance(int id, [FromQuery] DateTime? periodStart, [FromQuery] DateTime? periodEnd)
@@ -410,6 +423,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         }).ToList();
     }
 
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet("payroll")]
     public async Task<IEnumerable<PayrollLineDto>> Payroll([FromQuery] DateTime periodStart, [FromQuery] DateTime periodEnd)
@@ -428,6 +442,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
     /// <summary>All leave requests, newest first — optionally filtered to one status
     /// (Pending/Approved/Rejected) for the "tabs" the Leave screen shows.</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
     [HttpGet("leave-requests")]
     public async Task<IEnumerable<LeaveRequestDto>> ListLeaveRequests([FromQuery] LeaveRequestStatus? status)
     {
@@ -440,6 +455,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// <summary>Any staff-portal user can request leave for themselves (or, if they're
     /// an Owner/Manager, on behalf of someone else) — approval is the gated step, not
     /// the request itself.</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
     [HttpPost("leave-requests")]
     public async Task<ActionResult<LeaveRequestDto>> CreateLeaveRequest(CreateLeaveRequest req)
     {
@@ -463,6 +479,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
     /// <summary>Approving immediately puts the staff member on leave (see LeaveRequest's
     /// doc comment for why this is manual rather than date-triggered).</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("leave-requests/{id:int}/approve")]
     public async Task<ActionResult<LeaveRequestDto>> ApproveLeaveRequest(int id)
@@ -484,6 +501,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return LeaveRequestDto.From(leave);
     }
 
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("leave-requests/{id:int}/reject")]
     public async Task<ActionResult<LeaveRequestDto>> RejectLeaveRequest(int id, ReviewLeaveRequest req)
@@ -505,6 +523,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
     /// <summary>Ends an approved leave early / marks the staff member back at work —
     /// the counterpart to Approve's OnLeave flip.</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("leave-requests/{id:int}/return-to-work")]
     public async Task<ActionResult<LeaveRequestDto>> ReturnToWork(int id)
