@@ -299,17 +299,19 @@ public class AuthController(
     }
 
     /// <summary>Revokes only the calling device's own session — every other device
-    /// this account is logged in on stays signed in. RefreshToken is optional only
-    /// so an already-cleared client (e.g. local storage wiped some other way) can
-    /// still call this without erroring; the server side has nothing to revoke then.</summary>
+    /// this account is logged in on stays signed in. The whole request body is
+    /// optional (not just RefreshToken inside it): an already-cleared client (local
+    /// storage wiped some other way) or an older app build that predates this
+    /// endpoint taking a body at all can both still call this with no body and no
+    /// 400 — there's just nothing to revoke server-side in that case.</summary>
     [Authorize]
     [HttpPost("logout")]
-    public async Task<IActionResult> Logout(LogoutRequest req)
+    public async Task<IActionResult> Logout([FromBody] LogoutRequest? req)
     {
         var user = await CurrentUserAsync();
-        if (!string.IsNullOrWhiteSpace(req.RefreshToken))
+        if (!string.IsNullOrWhiteSpace(req?.RefreshToken))
         {
-            var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == req.RefreshToken && t.UserId == user.Id);
+            var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == req!.RefreshToken && t.UserId == user.Id);
             if (entry is not null) entry.RevokedAt = DateTime.UtcNow;
         }
         await db.SaveChangesAsync();
