@@ -26,7 +26,8 @@ public class AuthController(
     IOptions<JwtOptions> jwtOptions,
     IPasswordHasher<AppUser> hasher,
     IAuditService audit,
-    IEmailService email) : ControllerBase
+    IEmailService email,
+    ILogger<AuthController> logger) : ControllerBase
 {
     /// <summary>
     /// Step 1 of cafe signup: emails a 6-digit code to prove the caller controls this
@@ -103,7 +104,15 @@ public class AuthController(
         db.EmailOtps.Add(new EmailOtp { Email = normalizedEmail, Code = code, ExpiresAt = DateTime.UtcNow.AddMinutes(10) });
         await db.SaveChangesAsync();
 
-        await email.SendOtpAsync(normalizedEmail, code);
+        // The OTP is already persisted, so the request doesn't need to wait on the
+        // email actually going out — awaiting it here held the whole HTTP response
+        // (and the mobile client) hostage whenever the SMTP connection was slow or
+        // silently blocked, since SmtpClient.Timeout doesn't reliably abort a hung
+        // TCP connect on Linux. IEmailService is a singleton, so it's safe to use
+        // after this request's scope ends.
+        _ = email.SendOtpAsync(normalizedEmail, code).ContinueWith(
+            t => logger.LogError(t.Exception, "Failed to send OTP email to {Email}", normalizedEmail),
+            TaskContinuationOptions.OnlyOnFaulted);
     }
 
     private async Task ConsumeOtpAsync(string normalizedEmail, string suppliedOtp)
