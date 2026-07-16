@@ -24,10 +24,6 @@ public interface IGeminiService
     /// <summary>Single-shot generation — one prompt in, one text response out. Used for
     /// non-conversational features (e.g. phrasing a data-driven suggestion in plain English).</summary>
     Task<string> GenerateAsync(string prompt, CancellationToken ct = default);
-
-    /// <summary>Single-shot generation with an image attached alongside the prompt — used for
-    /// reading a photo (e.g. extracting menu items from a photographed menu board).</summary>
-    Task<string> GenerateWithImageAsync(string prompt, string base64Data, string mimeType, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -57,10 +53,6 @@ public class GeminiService(HttpClient http, IOptions<GeminiOptions> options, ILo
 
     public Task<string> GenerateAsync(string prompt, CancellationToken ct = default) =>
         CallAsync(null, [new GeminiContent("user", [new GeminiPart(prompt)])], ct);
-
-    public Task<string> GenerateWithImageAsync(string prompt, string base64Data, string mimeType, CancellationToken ct = default) =>
-        CallAsync(null, [new GeminiContent("user",
-            [new GeminiPart(Text: prompt), new GeminiPart(InlineData: new GeminiInlineData(mimeType, base64Data))])], ct);
 
     private async Task<string> CallAsync(string? systemPrompt, List<GeminiContent> contents, CancellationToken ct)
     {
@@ -103,8 +95,7 @@ public class GeminiService(HttpClient http, IOptions<GeminiOptions> options, ILo
     // ---------- Gemini REST shapes (only the fields we actually use) ----------
     private record GeminiRequest(List<GeminiContent> Contents, [property: JsonPropertyName("systemInstruction")] GeminiContent? SystemInstruction);
     private record GeminiContent(string? Role, List<GeminiPart> Parts);
-    private record GeminiPart(string? Text = null, GeminiInlineData? InlineData = null);
-    private record GeminiInlineData(string MimeType, string Data);
+    private record GeminiPart(string Text);
     private record GeminiResponse(List<GeminiCandidate>? Candidates);
     private record GeminiCandidate(GeminiContent? Content);
 }
