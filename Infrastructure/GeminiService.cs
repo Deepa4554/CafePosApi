@@ -33,7 +33,7 @@ public interface IGeminiService
 /// <summary>
 /// Thin wrapper around the Gemini REST API (generativelanguage.googleapis.com). The API
 /// key lives only in server config (appsettings.Development.json, gitignored — see
-/// Email/GmailAppPassword for the same pattern) and is never sent to the client; the
+/// Resend/ApiKey for the same pattern) and is never sent to the client; the
 /// frontend only ever talks to our own /api/ai/* endpoints.
 /// </summary>
 public class GeminiService(HttpClient http, IOptions<GeminiOptions> options, ILogger<GeminiService> logger) : IGeminiService

@@ -99,10 +99,10 @@ builder.Services.AddSingleton<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>
 builder.Services.AddScoped<IAuditService, AuditService>();
 
 // ---------- Email (cafe-signup OTP) ----------
-// Sends via Gmail SMTP if Email:GmailAddress/GmailAppPassword are configured; otherwise
-// logs the code so local dev isn't blocked. See appsettings.Development.json.
-builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
-builder.Services.AddSingleton<IEmailService, SmtpEmailService>();
+// Sends via Resend's HTTP API if Resend:ApiKey is configured; otherwise logs the code
+// so local dev isn't blocked. See appsettings.Development.json.
+builder.Services.Configure<ResendOptions>(builder.Configuration.GetSection("Resend"));
+builder.Services.AddHttpClient<IEmailService, ResendEmailService>();
 
 // ---------- AI (Gemini) ----------
 builder.Services.Configure<GeminiOptions>(builder.Configuration.GetSection("Gemini"));
