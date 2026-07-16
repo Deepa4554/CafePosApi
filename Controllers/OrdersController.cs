@@ -151,10 +151,15 @@ public class OrdersController(
             throw new ApiValidationException("A valid 10-digit mobile number is required.");
 
         // An empty table code is the generic "menu only" QR (see
-        // TablesController.GetMenuOnlyQrToken) — not tied to a seat, so it comes in as
-        // a takeaway order instead of claiming a (nonexistent) table.
-        var hasTable = !string.IsNullOrEmpty(tableCode);
-        var order = await BuildOrderAsync(hasTable ? "DINE_IN" : "TAKEAWAY", hasTable ? tableCode : null, req.GuestName, req.Items, discountPct: 0, couponCode: null, explicitTenantId: tenantId, guestPhone: normalizedPhone);
+        // TablesController.GetMenuOnlyQrToken) — browsing only, by design: there's no
+        // seat for the kitchen to deliver to and no staff member watching that QR the
+        // way they would a table, so self-ordering from it is rejected outright rather
+        // than silently becoming an untracked takeaway order. CustomerOrderPage already
+        // hides the Add/cart UI entirely for this case; this is the server-side backstop.
+        if (string.IsNullOrEmpty(tableCode))
+            throw new ApiValidationException("This code is for browsing the menu only. Please order from your table's QR code.");
+
+        var order = await BuildOrderAsync("DINE_IN", tableCode, req.GuestName, req.Items, discountPct: 0, couponCode: null, explicitTenantId: tenantId, guestPhone: normalizedPhone);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 

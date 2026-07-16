@@ -59,6 +59,7 @@ public static class CustomerOrderPage
   .banner.show { display: block; }
   .banner.error { background: var(--danger-bg); color: var(--danger); }
   .banner.occupied { background: #F6ECC8; color: #8A6D1F; }
+  .banner.info { background: var(--input-tint); color: var(--heading); }
   .field-label { font-size: 12px; font-weight: 700; color: var(--muted); margin: 4px 0 6px; }
   .guest-card {
     background: var(--card);
@@ -221,9 +222,10 @@ public static class CustomerOrderPage
     </header>
 
     <div id="occupied-banner" class="banner occupied">This table already has an order in progress. You can still browse — ask a staff member if you'd like to add to the existing order.</div>
+    <div id="browse-banner" class="banner info">Browsing only from this code — ask a staff member to seat you at a table to place an order.</div>
     <div id="error-banner" class="banner error"></div>
 
-    <div class="guest-card">
+    <div id="guest-card" class="guest-card">
       <div class="field-label">Your name (optional)</div>
       <div class="guest-row">
         <input type="text" id="guest-name" placeholder="e.g. Priya" maxlength="60" />
@@ -259,7 +261,7 @@ public static class CustomerOrderPage
   var pathParts = location.pathname.split('/').filter(Boolean); // ['order', token]
   var token = decodeURIComponent(pathParts[1] || '');
   var apiBase = '/api/public/' + encodeURIComponent(token);
-  var state = { table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {} };
+  var state = { table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {}, browseOnly: false };
 
   function el(tag, cls, html) {
     var e = document.createElement(tag);
@@ -325,22 +327,27 @@ public static class CustomerOrderPage
         if (!item.available) info.appendChild(el('div', 'unavailable-tag', 'CURRENTLY UNAVAILABLE'));
         card.appendChild(info);
 
-        var stepper = el('div', 'stepper');
-        if (qty > 0) {
-          var minus = el('button', null, '−');
-          minus.onclick = function () { changeQty(item.id, -1); };
-          var qtyEl = el('span', 'qty', String(qty));
-          var plus = el('button', null, '+');
-          plus.onclick = function () { changeQty(item.id, 1); };
-          stepper.appendChild(minus);
-          stepper.appendChild(qtyEl);
-          stepper.appendChild(plus);
-        } else {
-          var add = el('button', 'add', 'Add');
-          add.onclick = function () { changeQty(item.id, 1); };
-          stepper.appendChild(add);
+        // Ordering is a table-only feature — the no-table "general menu" code (see
+        // TablesController.GetMenuOnlyQrToken) is for browsing prices/availability
+        // only, so it never gets an Add/quantity stepper at all.
+        if (!state.browseOnly) {
+          var stepper = el('div', 'stepper');
+          if (qty > 0) {
+            var minus = el('button', null, '−');
+            minus.onclick = function () { changeQty(item.id, -1); };
+            var qtyEl = el('span', 'qty', String(qty));
+            var plus = el('button', null, '+');
+            plus.onclick = function () { changeQty(item.id, 1); };
+            stepper.appendChild(minus);
+            stepper.appendChild(qtyEl);
+            stepper.appendChild(plus);
+          } else {
+            var add = el('button', 'add', 'Add');
+            add.onclick = function () { changeQty(item.id, 1); };
+            stepper.appendChild(add);
+          }
+          card.appendChild(stepper);
         }
-        card.appendChild(stepper);
         root.appendChild(card);
       });
     });
@@ -358,22 +365,24 @@ public static class CustomerOrderPage
       card.appendChild(el('div', 'item-name', item.name));
       card.appendChild(el('div', 'item-price', money(item.price)));
 
-      var stepper = el('div', 'stepper');
-      if (qty > 0) {
-        var minus = el('button', null, '−');
-        minus.onclick = function () { changeQty(item.id, -1); };
-        var qtyEl = el('span', 'qty', String(qty));
-        var plus = el('button', null, '+');
-        plus.onclick = function () { changeQty(item.id, 1); };
-        stepper.appendChild(minus);
-        stepper.appendChild(qtyEl);
-        stepper.appendChild(plus);
-      } else {
-        var add = el('button', 'add', 'Add');
-        add.onclick = function () { changeQty(item.id, 1); };
-        stepper.appendChild(add);
+      if (!state.browseOnly) {
+        var stepper = el('div', 'stepper');
+        if (qty > 0) {
+          var minus = el('button', null, '−');
+          minus.onclick = function () { changeQty(item.id, -1); };
+          var qtyEl = el('span', 'qty', String(qty));
+          var plus = el('button', null, '+');
+          plus.onclick = function () { changeQty(item.id, 1); };
+          stepper.appendChild(minus);
+          stepper.appendChild(qtyEl);
+          stepper.appendChild(plus);
+        } else {
+          var add = el('button', 'add', 'Add');
+          add.onclick = function () { changeQty(item.id, 1); };
+          stepper.appendChild(add);
+        }
+        card.appendChild(stepper);
       }
-      card.appendChild(stepper);
       strip.appendChild(card);
     });
   }
@@ -494,11 +503,16 @@ public static class CustomerOrderPage
       state.bestSellers = results[3];
 
       document.getElementById('business-name').textContent = results[2].businessName || 'CafePOS';
+      state.browseOnly = !state.table.code;
       document.getElementById('table-line').textContent = state.table.code
         ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
-        : 'Takeaway / counter order';
+        : 'Browsing the menu';
       if (state.table.occupied) {
         document.getElementById('occupied-banner').classList.add('show');
+      }
+      if (state.browseOnly) {
+        document.getElementById('browse-banner').classList.add('show');
+        document.getElementById('guest-card').style.display = 'none';
       }
 
       document.getElementById('loading').style.display = 'none';
