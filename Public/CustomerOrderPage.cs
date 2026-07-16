@@ -473,7 +473,7 @@ public static class CustomerOrderPage
       ' — Total: ' + money(order.total);
     var wa = el('button', 'whatsapp-btn', '📱 Share via WhatsApp');
     wa.onclick = function () {
-      window.open('https://wa.me/?text=' + encodeURIComponent(waText), '_blank');
+      location.href = 'https://wa.me/?text=' + encodeURIComponent(waText);
     };
     card.appendChild(wa);
 
