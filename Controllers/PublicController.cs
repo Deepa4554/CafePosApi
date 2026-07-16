@@ -54,6 +54,12 @@ public class PublicController(CafePosDbContext db, QrTokenService qrTokens, Rece
         if (decoded is null) return NotFound();
         var (tenantId, tableCode) = decoded.Value;
 
+        // Empty table code == the generic "menu only, no table" token (see
+        // TablesController.GetMenuOnlyQrToken) — CustomerOrderPage renders this as a
+        // takeaway/counter order instead of showing a table number.
+        if (string.IsNullOrEmpty(tableCode))
+            return new { Code = (string?)null, Zone = (string?)null, Seats = (int?)null, Occupied = false };
+
         var table = await db.Tables.IgnoreQueryFilters()
             .FirstOrDefaultAsync(t => t.TenantId == tenantId && t.Code == tableCode);
         if (table is null) return NotFound();

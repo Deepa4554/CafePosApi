@@ -122,25 +122,34 @@ public static class CustomerOrderPage
   .item-card {
     background: var(--card);
     border-radius: 14px;
-    padding: 12px 14px;
+    padding: 10px;
     margin-bottom: 10px;
     display: flex;
     align-items: center;
     gap: 12px;
   }
+  .item-thumb {
+    width: 56px; height: 56px; border-radius: 10px; flex: 0 0 56px;
+    object-fit: cover; background: var(--input-tint);
+  }
+  .item-thumb.placeholder {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+  }
   .item-info { flex: 1; min-width: 0; }
   .item-name { font-weight: 700; font-size: 14px; }
   .item-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .item-price { color: var(--accent); font-weight: 700; font-size: 13px; margin-top: 4px; }
-  .stepper { display: flex; align-items: center; gap: 10px; }
+  .item-price { color: var(--heading); font-weight: 700; font-size: 13px; margin-top: 2px; }
+  .stepper { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
   .stepper button {
     width: 30px; height: 30px; border-radius: 15px; border: none;
     background: var(--input-tint); color: var(--heading);
     font-size: 18px; font-weight: 700; cursor: pointer;
   }
   .stepper button.add {
-    background: var(--button); color: #fff; width: auto; padding: 0 16px;
-    border-radius: 16px; font-size: 13px;
+    background: var(--card); color: var(--accent); width: auto; padding: 8px 14px;
+    border-radius: 10px; font-size: 12px; font-weight: 800; letter-spacing: 0.2px;
+    border: 1.5px solid var(--accent);
   }
   .stepper .qty { min-width: 16px; text-align: center; font-weight: 700; }
   .unavailable { opacity: 0.5; }
@@ -184,7 +193,23 @@ public static class CustomerOrderPage
     color: var(--heading); padding: 12px 20px; border-radius: 12px;
     font-weight: 700; font-size: 13px; cursor: pointer;
   }
+  .whatsapp-btn {
+    margin-top: 12px; width: 100%; background: #25D366; color: #fff; border: none;
+    padding: 13px 20px; border-radius: 12px; font-weight: 700; font-size: 13px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
   #app { display: none; }
+  .processing-overlay {
+    position: fixed; inset: 0; background: rgba(43, 24, 16, 0.45);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+  }
+  .processing-overlay.show { display: flex; }
+  .spinner {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 4px solid rgba(255,255,255,0.35); border-top-color: #fff;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -203,6 +228,10 @@ public static class CustomerOrderPage
       <div class="guest-row">
         <input type="text" id="guest-name" placeholder="e.g. Priya" maxlength="60" />
       </div>
+      <div class="field-label" style="margin-top:12px">Mobile number *</div>
+      <div class="guest-row">
+        <input type="tel" id="guest-phone" placeholder="e.g. 9876543210" maxlength="10" inputmode="numeric" />
+      </div>
     </div>
 
     <div id="bestsellers-section" style="display:none">
@@ -214,6 +243,8 @@ public static class CustomerOrderPage
   </div>
 
   <div id="confirm-root"></div>
+
+  <div id="processing-overlay" class="processing-overlay"><div class="spinner"></div></div>
 
   <div id="cart-bar" class="cart-bar" style="display:none">
     <div class="cart-summary">
@@ -276,6 +307,16 @@ public static class CustomerOrderPage
       state.menu.filter(function (m) { return m.category === cat; }).forEach(function (item) {
         var qty = state.cart[item.id] || 0;
         var card = el('div', 'item-card' + (item.available ? '' : ' unavailable'));
+
+        if (item.image) {
+          var img = document.createElement('img');
+          img.className = 'item-thumb';
+          img.src = item.image;
+          img.alt = item.name;
+          card.appendChild(img);
+        } else {
+          card.appendChild(el('div', 'item-thumb placeholder', '🍽️'));
+        }
 
         var info = el('div', 'item-info');
         info.appendChild(el('div', 'item-name', item.name));
@@ -369,20 +410,36 @@ public static class CustomerOrderPage
     var lines = cartLines();
     if (lines.length === 0) return;
     clearError();
+
+    var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
+    if (phoneDigits.length !== 10) {
+      showError('Enter a valid 10-digit mobile number to place your order.');
+      document.getElementById('guest-phone').focus();
+      return;
+    }
+
     var btn = document.getElementById('place-btn');
     btn.disabled = true;
     btn.textContent = 'Sending…';
+    // Blocks every tap on the menu/cart behind it (fixed, full-viewport, sits above
+    // everything) so items can't be added/removed while the order is in flight —
+    // otherwise a second tap mid-request could submit a cart that no longer matches
+    // what's on screen.
+    document.getElementById('processing-overlay').classList.add('show');
 
     fetchJson('/api/orders/public/' + encodeURIComponent(token), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         guestName: document.getElementById('guest-name').value || null,
+        guestPhone: phoneDigits,
         items: lines.map(function (l) { return { menuItemId: l.item.id, qty: l.qty }; }),
       }),
     }).then(function (order) {
+      document.getElementById('processing-overlay').classList.remove('show');
       showConfirmation(order);
     }).catch(function (err) {
+      document.getElementById('processing-overlay').classList.remove('show');
       showError(err.message);
       btn.disabled = false;
       btn.textContent = 'Place Order';
@@ -401,6 +458,16 @@ public static class CustomerOrderPage
     card.appendChild(el('div', 'order-no', 'Order ' + order.number + ' · ' + order.title));
     card.appendChild(el('div', 'order-total', money(order.total)));
     card.appendChild(el('p', null, "We'll bring it right out. Thank you!"));
+
+    var waText = 'Order ' + order.number + ' at ' +
+      (document.getElementById('business-name').textContent || 'the cafe') +
+      ' — Total: ' + money(order.total);
+    var wa = el('button', 'whatsapp-btn', '📱 Share via WhatsApp');
+    wa.onclick = function () {
+      window.open('https://wa.me/?text=' + encodeURIComponent(waText), '_blank');
+    };
+    card.appendChild(wa);
+
     var again = el('button', 'again-btn', 'Place another order');
     again.onclick = function () { location.reload(); };
     card.appendChild(again);
@@ -427,8 +494,9 @@ public static class CustomerOrderPage
       state.bestSellers = results[3];
 
       document.getElementById('business-name').textContent = results[2].businessName || 'CafePOS';
-      document.getElementById('table-line').textContent =
-        'Table ' + state.table.code + ' · ' + state.table.seats + ' seats';
+      document.getElementById('table-line').textContent = state.table.code
+        ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
+        : 'Takeaway / counter order';
       if (state.table.occupied) {
         document.getElementById('occupied-banner').classList.add('show');
       }

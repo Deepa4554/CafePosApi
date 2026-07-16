@@ -143,7 +143,18 @@ public class OrdersController(
             throw new ApiValidationException("This ordering link is invalid. Please re-scan the QR code.");
         var (tenantId, tableCode) = decoded.Value;
 
-        var order = await BuildOrderAsync("DINE_IN", tableCode, req.GuestName, req.Items, discountPct: 0, couponCode: null, explicitTenantId: tenantId);
+        // Same mandatory-phone rule as the staff POS path (see Create above) — matches
+        // orders to a Customer by phone, and now required here too so QR self-orders
+        // aren't the one path that skips CRM matching entirely.
+        var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
+        if (normalizedPhone is null || normalizedPhone.Length != 10)
+            throw new ApiValidationException("A valid 10-digit mobile number is required.");
+
+        // An empty table code is the generic "menu only" QR (see
+        // TablesController.GetMenuOnlyQrToken) — not tied to a seat, so it comes in as
+        // a takeaway order instead of claiming a (nonexistent) table.
+        var hasTable = !string.IsNullOrEmpty(tableCode);
+        var order = await BuildOrderAsync(hasTable ? "DINE_IN" : "TAKEAWAY", hasTable ? tableCode : null, req.GuestName, req.Items, discountPct: 0, couponCode: null, explicitTenantId: tenantId, guestPhone: normalizedPhone);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 

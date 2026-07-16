@@ -38,7 +38,7 @@ public record RushForecastDto(
 /// discounts/coupons. No TableCode here on purpose: the table comes from the
 /// encrypted QrToken in the route, never from client-supplied input (a public/
 /// anonymous caller could otherwise claim any table it likes).</summary>
-public record CreatePublicOrderRequest(string? GuestName, List<CreateOrderItemDto> Items);
+public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, List<CreateOrderItemDto> Items);
 
 public record OrderItemDto(string Name, int Qty, decimal Price, string? Modifier);
 
