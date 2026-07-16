@@ -194,11 +194,6 @@ public static class CustomerOrderPage
     color: var(--heading); padding: 12px 20px; border-radius: 12px;
     font-weight: 700; font-size: 13px; cursor: pointer;
   }
-  .whatsapp-btn {
-    margin-top: 12px; width: 100%; background: #25D366; color: #fff; border: none;
-    padding: 13px 20px; border-radius: 12px; font-weight: 700; font-size: 13px;
-    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
-  }
   #app { display: none; }
   .processing-overlay {
     position: fixed; inset: 0; background: rgba(43, 24, 16, 0.45);
@@ -467,15 +462,6 @@ public static class CustomerOrderPage
     card.appendChild(el('div', 'order-no', 'Order ' + order.number + ' · ' + order.title));
     card.appendChild(el('div', 'order-total', money(order.total)));
     card.appendChild(el('p', null, "We'll bring it right out. Thank you!"));
-
-    var waText = 'Order ' + order.number + ' at ' +
-      (document.getElementById('business-name').textContent || 'the cafe') +
-      ' — Total: ' + money(order.total);
-    var wa = el('button', 'whatsapp-btn', '📱 Share via WhatsApp');
-    wa.onclick = function () {
-      location.href = 'https://wa.me/?text=' + encodeURIComponent(waText);
-    };
-    card.appendChild(wa);
 
     var again = el('button', 'again-btn', 'Place another order');
     again.onclick = function () { location.reload(); };
