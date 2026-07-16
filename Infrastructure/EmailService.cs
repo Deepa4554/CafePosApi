@@ -1,19 +1,19 @@
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
+using System.Net;
+using System.Net.Mail;
 using Microsoft.Extensions.Options;
 
 namespace CafePOS.Api.Infrastructure;
 
-public class ResendOptions
+public class EmailOptions
 {
-    /// <summary>API key from resend.com (Dashboard → API Keys). Free tier covers OTP volume.</summary>
-    public string ApiKey { get; set; } = "";
+    /// <summary>The Gmail address emails are sent from, e.g. "yourcafe@gmail.com".</summary>
+    public string GmailAddress { get; set; } = "";
     /// <summary>
-    /// Sender address. Until a custom domain is verified in Resend, this must stay
-    /// "onboarding@resend.dev" — Resend's shared test sender, which works for any
-    /// recipient with no domain setup required.
+    /// A Gmail "App Password" (16 characters, generated under Google Account →
+    /// Security → 2-Step Verification → App passwords) — NOT your normal Gmail
+    /// password. Gmail requires 2-Step Verification to be on before it'll offer this.
     /// </summary>
-    public string FromEmail { get; set; } = "onboarding@resend.dev";
+    public string GmailAppPassword { get; set; } = "";
 }
 
 /// <summary>What the OTP is for — the two flows share the same code/expiry mechanics
@@ -31,21 +31,25 @@ public interface IEmailService
 }
 
 /// <summary>
-/// Sends mail via Resend's HTTP API (api.resend.com) instead of raw SMTP — cloud hosts
-/// like Render frequently block or silently stall outbound SMTP ports, which left the
-/// old Gmail-SMTP implementation hanging or failing unpredictably. A plain HTTPS POST
-/// has none of that risk. If unconfigured, falls back to logging the code so local
-/// development never gets blocked on email setup.
+/// Sends mail via Gmail's SMTP relay (smtp.gmail.com:587) — free, no third-party
+/// account needed beyond the Gmail address itself. If unconfigured, falls back to
+/// logging the code so local development never gets blocked on email setup.
+///
+/// Note: the caller (AuthController.IssueOtpAsync) fires this without awaiting it —
+/// SmtpClient.Timeout doesn't reliably abort a hung TCP connect on Linux, so if Gmail's
+/// SMTP is slow/blocked from the host, this call can still hang well past the 8s below;
+/// the fire-and-forget wrapper is what actually keeps the HTTP response (and the mobile
+/// client) from hanging along with it, regardless of whether this timeout kicks in.
 /// </summary>
-public class ResendEmailService(HttpClient http, IOptions<ResendOptions> options, ILogger<ResendEmailService> logger) : IEmailService
+public class SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailService> logger) : IEmailService
 {
-    private readonly ResendOptions _options = options.Value;
+    private readonly EmailOptions _options = options.Value;
 
     public async Task SendOtpAsync(string toEmail, string code, OtpPurpose purpose)
     {
-        if (string.IsNullOrWhiteSpace(_options.ApiKey))
+        if (string.IsNullOrWhiteSpace(_options.GmailAddress) || string.IsNullOrWhiteSpace(_options.GmailAppPassword))
         {
-            logger.LogWarning("Resend:ApiKey not configured — OTP for {Email} is {Code}", toEmail, code);
+            logger.LogWarning("Email:GmailAddress/GmailAppPassword not configured — OTP for {Email} is {Code}", toEmail, code);
             return;
         }
 
@@ -53,38 +57,31 @@ public class ResendEmailService(HttpClient http, IOptions<ResendOptions> options
             ? "We received a request to reset the password on your PrabandhOS account."
             : "This is to inform you that you have registered successfully with PrabandhOS.";
 
-        var body = $"Hi there,\n\n" +
+        using var client = new SmtpClient("smtp.gmail.com", 587)
+        {
+            Credentials = new NetworkCredential(_options.GmailAddress, _options.GmailAppPassword),
+            EnableSsl = true,
+            Timeout = 8000,
+        };
+        using var message = new MailMessage(_options.GmailAddress, toEmail)
+        {
+            Subject = purpose == OtpPurpose.PasswordReset ? "Reset your password" : "Verify your email",
+            Body = $"Hi there,\n\n" +
                    $"{intro}\n\n" +
                    $"Here is your OTP to verify your email:-\n\n" +
                    $"{code}\n\n" +
                    $"This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n" +
                    $"Regards,\n" +
-                   $"PrabandhOS Team";
-
-        var request = new HttpRequestMessage(HttpMethod.Post, "https://api.resend.com/emails")
-        {
-            Content = JsonContent.Create(new
-            {
-                from = _options.FromEmail,
-                to = new[] { toEmail },
-                subject = purpose == OtpPurpose.PasswordReset ? "Reset your password" : "Verify your email",
-                text = body,
-            }),
+                   $"PrabandhOS Team",
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.ApiKey);
 
         try
         {
-            var response = await http.SendAsync(request);
-            if (!response.IsSuccessStatusCode)
-            {
-                var responseBody = await response.Content.ReadAsStringAsync();
-                logger.LogError("Resend API returned {Status} sending OTP to {Email}: {Body}", response.StatusCode, toEmail, responseBody);
-            }
+            await client.SendMailAsync(message);
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex)
         {
-            logger.LogError(ex, "Resend request failed (network) sending OTP to {Email}", toEmail);
+            logger.LogError(ex, "SMTP send failed for OTP to {Email}", toEmail);
         }
     }
 }
