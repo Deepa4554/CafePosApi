@@ -42,11 +42,21 @@ public class SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailS
         {
             Credentials = new NetworkCredential(_options.GmailAddress, _options.GmailAppPassword),
             EnableSsl = true,
+            // Default is 100s, which leaves the whole HTTP request (and the mobile
+            // client) hanging with no error if outbound SMTP is blocked or slow —
+            // fail fast instead so the caller gets a clear error to retry.
+            Timeout = 8000,
         };
         using var message = new MailMessage(_options.GmailAddress, toEmail)
         {
-            Subject = "Your CafePOS verification code",
-            Body = $"Your verification code is {code}.\n\nIt expires in 10 minutes. If you didn't request this, ignore this email.",
+            Subject = "Verify your email",
+            Body = $"Hi there,\n\n" +
+                   $"This is to inform you that you have registered successfully with PrabandhOS.\n\n" +
+                   $"Here is your OTP to verify your email:-\n\n" +
+                   $"{code}\n\n" +
+                   $"This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n" +
+                   $"Regards,\n" +
+                   $"PrabandhOS Team",
         };
         await client.SendMailAsync(message);
     }
