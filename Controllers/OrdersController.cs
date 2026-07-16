@@ -19,7 +19,18 @@ public class OrdersController(
         [OrderStatus.New, OrderStatus.Preparing, OrderStatus.Ready, OrderStatus.Served];
 
     [HttpGet]
-    public async Task<PagedResult<OrderDto>> List([FromQuery] bool activeOnly = false, [FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] int? branchId = null)
+    public async Task<PagedResult<OrderDto>> List(
+        [FromQuery] bool activeOnly = false,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] int? branchId = null,
+        // Calendar-day range (yyyy-MM-dd), inclusive on both ends — same "from"/"to"
+        // shape as DashboardController.Analytics, for the same reason: a caller that
+        // needs "everything today" (e.g. the Billing screen's revenue/transaction
+        // count) must not silently lose orders past the default pageSize once a busy
+        // day pushes the count past it.
+        [FromQuery] DateOnly? from = null,
+        [FromQuery] DateOnly? to = null)
     {
         var query = db.Orders.Include(o => o.Items).AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
@@ -32,6 +43,8 @@ public class OrdersController(
         // branch's orders; pre-branch-scoping orders (BranchId null) intentionally drop
         // out of a branch-filtered view since they can't be attributed to one.
         if (branchId is int bid) query = query.Where(o => o.BranchId == bid);
+        if (from is not null) query = query.Where(o => o.CreatedAt >= from.Value.ToDateTime(TimeOnly.MinValue));
+        if (to is not null) query = query.Where(o => o.CreatedAt < to.Value.ToDateTime(TimeOnly.MinValue).AddDays(1));
 
         var paged = await query.OrderByDescending(o => o.CreatedAt).ToPagedResultAsync(page, pageSize);
         return new PagedResult<OrderDto>(paged.Items.Select(OrderDto.From).ToList(), paged.Page, paged.PageSize, paged.TotalCount);
