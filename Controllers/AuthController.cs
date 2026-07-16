@@ -45,7 +45,7 @@ public class AuthController(
         if (await db.Users.AnyAsync(u => u.Email == normalizedEmail))
             throw new ApiConflictException("An account with this email already exists.");
 
-        await IssueOtpAsync(normalizedEmail);
+        await IssueOtpAsync(normalizedEmail, OtpPurpose.Signup);
         return NoContent();
     }
 
@@ -63,7 +63,7 @@ public class AuthController(
 
         var normalizedEmail = req.Email.Trim().ToLowerInvariant();
         if (await db.Users.AnyAsync(u => u.Email == normalizedEmail))
-            await IssueOtpAsync(normalizedEmail);
+            await IssueOtpAsync(normalizedEmail, OtpPurpose.PasswordReset);
 
         return NoContent();
     }
@@ -95,7 +95,7 @@ public class AuthController(
         return NoContent();
     }
 
-    private async Task IssueOtpAsync(string normalizedEmail)
+    private async Task IssueOtpAsync(string normalizedEmail, OtpPurpose purpose)
     {
         var stale = db.EmailOtps.Where(o => o.Email == normalizedEmail && !o.Used);
         db.EmailOtps.RemoveRange(stale);
@@ -110,7 +110,7 @@ public class AuthController(
         // silently blocked, since SmtpClient.Timeout doesn't reliably abort a hung
         // TCP connect on Linux. IEmailService is a singleton, so it's safe to use
         // after this request's scope ends.
-        _ = email.SendOtpAsync(normalizedEmail, code).ContinueWith(
+        _ = email.SendOtpAsync(normalizedEmail, code, purpose).ContinueWith(
             t => logger.LogError(t.Exception, "Failed to send OTP email to {Email}", normalizedEmail),
             TaskContinuationOptions.OnlyOnFaulted);
     }
