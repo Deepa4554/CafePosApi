@@ -494,16 +494,19 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
-    /// <summary>Adds one item to an existing, not-yet-served order (new item starts unfired,
-    /// FireBatch 0, so it only reaches the kitchen on the next Fire). Recomputes totals and
-    /// deducts inventory for just the new line.</summary>
+    /// <summary>Adds one item to an existing, not-yet-paid order (new item starts unfired,
+    /// FireBatch 0, so it only reaches the kitchen on the next Fire). Allowed even after the
+    /// order has been Served — e.g. the table asks for one more item at the billing stage —
+    /// in which case the order is pulled back into the kitchen queue (Status reverts to New)
+    /// so it flows through Preparing/Ready/Served again before returning to billing; the bill
+    /// itself still totals every item together regardless of which fire round it came from.
+    /// Recomputes totals and deducts inventory for just the new line.</summary>
     [HttpPost("{id:int}/items")]
     public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
     {
         var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
-        if (order.Status == OrderStatus.Served) throw new ApiConflictException("Cannot add items to a served order.");
         if (req.Qty <= 0) throw new ApiValidationException("Quantity must be a positive number.");
 
         var menuItem = await db.MenuItems.FirstOrDefaultAsync(m => m.Id == req.MenuItemId);
@@ -523,6 +526,7 @@ public class OrdersController(
         order.Items.Add(newItem);
         order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
         RecomputeTotals(order, await GetTaxRatePctAsync());
+        if (order.Status == OrderStatus.Served) order.Status = OrderStatus.New;
 
         await ConsumeInventoryAsync(new Dictionary<int, MenuItem> { [menuItem.Id] = menuItem }, [newItem], order.Id);
         await db.SaveChangesAsync();
