@@ -30,7 +30,11 @@ public class OrdersController(
         // count) must not silently lose orders past the default pageSize once a busy
         // day pushes the count past it.
         [FromQuery] DateOnly? from = null,
-        [FromQuery] DateOnly? to = null)
+        [FromQuery] DateOnly? to = null,
+        // KDS-only: exclude "Open" orders that exist but have never been fired (all items
+        // FireBatch == 0). Additive, so `activeOnly`'s meaning is unchanged — the Tables
+        // screen still counts unfired Open orders as active/occupied.
+        [FromQuery] bool kdsReady = false)
     {
         var query = db.Orders.Include(o => o.Items).AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
@@ -38,6 +42,7 @@ public class OrdersController(
         // BOTH paid AND served. Paying early must not make it vanish from the
         // kitchen's ticket list while the food still hasn't gone out.
         if (activeOnly) query = query.Where(o => !o.Paid || o.Status != OrderStatus.Served);
+        if (kdsReady) query = query.Where(o => o.Items.Any(i => i.FireBatch > 0));
         // No branch selected -> see everything (single-location cafes, and cafes that
         // haven't set up branches yet, are unaffected). A branch selected -> only that
         // branch's orders; pre-branch-scoping orders (BranchId null) intentionally drop
@@ -133,7 +138,11 @@ public class OrdersController(
         if (normalizedPhone is null || normalizedPhone.Length != 10)
             throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
 
-        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, req.CouponCode, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId, giftCardCode: req.GiftCardCode);
+        // Creates the order in the "Open" state (persisted, table occupied) WITHOUT firing
+        // it to the kitchen — the POS calls POST /orders/{id}/fire as an explicit second
+        // step (or "Hold Order" skips firing). This is what separates ordering from kitchen
+        // dispatch: an order can exist and be edited before any item is sent to the line.
+        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -172,7 +181,14 @@ public class OrdersController(
         if (string.IsNullOrEmpty(tableCode))
             throw new ApiValidationException("This code is for browsing the menu only. Please order from your table's QR code.");
 
-        var order = await BuildOrderAsync("DINE_IN", tableCode, req.GuestName, req.Items, discountPct: 0, couponCode: null, explicitTenantId: tenantId, guestPhone: normalizedPhone);
+        var order = await BuildOrderAsync("DINE_IN", tableCode, req.GuestName, req.Items, discountPct: 0, explicitTenantId: tenantId, guestPhone: normalizedPhone);
+
+        // A QR-self-ordering guest has no POS to come back and "fire" from — so unlike the
+        // staff path (which fires as an explicit second step), a public order auto-fires
+        // immediately on creation, keeping it a single atomic create-and-send action.
+        FireUnfiredItems(order, tenantId);
+        await db.SaveChangesAsync();
+
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -191,8 +207,8 @@ public class OrdersController(
     /// </summary>
     private async Task<Order> BuildOrderAsync(
         string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
-        decimal discountPct, string? couponCode, int? explicitTenantId = null, int? branchId = null, string? guestPhone = null,
-        int? servedByStaffId = null, string? giftCardCode = null)
+        decimal discountPct, int? explicitTenantId = null, int? branchId = null, string? guestPhone = null,
+        int? servedByStaffId = null)
     {
         if (items.Count == 0)
             throw new ApiValidationException("Order must contain at least one item.");
@@ -253,43 +269,9 @@ public class OrdersController(
             async () => (await TenantScoped(db.Settings, explicitTenantId).FirstAsync()).TaxRatePct);
         var subtotal = orderItems.Sum(i => i.Price * i.Qty);
         var clampedDiscountPct = Math.Clamp(discountPct, 0, 100);
+        // Order-time discount is the manual % only now. Coupons and gift cards moved to the
+        // billing stage (bill-coupon / bill-giftcard on a Served order) — see plan.
         var discountAmount = Math.Round(subtotal * clampedDiscountPct / 100, 2);
-
-        Coupon? coupon = null;
-        if (!string.IsNullOrWhiteSpace(couponCode))
-        {
-            coupon = await TenantScoped(db.Coupons, explicitTenantId).FirstOrDefaultAsync(c => c.Code == couponCode.ToUpperInvariant());
-            if (coupon is null) throw new ApiValidationException("Coupon code is invalid or expired.");
-            if (coupon.IsUsed) throw new ApiConflictException("Coupon has already been used.");
-            if (coupon.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Coupon has expired.");
-            if (subtotal < coupon.MinOrderValue) throw new ApiValidationException($"Minimum order value for this coupon is {coupon.MinOrderValue:C}.");
-
-            var couponDiscount = coupon.Type switch
-            {
-                CouponType.Percent => Math.Round(subtotal * coupon.Value / 100, 2),
-                CouponType.Flat => coupon.Value,
-                _ => 0,
-            };
-            discountAmount += couponDiscount;
-        }
-
-        GiftCard? giftCard = null;
-        decimal giftCardRedeemAmount = 0;
-        if (!string.IsNullOrWhiteSpace(giftCardCode))
-        {
-            giftCard = await TenantScoped(db.GiftCards, explicitTenantId).FirstOrDefaultAsync(g => g.Code == giftCardCode.ToUpperInvariant());
-            if (giftCard is null) throw new ApiValidationException("Gift card code not found.");
-            if (giftCard.Status != GiftCardStatus.Active) throw new ApiConflictException("Gift card is not active.");
-            if (giftCard.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Gift card has expired.");
-
-            // Only redeem as much as this order can actually absorb — never debit the
-            // card for more than what benefited the customer on this bill.
-            giftCardRedeemAmount = Math.Min(giftCard.Balance, Math.Max(0, subtotal - discountAmount));
-            discountAmount += giftCardRedeemAmount;
-        }
-
-        var taxable = Math.Max(0, subtotal - discountAmount);
-        var tax = Math.Round(taxable * taxRatePct / 100, 2);
 
         // Anonymous QR self-orders (explicitTenantId set) have no JWT/logged-in staff
         // member at all — CreatedByUserId stays null for those, same as a guest
@@ -343,15 +325,13 @@ public class OrdersController(
             Subtotal = subtotal,
             DiscountPct = clampedDiscountPct,
             DiscountAmount = discountAmount,
-            Tax = tax,
-            Total = taxable + tax,
             CreatedByUserId = createdByUserId,
             CreatedByName = createdByName,
             ServedByStaffId = servedBy?.Id,
             ServedByName = servedBy?.Name,
-            GiftCardCode = giftCard?.Code,
-            GiftCardAmountApplied = giftCardRedeemAmount,
         };
+        // Tax/Total from the single shared formula (Subtotal minus all discount components).
+        RecomputeTotals(order, taxRatePct);
         // Anonymous QR orders have no JWT, so the DbContext's auto-stamp (which reads
         // the ambient tenant from the token) would default to tenant 1 — set it
         // explicitly from the resolved slug instead.
@@ -367,13 +347,6 @@ public class OrdersController(
         RecordVisit(customer, order.Total);
         TrackFavorites(customer, orderItems, explicitTenantId);
 
-        if (coupon is not null) coupon.IsUsed = true;
-        if (giftCard is not null && giftCardRedeemAmount > 0)
-        {
-            giftCard.Balance -= giftCardRedeemAmount;
-            if (giftCard.Balance <= 0) giftCard.Status = GiftCardStatus.Used;
-        }
-
         // Explicit transaction (relational providers only — InMemory, used when no
         // Postgres connection string is configured, doesn't support transactions) so
         // that if inventory deduction fails after the order row is written, the whole
@@ -383,22 +356,23 @@ public class OrdersController(
         {
             // Order needs its real, Postgres-assigned Id before inventory transactions
             // (and the discount audit entry below) can reference it, so this happens
-            // as its own save inside the transaction.
-            await db.SaveChangesAsync();
-            NotifyOrderPlaced(order, explicitTenantId);
+            // as its own save inside the transaction. NOTE: no kitchen notification here
+            // anymore — the order is created "Open" and only reaches the kitchen when
+            // POST /orders/{id}/fire runs (see Fire), keeping ordering and dispatch separate.
 
             // Added to the same tracked context rather than via IAuditService.LogAsync
             // (which does its own immediate SaveChangesAsync) — riding along in the
             // save below instead of costing a third round trip to the remote Postgres
-            // instance on every discounted/coupon order.
-            if (clampedDiscountPct > 0 || coupon is not null)
+            // instance on every discounted order.
+            await db.SaveChangesAsync();
+            if (clampedDiscountPct > 0)
             {
                 var discountEntry = new AuditLogEntry
                 {
                     Action = AuditAction.Discount,
                     Resource = AuditResource.Order,
                     ResourceId = order.Id.ToString(),
-                    Details = $"Order {order.Id} applied {(coupon is not null ? $"coupon {coupon.Code}" : $"{clampedDiscountPct}% discount")} (−{discountAmount:C}).",
+                    Details = $"Order {order.Id} applied {clampedDiscountPct}% discount (−{discountAmount:C}).",
                     Severity = AuditSeverity.Medium,
                 };
                 if (explicitTenantId is int auditTid) discountEntry.TenantId = auditTid;
@@ -469,40 +443,236 @@ public class OrdersController(
         });
     }
 
-    /// <summary>Fires the moment a new order is placed (fired to the kitchen) — this is
-    /// the ONLY notification category Chef/KitchenStaff logins see (see
-    /// NotificationsController.List's role filter); everyone else sees this alongside
-    /// every other category exactly as before.</summary>
-    private void NotifyOrderPlaced(Order order, int? explicitTenantId)
+    /// <summary>Assigns the next fire-batch number to every not-yet-fired item and notifies
+    /// the kitchen about JUST those items (never the whole order again on a re-fire). Returns
+    /// false if there was nothing new to fire. Does NOT save or touch Order.Status — the
+    /// caller saves, and status stays driven purely by Advance/SetStatus.</summary>
+    private bool FireUnfiredItems(Order order, int? explicitTenantId)
     {
+        var unfired = order.Items.Where(i => i.FireBatch == 0).ToList();
+        if (unfired.Count == 0) return false;
+
+        order.CurrentFireBatch += 1;
+        foreach (var item in unfired) item.FireBatch = order.CurrentFireBatch;
+
+        // OrderPlaced is the ONLY category Chef/KitchenStaff logins see (see
+        // NotificationsController.List's role filter). Wording branches so the kitchen can
+        // tell a fresh order from extra items appended to one already on the line.
+        var isFirstFire = order.CurrentFireBatch == 1;
+        var count = unfired.Count;
         var notification = new AppNotification
         {
-            Title = "New order placed",
-            Body = $"{order.Title} — {order.Items.Count} item{(order.Items.Count == 1 ? "" : "s")}, ₹{order.Total:0.00}.",
+            Title = isFirstFire ? "New order placed" : "New items added to order",
+            Body = isFirstFire
+                ? $"{order.Title} — {count} item{(count == 1 ? "" : "s")}, ₹{order.Total:0.00}."
+                : $"{order.Title} — {count} new item{(count == 1 ? "" : "s")} fired.",
             Category = NotificationCategory.OrderPlaced,
             Channel = NotificationChannel.InApp,
             ActionUrl = $"/orders/{order.Id}",
         };
         // Anonymous QR orders have no JWT to auto-stamp the tenant from — same reason
-        // order.TenantId is set explicitly a few lines up in BuildOrderAsync.
+        // order.TenantId is set explicitly in BuildOrderAsync.
         if (explicitTenantId is int tid) notification.TenantId = tid;
         db.Notifications.Add(notification);
+        return true;
     }
 
-    /// <summary>
-    /// Marks the bill paid. Does NOT force the order to Served — a table only frees up
-    /// once it's BOTH paid AND served (see TablesController/PublicController's occupancy
-    /// check). Paying before the kitchen has actually served the food shouldn't free the
-    /// table; the guest is still sitting there.
-    /// </summary>
-    [HttpPatch("{id:int}/pay")]
-    public async Task<ActionResult<OrderDto>> Pay(int id)
+    /// <summary>Fires all not-yet-fired items on an existing order to the kitchen. The
+    /// separate "dispatch" step that the staff POS calls right after Create (or later, for a
+    /// held order) — distinct from ordering so items can be added/edited before hitting the
+    /// line. Does not change Order.Status.</summary>
+    [HttpPost("{id:int}/fire")]
+    public async Task<ActionResult<OrderDto>> Fire(int id)
     {
         var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        if (!FireUnfiredItems(order, explicitTenantId: null))
+            throw new ApiValidationException("No new items to fire.");
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Adds one item to an existing, not-yet-served order (new item starts unfired,
+    /// FireBatch 0, so it only reaches the kitchen on the next Fire). Recomputes totals and
+    /// deducts inventory for just the new line.</summary>
+    [HttpPost("{id:int}/items")]
+    public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
+        if (order.Status == OrderStatus.Served) throw new ApiConflictException("Cannot add items to a served order.");
+        if (req.Qty <= 0) throw new ApiValidationException("Quantity must be a positive number.");
+
+        var menuItem = await db.MenuItems.FirstOrDefaultAsync(m => m.Id == req.MenuItemId);
+        if (menuItem is null) throw new ApiValidationException("Menu item not found.");
+        if (!menuItem.Available) throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
+
+        var newItem = new OrderItem
+        {
+            OrderId = order.Id,
+            MenuItemId = menuItem.Id,
+            Name = menuItem.Name,
+            Qty = req.Qty,
+            Price = menuItem.Price,
+            Modifier = req.Modifier,
+            FireBatch = 0,
+        };
+        order.Items.Add(newItem);
+        order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
+        RecomputeTotals(order, await GetTaxRatePctAsync());
+
+        await ConsumeInventoryAsync(new Dictionary<int, MenuItem> { [menuItem.Id] = menuItem }, [newItem], order.Id);
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Removes an item from a not-yet-served order. Freely allowed while the item is
+    /// still unfired; once it's been sent to the kitchen (FireBatch &gt; 0) only an Owner/
+    /// Manager may pull it back.</summary>
+    [HttpDelete("{id:int}/items/{itemId:int}")]
+    public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId)
+    {
+        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
+        if (order.Status == OrderStatus.Served) throw new ApiConflictException("Cannot remove items from a served order.");
+
+        var item = order.Items.FirstOrDefault(i => i.Id == itemId);
+        if (item is null) return NotFound();
+        if (order.Items.Count == 1) throw new ApiValidationException("Order must contain at least one item.");
+        if (item.FireBatch > 0 && !IsOwnerOrManager()) return Forbid();
+
+        order.Items.Remove(item);
+        db.OrderItems.Remove(item);
+        order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
+        RecomputeTotals(order, await GetTaxRatePctAsync());
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Manager-only markdown applied at the billing stage (order must be Served,
+    /// not yet Paid). Kept as its own field, separate from the order-time DiscountAmount.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPatch("{id:int}/bill-discount")]
+    public async Task<ActionResult<OrderDto>> ApplyBillDiscount(int id, BillDiscountRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot discount a paid order.");
+        if (order.Status != OrderStatus.Served) throw new ApiConflictException("A bill discount can only be applied once the order has been served.");
+        if ((req.Pct is null) == (req.Amount is null)) throw new ApiValidationException("Provide either a percentage or a flat amount, not both.");
+
+        var amount = req.Amount ?? Math.Round(order.Subtotal * (req.Pct ?? 0) / 100, 2);
+        if (amount < 0) throw new ApiValidationException("Discount cannot be negative.");
+
+        order.BillDiscountAmount = amount;
+        RecomputeTotals(order, await GetTaxRatePctAsync());
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.Discount, AuditResource.Order, order.Id.ToString(),
+            $"Bill discount of {amount:C} applied to order {order.Id}.", AuditSeverity.Medium);
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Redeems a coupon at billing time (order must be Served, not yet Paid). Only
+    /// one coupon per order.</summary>
+    [HttpPatch("{id:int}/bill-coupon")]
+    public async Task<ActionResult<OrderDto>> ApplyBillCoupon(int id, BillCouponRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot apply a coupon to a paid order.");
+        if (order.Status != OrderStatus.Served) throw new ApiConflictException("Coupons are applied at billing time, once the order has been served.");
+        if (order.CouponCode is not null) throw new ApiConflictException("A coupon has already been applied to this order.");
+        if (string.IsNullOrWhiteSpace(req.Code)) throw new ApiValidationException("Enter a coupon code.");
+
+        var coupon = await db.Coupons.FirstOrDefaultAsync(c => c.Code == req.Code.ToUpperInvariant());
+        if (coupon is null) throw new ApiValidationException("Coupon code is invalid or expired.");
+        if (coupon.IsUsed) throw new ApiConflictException("Coupon has already been used.");
+        if (coupon.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Coupon has expired.");
+        if (order.Subtotal < coupon.MinOrderValue) throw new ApiValidationException($"Minimum order value for this coupon is {coupon.MinOrderValue:C}.");
+
+        order.CouponDiscountAmount = coupon.Type switch
+        {
+            CouponType.Percent => Math.Round(order.Subtotal * coupon.Value / 100, 2),
+            CouponType.Flat => coupon.Value,
+            _ => 0,
+        };
+        order.CouponCode = coupon.Code;
+        coupon.IsUsed = true;
+        RecomputeTotals(order, await GetTaxRatePctAsync());
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Redeems a gift card at billing time (order must be Served, not yet Paid).
+    /// Debits only what this bill can absorb. Only one gift card per order.</summary>
+    [HttpPatch("{id:int}/bill-giftcard")]
+    public async Task<ActionResult<OrderDto>> ApplyBillGiftCard(int id, BillGiftCardRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot apply a gift card to a paid order.");
+        if (order.Status != OrderStatus.Served) throw new ApiConflictException("Gift cards are applied at billing time, once the order has been served.");
+        if (order.GiftCardCode is not null) throw new ApiConflictException("A gift card has already been applied to this order.");
+        if (string.IsNullOrWhiteSpace(req.Code)) throw new ApiValidationException("Enter a gift card code.");
+
+        var giftCard = await db.GiftCards.FirstOrDefaultAsync(g => g.Code == req.Code.ToUpperInvariant());
+        if (giftCard is null) throw new ApiValidationException("Gift card code not found.");
+        if (giftCard.Status != GiftCardStatus.Active) throw new ApiConflictException("Gift card is not active.");
+        if (giftCard.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Gift card has expired.");
+
+        var owedBeforeGiftCard = Math.Max(0, order.Subtotal - order.DiscountAmount - order.BillDiscountAmount - order.CouponDiscountAmount);
+        var redeem = Math.Min(giftCard.Balance, owedBeforeGiftCard);
+        order.GiftCardCode = giftCard.Code;
+        order.GiftCardAmountApplied = redeem;
+        giftCard.Balance -= redeem;
+        if (giftCard.Balance <= 0) giftCard.Status = GiftCardStatus.Used;
+        RecomputeTotals(order, await GetTaxRatePctAsync());
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Recomputes Tax + Total from Subtotal minus every discount component (order
+    /// discount, bill discount, coupon, gift card). The single source of truth for order
+    /// pricing math, so create/add/remove/bill-discount/coupon/giftcard never drift.</summary>
+    private static void RecomputeTotals(Order o, decimal taxRatePct)
+    {
+        var totalDiscount = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied;
+        var taxable = Math.Max(0, o.Subtotal - totalDiscount);
+        o.Tax = Math.Round(taxable * taxRatePct / 100, 2);
+        o.Total = taxable + o.Tax;
+    }
+
+    /// <summary>Tax rate for the current (staff/JWT) tenant — same cached source
+    /// BuildOrderAsync uses.</summary>
+    private async Task<decimal> GetTaxRatePctAsync() =>
+        await taxRateCache.GetTaxRatePctAsync(tenantContext.TenantIdOrDefault,
+            async () => (await db.Settings.FirstAsync()).TaxRatePct);
+
+    /// <summary>Inline Owner/Manager check for per-item conditional gating (mirrors the
+    /// role check NotificationsController does in a method body).</summary>
+    private bool IsOwnerOrManager() =>
+        User.IsInRole(nameof(AppRole.Owner)) || User.IsInRole(nameof(AppRole.Manager));
+
+    /// <summary>
+    /// Marks the bill paid. Requires the order to be Served first — payment can never happen
+    /// before the customer has been served (a core rule of the ordering→billing separation).
+    /// Does NOT force Served on its own; a table frees up only once it's BOTH paid AND served
+    /// (see TablesController/PublicController's occupancy check).
+    /// </summary>
+    [HttpPatch("{id:int}/pay")]
+    public async Task<ActionResult<OrderDto>> Pay(int id, PayRequest? req = null)
+    {
+        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        if (order.Status != OrderStatus.Served) throw new ApiValidationException("Order must be served before it can be marked paid.");
 
         order.Paid = true;
+        order.PaymentMethod = string.IsNullOrWhiteSpace(req?.PaymentMethod) ? null : req.PaymentMethod.Trim();
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }

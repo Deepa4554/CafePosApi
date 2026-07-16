@@ -82,16 +82,36 @@ public class Order : ITenantScoped
     public Customer? Customer { get; set; }
     public decimal Subtotal { get; set; }
     public decimal DiscountPct { get; set; }
+    /// <summary>The order-time manual discount only (from DiscountPct, applied when the
+    /// order is created in POS). Coupon and gift-card redemptions are NO LONGER folded in
+    /// here — they're separate billing-time reductions (CouponDiscountAmount /
+    /// GiftCardAmountApplied), applied only once the order reaches Served. RecomputeTotals
+    /// (OrdersController) subtracts all four discount components from Subtotal.</summary>
     public decimal DiscountAmount { get; set; }
+    /// <summary>Manager-only discount applied at the billing/payment stage (Status ==
+    /// Served), kept distinct from the order-time DiscountAmount for audit clarity.</summary>
+    public decimal BillDiscountAmount { get; set; }
+    /// <summary>Discount from a coupon redeemed at billing time (Served stage). Paired with
+    /// CouponCode below.</summary>
+    public decimal CouponDiscountAmount { get; set; }
     public decimal Tax { get; set; }
     public decimal Total { get; set; }
-    /// <summary>Set when a gift card was redeemed against this order — its value is
-    /// already folded into DiscountAmount above (same pre-tax mechanism as a coupon,
-    /// see OrdersController.BuildOrderAsync); kept here separately purely for display/
-    /// audit ("which gift card paid for this"), not as a second discount.</summary>
+    /// <summary>Set when a coupon was redeemed against this order at billing time — its
+    /// value lives in CouponDiscountAmount above.</summary>
+    public string? CouponCode { get; set; }
+    /// <summary>Set when a gift card was redeemed against this order at billing time — its
+    /// value is a separate pre-tax reduction (GiftCardAmountApplied), summed alongside the
+    /// other discount components by RecomputeTotals, not folded into DiscountAmount.</summary>
     public string? GiftCardCode { get; set; }
     public decimal GiftCardAmountApplied { get; set; }
+    /// <summary>How the bill was settled — Cash / Card / UPI / Multiple. Set when the order
+    /// is marked paid; null until then.</summary>
+    public string? PaymentMethod { get; set; }
     public OrderStatus Status { get; set; } = OrderStatus.New;
+    /// <summary>Increments by 1 each time at least one previously-unfired item is fired to
+    /// the kitchen (see OrdersController.Fire). An item's FireBatch == this value means it
+    /// was part of the most recent fire round (drives the "NEW" badge on KDS).</summary>
+    public int CurrentFireBatch { get; set; }
     public bool Paid { get; set; }
     public bool Refunded { get; set; }
     public decimal? RefundedAmount { get; set; }
@@ -126,6 +146,11 @@ public class OrderItem : ITenantScoped
     public int Qty { get; set; }
     public decimal Price { get; set; }
     public string? Modifier { get; set; }
+    /// <summary>Which "fire round" this item was sent to the kitchen in. 0 = not yet fired
+    /// (still freely editable/removable, invisible on KDS). >0 = the Order.CurrentFireBatch
+    /// value at the moment it was fired. Lets the kitchen receive only newly-added items on
+    /// a re-fire instead of the whole order again.</summary>
+    public int FireBatch { get; set; }
 }
 
 public class InventoryItem : ITenantScoped

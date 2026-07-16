@@ -11,17 +11,33 @@ public record CreateOrderRequest(
     string? TableCode,
     string? GuestName,
     List<CreateOrderItemDto> Items,
+    // Order-time manual discount only. Coupons and gift cards are NO LONGER applied here —
+    // they're billing-time actions on a served order (see bill-coupon / bill-giftcard).
     decimal DiscountPct = 0,
-    string? CouponCode = null,
     int? BranchId = null,
     string? GuestPhone = null,
     // Who actually took/served this order — omit to default to the logged-in user's
     // own StaffMember record (self-service waiter); explicit when a Cashier/Manager/
     // Owner rings up an order on behalf of a different waiter from a shared counter POS.
-    int? ServedByStaffId = null,
-    string? GiftCardCode = null);
+    int? ServedByStaffId = null);
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
+
+// ---------- Order lifecycle (add item / fire / billing-time discounts / payment) ----------
+
+public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier);
+
+/// <summary>Manager-only markdown applied at the billing stage (Served). Supply exactly
+/// one of Pct (percentage of subtotal) or Amount (flat).</summary>
+public record BillDiscountRequest(decimal? Pct, decimal? Amount);
+
+public record BillCouponRequest(string Code);
+
+public record BillGiftCardRequest(string Code);
+
+/// <summary>How the settled bill was paid — Cash / Card / UPI / Multiple. Optional; the
+/// legacy pay call with no body still works (payment method just stays unrecorded).</summary>
+public record PayRequest(string? PaymentMethod);
 
 /// <summary>
 /// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData
@@ -40,7 +56,7 @@ public record RushForecastDto(
 /// anonymous caller could otherwise claim any table it likes).</summary>
 public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, List<CreateOrderItemDto> Items);
 
-public record OrderItemDto(string Name, int Qty, decimal Price, string? Modifier);
+public record OrderItemDto(int Id, string Name, int Qty, decimal Price, string? Modifier, int FireBatch);
 
 public record OrderDto(
     int Id,
@@ -55,6 +71,8 @@ public record OrderDto(
     decimal Subtotal,
     decimal DiscountPct,
     decimal DiscountAmount,
+    decimal BillDiscountAmount,
+    decimal CouponDiscountAmount,
     decimal Tax,
     decimal Total,
     string Status,
@@ -65,8 +83,11 @@ public record OrderDto(
     int? BranchId,
     string? CreatedByName,
     string? ServedByName,
+    string? CouponCode,
     string? GiftCardCode,
-    decimal GiftCardAmountApplied)
+    decimal GiftCardAmountApplied,
+    string? PaymentMethod,
+    int CurrentFireBatch)
 {
     public static OrderDto From(Order o) => new(
         o.Id,
@@ -77,10 +98,12 @@ public record OrderDto(
         o.GuestName,
         o.GuestPhone,
         o.CustomerId,
-        o.Items.Select(i => new OrderItemDto(i.Name, i.Qty, i.Price, i.Modifier)).ToList(),
+        o.Items.Select(i => new OrderItemDto(i.Id, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
+        o.BillDiscountAmount,
+        o.CouponDiscountAmount,
         o.Tax,
         o.Total,
         o.Status.ToString().ToUpperInvariant(),
@@ -91,8 +114,11 @@ public record OrderDto(
         o.BranchId,
         o.CreatedByName,
         o.ServedByName,
+        o.CouponCode,
         o.GiftCardCode,
-        o.GiftCardAmountApplied);
+        o.GiftCardAmountApplied,
+        o.PaymentMethod,
+        o.CurrentFireBatch);
 }
 
 public record SetStatusRequest(string Status);
