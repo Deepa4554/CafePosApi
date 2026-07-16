@@ -495,12 +495,14 @@ public class OrdersController(
     }
 
     /// <summary>Adds one item to an existing, not-yet-paid order (new item starts unfired,
-    /// FireBatch 0, so it only reaches the kitchen on the next Fire). Allowed even after the
-    /// order has been Served — e.g. the table asks for one more item at the billing stage —
-    /// in which case the order is pulled back into the kitchen queue (Status reverts to New)
-    /// so it flows through Preparing/Ready/Served again before returning to billing; the bill
-    /// itself still totals every item together regardless of which fire round it came from.
-    /// Recomputes totals and deducts inventory for just the new line.</summary>
+    /// FireBatch 0, so it only reaches the kitchen on the next Fire). Allowed at any stage —
+    /// Preparing, Ready, even after Served (e.g. the table asks for one more item at the
+    /// billing stage) — and in every one of those cases the order is pulled back to New:
+    /// the rest of the order may already be Prepared/Ready/Served, but this new item hasn't
+    /// been touched by the kitchen yet, so the whole ticket re-enters New → Preparing → Ready
+    /// (→ Served) rather than showing as already prepared. The bill still totals every item
+    /// together regardless of which fire round it came from. Recomputes totals and deducts
+    /// inventory for just the new line.</summary>
     [HttpPost("{id:int}/items")]
     public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
     {
@@ -526,7 +528,7 @@ public class OrdersController(
         order.Items.Add(newItem);
         order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
         RecomputeTotals(order, await GetTaxRatePctAsync());
-        if (order.Status == OrderStatus.Served) order.Status = OrderStatus.New;
+        if (order.Status != OrderStatus.New) order.Status = OrderStatus.New;
 
         await ConsumeInventoryAsync(new Dictionary<int, MenuItem> { [menuItem.Id] = menuItem }, [newItem], order.Id);
         await db.SaveChangesAsync();
