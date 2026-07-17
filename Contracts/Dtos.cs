@@ -58,6 +58,11 @@ public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, Li
 
 public record OrderItemDto(int Id, string Name, int Qty, decimal Price, string? Modifier, int FireBatch);
 
+/// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
+/// order's non-Served batches into separate ticket cards from this list, instead of relying
+/// on the single rollup Status below.</summary>
+public record FireBatchDto(int BatchNumber, string Status, DateTime FiredAt);
+
 public record OrderDto(
     int Id,
     string Number,
@@ -87,7 +92,8 @@ public record OrderDto(
     string? GiftCardCode,
     decimal GiftCardAmountApplied,
     string? PaymentMethod,
-    int CurrentFireBatch)
+    int CurrentFireBatch,
+    List<FireBatchDto> FireBatches)
 {
     public static OrderDto From(Order o) => new(
         o.Id,
@@ -118,7 +124,10 @@ public record OrderDto(
         o.GiftCardCode,
         o.GiftCardAmountApplied,
         o.PaymentMethod,
-        o.CurrentFireBatch);
+        o.CurrentFireBatch,
+        o.FireBatches.OrderBy(b => b.BatchNumber)
+            .Select(b => new FireBatchDto(b.BatchNumber, b.Status.ToString().ToUpperInvariant(), b.FiredAt))
+            .ToList());
 }
 
 public record SetStatusRequest(string Status);

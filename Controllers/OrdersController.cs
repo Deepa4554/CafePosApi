@@ -36,7 +36,7 @@ public class OrdersController(
         // screen still counts unfired Open orders as active/occupied.
         [FromQuery] bool kdsReady = false)
     {
-        var query = db.Orders.Include(o => o.Items).AsQueryable();
+        var query = db.Orders.Include(o => o.Items).Include(o => o.FireBatches).AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
         // an order stays active (visible on KDS, counted as in-progress) until it's
         // BOTH paid AND served. Paying early must not make it vanish from the
@@ -58,7 +58,7 @@ public class OrdersController(
     [HttpGet("{id:int}")]
     public async Task<ActionResult<OrderDto>> Get(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         return order is null ? NotFound() : OrderDto.From(order);
     }
 
@@ -397,56 +397,84 @@ public class OrdersController(
         return order;
     }
 
-    /// <summary>Moves the order one step along NEW → PREPARING → READY → SERVED (KDS buttons).</summary>
-    [HttpPatch("{id:int}/advance")]
-    public async Task<ActionResult<OrderDto>> Advance(int id)
+    /// <summary>Moves ONE fire-batch's kitchen ticket one step along NEW → PREPARING →
+    /// READY → SERVED (KDS buttons) — every other batch on the same order is untouched, so
+    /// a round already Preparing/Ready/Served never gets disturbed by a later round's
+    /// progress. Order.Status is recomputed as a rollup afterward (see
+    /// RecomputeOrderStatus).</summary>
+    [HttpPatch("{id:int}/advance/{batchNumber:int}")]
+    public async Task<ActionResult<OrderDto>> Advance(int id, int batchNumber)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
+        var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
+        if (batch is null) return NotFound();
 
-        var idx = Array.IndexOf(StatusFlow, order.Status);
-        if (idx < StatusFlow.Length - 1) order.Status = StatusFlow[idx + 1];
-        NotifyIfReady(order);
+        var idx = Array.IndexOf(StatusFlow, batch.Status);
+        if (idx < StatusFlow.Length - 1) batch.Status = StatusFlow[idx + 1];
+        NotifyBatchIfReady(order, batch);
+        RecomputeOrderStatus(order);
 
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
 
+    /// <summary>Legacy manual override — sets Order.Status directly, bypassing the
+    /// per-batch model entirely. Not called from any current UI (Advance/Fire drive
+    /// everything now); left as a rough admin/debugging escape hatch. Note the value set
+    /// here doesn't persist past the next batch change, since Order.Status is recomputed as
+    /// a rollup of OrderFireBatches whenever any batch advances or a new one fires.</summary>
     [HttpPatch("{id:int}/status")]
     public async Task<ActionResult<OrderDto>> SetStatus(int id, SetStatusRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
 
         if (!Enum.TryParse<OrderStatus>(req.Status, ignoreCase: true, out var status))
             throw new ApiValidationException($"Unknown status '{req.Status}'.");
 
         order.Status = status;
-        NotifyIfReady(order);
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
 
-    /// <summary>Fires an in-app "ready to serve" notification the moment an order hits
-    /// READY, so waiters/staff watching Notifications (not just the KDS screen) know to
-    /// go pick it up.</summary>
-    private void NotifyIfReady(Order order)
+    /// <summary>Fires an in-app "ready to serve" notification the moment a SPECIFIC batch
+    /// hits READY, so waiters/staff watching Notifications (not just the KDS screen) know to
+    /// go pick up that round — scoped to just that round's items, not the whole order.</summary>
+    private void NotifyBatchIfReady(Order order, OrderFireBatch batch)
     {
-        if (order.Status != OrderStatus.Ready) return;
+        if (batch.Status != OrderStatus.Ready) return;
+        var items = order.Items.Where(i => i.FireBatch == batch.BatchNumber).ToList();
         db.Notifications.Add(new AppNotification
         {
             Title = "Order ready to serve",
-            Body = $"{order.Title} is ready — {order.Items.Count} item{(order.Items.Count == 1 ? "" : "s")}, ₹{order.Total:0.00}.",
+            Body = $"{order.Title} is ready — {items.Count} item{(items.Count == 1 ? "" : "s")}.",
             Category = NotificationCategory.Order,
             Channel = NotificationChannel.InApp,
             ActionUrl = $"/orders/{order.Id}",
         });
     }
 
-    /// <summary>Assigns the next fire-batch number to every not-yet-fired item and notifies
-    /// the kitchen about JUST those items (never the whole order again on a re-fire). Returns
-    /// false if there was nothing new to fire. Does NOT save or touch Order.Status — the
-    /// caller saves, and status stays driven purely by Advance/SetStatus.</summary>
+    /// <summary>Order.Status is a computed rollup of every active (non-Served) fire batch,
+    /// not a value set directly — the LEAST-progressed active batch surfaces here (enum
+    /// ordering New&lt;Preparing&lt;Ready&lt;Served means Min picks it), so table
+    /// occupancy/billing-eligibility checks elsewhere in the app (which only ever ask "is
+    /// this order fully served") keep working unchanged: Served only once every batch is.
+    /// Called after any batch is created (Fire) or advanced.</summary>
+    private static void RecomputeOrderStatus(Order order)
+    {
+        var active = order.FireBatches.Where(b => b.Status != OrderStatus.Served).ToList();
+        order.Status = active.Count > 0
+            ? active.Min(b => b.Status)
+            : (order.FireBatches.Count > 0 ? OrderStatus.Served : OrderStatus.New);
+    }
+
+    /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
+    /// batch's own independent kitchen-ticket row (starts New), and notifies the kitchen
+    /// about JUST those items (never the whole order again on a re-fire) — any OTHER batch
+    /// already Preparing/Ready/Served on this order keeps its own status, untouched. Returns
+    /// false if there was nothing new to fire. Recomputes Order.Status but does not save —
+    /// the caller saves.</summary>
     private bool FireUnfiredItems(Order order, int? explicitTenantId)
     {
         var unfired = order.Items.Where(i => i.FireBatch == 0).ToList();
@@ -454,6 +482,8 @@ public class OrdersController(
 
         order.CurrentFireBatch += 1;
         foreach (var item in unfired) item.FireBatch = order.CurrentFireBatch;
+        order.FireBatches.Add(new OrderFireBatch { OrderId = order.Id, BatchNumber = order.CurrentFireBatch });
+        RecomputeOrderStatus(order);
 
         // OrderPlaced is the ONLY category Chef/KitchenStaff logins see (see
         // NotificationsController.List's role filter). Wording branches so the kitchen can
@@ -477,14 +507,16 @@ public class OrdersController(
         return true;
     }
 
-    /// <summary>Fires all not-yet-fired items on an existing order to the kitchen. The
-    /// separate "dispatch" step that the staff POS calls right after Create (or later, for a
-    /// held order) — distinct from ordering so items can be added/edited before hitting the
-    /// line. Does not change Order.Status.</summary>
+    /// <summary>Fires all not-yet-fired items on an existing order to the kitchen as their
+    /// own new fire batch. The separate "dispatch" step that the staff POS calls right after
+    /// Create (or later, for a held order) — distinct from ordering so items can be
+    /// added/edited before hitting the line. Order.Status is recomputed as a rollup (see
+    /// RecomputeOrderStatus) — any other batch already Preparing/Ready/Served on this order
+    /// keeps its own status, untouched.</summary>
     [HttpPost("{id:int}/fire")]
     public async Task<ActionResult<OrderDto>> Fire(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         if (!FireUnfiredItems(order, explicitTenantId: null))
@@ -495,18 +527,18 @@ public class OrdersController(
     }
 
     /// <summary>Adds one item to an existing, not-yet-paid order (new item starts unfired,
-    /// FireBatch 0, so it only reaches the kitchen on the next Fire). Allowed at any stage —
-    /// Preparing, Ready, even after Served (e.g. the table asks for one more item at the
-    /// billing stage) — and in every one of those cases the order is pulled back to New:
-    /// the rest of the order may already be Prepared/Ready/Served, but this new item hasn't
-    /// been touched by the kitchen yet, so the whole ticket re-enters New → Preparing → Ready
-    /// (→ Served) rather than showing as already prepared. The bill still totals every item
+    /// FireBatch 0, so it only reaches the kitchen — as its own new fire batch, see
+    /// FireUnfiredItems — on the next Fire). Allowed at any stage, even after every existing
+    /// batch has been Served (e.g. the table asks for one more item at the billing stage):
+    /// adding the item doesn't touch any existing OrderFireBatch, so whatever's already
+    /// Preparing/Ready/Served keeps its own status undisturbed — only once this item is
+    /// fired does it become its own separate ticket. The bill still totals every item
     /// together regardless of which fire round it came from. Recomputes totals and deducts
     /// inventory for just the new line.</summary>
     [HttpPost("{id:int}/items")]
     public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
         if (req.Qty <= 0) throw new ApiValidationException("Quantity must be a positive number.");
@@ -528,28 +560,32 @@ public class OrdersController(
         order.Items.Add(newItem);
         order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
         RecomputeTotals(order, await GetTaxRatePctAsync());
-        if (order.Status != OrderStatus.New) order.Status = OrderStatus.New;
 
         await ConsumeInventoryAsync(new Dictionary<int, MenuItem> { [menuItem.Id] = menuItem }, [newItem], order.Id);
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
 
-    /// <summary>Removes an item from a not-yet-served order. Freely allowed while the item is
-    /// still unfired; once it's been sent to the kitchen (FireBatch &gt; 0) only an Owner/
-    /// Manager may pull it back.</summary>
+    /// <summary>Removes an item from a not-yet-paid order. Freely allowed while the item is
+    /// still unfired (even if other batches on the same order are already Served — this one
+    /// hasn't reached the kitchen at all yet); once it's been fired (FireBatch &gt; 0) only an
+    /// Owner/Manager may pull it back, and only if its own batch hasn't already been Served.</summary>
     [HttpDelete("{id:int}/items/{itemId:int}")]
     public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
-        if (order.Status == OrderStatus.Served) throw new ApiConflictException("Cannot remove items from a served order.");
 
         var item = order.Items.FirstOrDefault(i => i.Id == itemId);
         if (item is null) return NotFound();
         if (order.Items.Count == 1) throw new ApiValidationException("Order must contain at least one item.");
-        if (item.FireBatch > 0 && !IsOwnerOrManager()) return Forbid();
+        if (item.FireBatch > 0)
+        {
+            if (!IsOwnerOrManager()) return Forbid();
+            var itemBatch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == item.FireBatch);
+            if (itemBatch?.Status == OrderStatus.Served) throw new ApiConflictException("Cannot remove an item that's already been served.");
+        }
 
         order.Items.Remove(item);
         db.OrderItems.Remove(item);
@@ -565,7 +601,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-discount")]
     public async Task<ActionResult<OrderDto>> ApplyBillDiscount(int id, BillDiscountRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot discount a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("A bill discount can only be applied once the order has been served.");
@@ -587,7 +623,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-coupon")]
     public async Task<ActionResult<OrderDto>> ApplyBillCoupon(int id, BillCouponRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a coupon to a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("Coupons are applied at billing time, once the order has been served.");
@@ -618,7 +654,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-giftcard")]
     public async Task<ActionResult<OrderDto>> ApplyBillGiftCard(int id, BillGiftCardRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a gift card to a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("Gift cards are applied at billing time, once the order has been served.");
@@ -672,7 +708,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/pay")]
     public async Task<ActionResult<OrderDto>> Pay(int id, PayRequest? req = null)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         if (order.Status != OrderStatus.Served) throw new ApiValidationException("Order must be served before it can be marked paid.");
@@ -690,7 +726,7 @@ public class OrdersController(
     [HttpPost("{id:int}/refund")]
     public async Task<ActionResult<OrderDto>> Refund(int id, RefundOrderRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (!order.Paid) throw new ApiValidationException("Only paid orders can be refunded.");
         if (order.Refunded) throw new ApiConflictException("Order has already been refunded.");

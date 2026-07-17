@@ -134,6 +134,12 @@ public class Order : ITenantScoped
     public int? ServedByStaffId { get; set; }
     public string? ServedByName { get; set; }
     public List<OrderItem> Items { get; set; } = [];
+    /// <summary>One row per fire round (see OrderItem.FireBatch) — each round tracks its own
+    /// kitchen progress independently, so a re-fire on an order already Preparing/Ready/Served
+    /// shows as a fresh, separate ticket without disturbing the earlier round's progress.
+    /// Order.Status is a computed rollup of these (see OrdersController.RecomputeOrderStatus),
+    /// not set directly, except by the legacy manual-override SetStatus endpoint.</summary>
+    public List<OrderFireBatch> FireBatches { get; set; } = [];
 }
 
 public class OrderItem : ITenantScoped
@@ -148,9 +154,25 @@ public class OrderItem : ITenantScoped
     public string? Modifier { get; set; }
     /// <summary>Which "fire round" this item was sent to the kitchen in. 0 = not yet fired
     /// (still freely editable/removable, invisible on KDS). >0 = the Order.CurrentFireBatch
-    /// value at the moment it was fired. Lets the kitchen receive only newly-added items on
-    /// a re-fire instead of the whole order again.</summary>
+    /// value at the moment it was fired — matches an OrderFireBatch.BatchNumber, which tracks
+    /// that round's own kitchen status independently of every other round.</summary>
     public int FireBatch { get; set; }
+}
+
+/// <summary>A single fire round's kitchen progress — see Order.FireBatches. Created when
+/// OrdersController.FireUnfiredItems fires a new batch (Status starts New); advanced via
+/// PATCH /orders/{id}/advance/{batchNumber}, independently of every other batch on the same
+/// order.</summary>
+public class OrderFireBatch : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int OrderId { get; set; }
+    /// <summary>Matches the OrderItem.FireBatch value of the items fired in this round —
+    /// and the Order.CurrentFireBatch value at the moment this round was fired.</summary>
+    public int BatchNumber { get; set; }
+    public OrderStatus Status { get; set; } = OrderStatus.New;
+    public DateTime FiredAt { get; set; } = DateTime.UtcNow;
 }
 
 public class InventoryItem : ITenantScoped
