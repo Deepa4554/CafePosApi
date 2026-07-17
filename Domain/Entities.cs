@@ -5,7 +5,7 @@ namespace CafePOS.Api.Domain;
 public enum OrderStatus
 {
     New,
-    // REMOVED: Read stage (workflow simplified - no intermediate acknowledgement step)
+    Read,    // TEMP: Keep for migration, will be removed after data is migrated
     Preparing,
     Ready,
     Served,
