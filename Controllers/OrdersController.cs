@@ -16,7 +16,7 @@ public class OrdersController(
     ITaxRateCache taxRateCache, ITenantContext tenantContext) : ControllerBase
 {
     private static readonly OrderStatus[] StatusFlow =
-        [OrderStatus.New, OrderStatus.Preparing, OrderStatus.Ready, OrderStatus.Served];
+        [OrderStatus.New, OrderStatus.Read, OrderStatus.Preparing, OrderStatus.Ready, OrderStatus.Served];
 
     [HttpGet]
     public async Task<PagedResult<OrderDto>> List(
@@ -397,12 +397,12 @@ public class OrdersController(
         return order;
     }
 
-    /// <summary>Moves ONE item one step along NEW → PREPARING → READY → SERVED — the chef can
-    /// advance each item independently, so within one KOT the Paneer can be Ready while the
-    /// Roti is still New. The item's batch status and the order status are recomputed as
-    /// rollups afterward (least-progressed active item).</summary>
-    [HttpPatch("{id:int}/items/{itemId:int}/advance")]
-    public async Task<ActionResult<OrderDto>> AdvanceItem(int id, int itemId)
+    /// <summary>Moves a given number of ONE line's units one stage forward (New→Read→
+    /// Preparing→Ready→Served) — the partial-quantity primitive. "Chowmein ×6" line se sirf
+    /// 3 units Preparing pe le jaao, baaki pending. fromStage omit karo to line ki current
+    /// least-progressed stage se; qty omit karo to us stage ke saare units.</summary>
+    [HttpPatch("{id:int}/items/{itemId:int}/advance-units")]
+    public async Task<ActionResult<OrderDto>> AdvanceUnitsEndpoint(int id, int itemId, AdvanceUnitsRequest req)
     {
         var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
@@ -411,8 +411,10 @@ public class OrdersController(
         if (item is null) return NotFound();
         if (item.FireBatch == 0) throw new ApiValidationException("Item hasn't been fired to the kitchen yet.");
 
-        var idx = Array.IndexOf(StatusFlow, item.Status);
-        if (idx < StatusFlow.Length - 1) item.Status = StatusFlow[idx + 1];
+        var fromStage = ResolveFromStage(item, req.FromStage);
+        if (fromStage is null) throw new ApiValidationException("Nothing to advance on this item.");
+        var qty = req.Qty ?? UnitsAtStage(item, fromStage.Value);
+        AdvanceUnits(item, fromStage.Value, qty);
         RecomputeBatchStatus(order, item.FireBatch);
         RecomputeOrderStatus(order);
 
@@ -420,10 +422,9 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
-    /// <summary>Advance-all: moves every not-yet-Served item in ONE fire batch one step
-    /// forward at once (the KDS "Advance All" button and the Tables screen's per-batch "Mark
-    /// Served"). Every other batch on the order is untouched. Recomputes the batch + order
-    /// status rollups afterward.</summary>
+    /// <summary>Advance-all: moves every not-yet-Served unit in ONE fire batch (KOT) one stage
+    /// forward at once — the KDS "whole KOT" action and the Tables screen's "Advance All".
+    /// Every other KOT on the order is untouched.</summary>
     [HttpPatch("{id:int}/advance/{batchNumber:int}")]
     public async Task<ActionResult<OrderDto>> Advance(int id, int batchNumber)
     {
@@ -433,16 +434,80 @@ public class OrdersController(
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
         if (batch is null) return NotFound();
 
-        foreach (var item in order.Items.Where(i => i.FireBatch == batchNumber && i.Status != OrderStatus.Served))
+        // Each line's least-progressed units move one stage — repeated taps march the whole
+        // KOT forward. (A line already partly ahead keeps its ahead units where they are.)
+        foreach (var item in order.Items.Where(i => i.FireBatch == batchNumber))
         {
-            var idx = Array.IndexOf(StatusFlow, item.Status);
-            if (idx < StatusFlow.Length - 1) item.Status = StatusFlow[idx + 1];
+            var fromStage = ResolveFromStage(item, null);
+            if (fromStage is not null) AdvanceUnits(item, fromStage.Value, UnitsAtStage(item, fromStage.Value));
         }
         RecomputeBatchStatus(order, batchNumber);
         RecomputeOrderStatus(order);
 
         await db.SaveChangesAsync();
         return OrderDto.From(order);
+    }
+
+    /// <summary>Production View bulk action: advance `Qty` units of one dish (menuItemId) from
+    /// one stage across MANY KOTs at once. `Allocations` diye to exactly wahi lines/quantities;
+    /// warna `Qty` ko us dish ki us-stage-wali saari fired lines pe FIFO (oldest KOT first)
+    /// allocate karta hai. Baaki qty pending rehti.</summary>
+    [HttpPost("kds/bulk-advance")]
+    public async Task<ActionResult<IEnumerable<OrderDto>>> BulkAdvance(BulkAdvanceRequest req)
+    {
+        if (!Enum.TryParse<OrderStatus>(req.FromStage, ignoreCase: true, out var fromStage))
+            throw new ApiValidationException($"Unknown stage '{req.FromStage}'.");
+        if (fromStage == OrderStatus.Served) throw new ApiValidationException("Served units can't advance further.");
+
+        var touchedOrderIds = new HashSet<int>();
+
+        if (req.Allocations is { Count: > 0 })
+        {
+            // Manual allocation — exact lines + quantities the chef picked.
+            foreach (var alloc in req.Allocations)
+            {
+                var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == alloc.OrderId);
+                var item = order?.Items.FirstOrDefault(i => i.Id == alloc.ItemId);
+                if (order is null || item is null || order.Paid) continue;
+                AdvanceUnits(item, fromStage, alloc.Qty);
+                RecomputeBatchStatus(order, item.FireBatch);
+                RecomputeOrderStatus(order);
+                touchedOrderIds.Add(order.Id);
+            }
+        }
+        else
+        {
+            // FIFO — spread req.Qty across this dish's lines, oldest KOT first.
+            var remaining = req.Qty ?? 0;
+            if (remaining <= 0) throw new ApiValidationException("Enter a quantity or pick specific KOTs.");
+            var candidates = await db.Orders
+                .Include(o => o.Items).Include(o => o.FireBatches)
+                .Where(o => !o.Paid && o.Items.Any(i => i.MenuItemId == req.MenuItemId && i.FireBatch > 0))
+                .ToListAsync();
+            // Oldest fire batch first (FIFO), then order id for a stable tie-break.
+            var lines = candidates
+                .SelectMany(o => o.Items.Where(i => i.MenuItemId == req.MenuItemId && i.FireBatch > 0).Select(i => new { Order = o, Item = i }))
+                .Select(x => new { x.Order, x.Item, Fired = x.Order.FireBatches.FirstOrDefault(b => b.BatchNumber == x.Item.FireBatch)?.FiredAt ?? DateTime.MaxValue })
+                .OrderBy(x => x.Fired).ThenBy(x => x.Order.Id)
+                .ToList();
+            foreach (var line in lines)
+            {
+                if (remaining <= 0) break;
+                var take = Math.Min(remaining, UnitsAtStage(line.Item, fromStage));
+                if (take <= 0) continue;
+                AdvanceUnits(line.Item, fromStage, take);
+                RecomputeBatchStatus(line.Order, line.Item.FireBatch);
+                RecomputeOrderStatus(line.Order);
+                touchedOrderIds.Add(line.Order.Id);
+                remaining -= take;
+            }
+        }
+
+        await db.SaveChangesAsync();
+        // Return just the affected orders so the client can patch its cache.
+        var affected = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches)
+            .Where(o => touchedOrderIds.Contains(o.Id)).ToListAsync();
+        return affected.Select(OrderDto.From).ToList();
     }
 
     /// <summary>Legacy manual override — sets Order.Status directly, bypassing the
@@ -462,6 +527,54 @@ public class OrdersController(
         order.Status = status;
         await db.SaveChangesAsync();
         return OrderDto.From(order);
+    }
+
+    /// <summary>How many units of a line are CURRENTLY at a given stage (non-cumulative).</summary>
+    private static int UnitsAtStage(OrderItem item, OrderStatus stage) => stage switch
+    {
+        OrderStatus.New => item.NewQty,
+        OrderStatus.Read => item.ReadQty,
+        OrderStatus.Preparing => item.PreparingQty,
+        OrderStatus.Ready => item.ReadyQty,
+        OrderStatus.Served => item.ServedQty,
+        _ => 0,
+    };
+
+    /// <summary>The line's least-progressed stage that still has ≥1 unit, or null if every
+    /// unit is Served. Used when the caller doesn't name an explicit from-stage.</summary>
+    private static OrderStatus? ResolveFromStage(OrderItem item, string? explicitStage)
+    {
+        if (!string.IsNullOrWhiteSpace(explicitStage) && Enum.TryParse<OrderStatus>(explicitStage, ignoreCase: true, out var s))
+            return UnitsAtStage(item, s) > 0 ? s : null;
+        foreach (var stage in StatusFlow)
+            if (stage != OrderStatus.Served && UnitsAtStage(item, stage) > 0) return stage;
+        return null;
+    }
+
+    /// <summary>Moves min(qty, unitsAt(fromStage)) units of a line one stage forward, then
+    /// refreshes the line's derived Status. Forward-only; the non-cumulative stage counters
+    /// always keep summing (with NewQty) to Qty.</summary>
+    private static void AdvanceUnits(OrderItem item, OrderStatus fromStage, int qty)
+    {
+        var n = Math.Min(Math.Max(qty, 0), UnitsAtStage(item, fromStage));
+        if (n == 0) return;
+        switch (fromStage)
+        {
+            case OrderStatus.New: item.ReadQty += n; break;                             // New→Read (NewQty derived, shrinks)
+            case OrderStatus.Read: item.ReadQty -= n; item.PreparingQty += n; break;    // Read→Preparing
+            case OrderStatus.Preparing: item.PreparingQty -= n; item.ReadyQty += n; break; // Preparing→Ready
+            case OrderStatus.Ready: item.ReadyQty -= n; item.ServedQty += n; break;     // Ready→Served
+        }
+        RecomputeItemStatus(item);
+    }
+
+    /// <summary>Derived overall stage for a line = least-progressed stage with ≥1 unit, or
+    /// Served once every unit is served.</summary>
+    private static void RecomputeItemStatus(OrderItem item)
+    {
+        foreach (var stage in StatusFlow)
+            if (UnitsAtStage(item, stage) > 0) { item.Status = stage; return; }
+        item.Status = OrderStatus.Served;
     }
 
     /// <summary>Recomputes ONE fire batch's status as a rollup of its items (least-progressed

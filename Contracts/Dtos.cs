@@ -56,7 +56,11 @@ public record RushForecastDto(
 /// anonymous caller could otherwise claim any table it likes).</summary>
 public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, List<CreateOrderItemDto> Items);
 
-public record OrderItemDto(int Id, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status);
+/// <summary>Status is the derived overall stage; the New/Read/Preparing/Ready/Served Qty
+/// fields are the real per-unit distribution (partial-quantity production) — they sum to
+/// Qty. KDS renders per-stage counts and picks the card's column from the lowest non-empty.</summary>
+public record OrderItemDto(int Id, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
+    int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty);
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
@@ -106,7 +110,8 @@ public record OrderDto(
         o.GuestName,
         o.GuestPhone,
         o.CustomerId,
-        o.Items.Select(i => new OrderItemDto(i.Id, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant())).ToList(),
+        o.Items.Select(i => new OrderItemDto(i.Id, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
+            i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
@@ -133,6 +138,16 @@ public record OrderDto(
 }
 
 public record SetStatusRequest(string Status);
+
+/// <summary>Advance some units of one line one stage forward. FromStage null = the line's
+/// current least-progressed stage; Qty null = every unit at that stage.</summary>
+public record AdvanceUnitsRequest(string? FromStage, int? Qty);
+
+/// <summary>Production View bulk action. Allocations non-empty = advance exactly those
+/// line/quantities; otherwise FIFO-allocate Qty across the dish's fired lines (oldest KOT
+/// first).</summary>
+public record BulkAdvanceRequest(int MenuItemId, string FromStage, int? Qty, List<BulkAdvanceAllocation>? Allocations);
+public record BulkAdvanceAllocation(int OrderId, int ItemId, int Qty);
 
 // ---------- Menu ----------
 

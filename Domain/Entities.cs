@@ -1,8 +1,11 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace CafePOS.Api.Domain;
 
 public enum OrderStatus
 {
     New,
+    Read,      // kitchen has acknowledged/seen the ticket, not yet cooking
     Preparing,
     Ready,
     Served,
@@ -156,11 +159,25 @@ public class OrderItem : ITenantScoped
     /// (still freely editable/removable, invisible on KDS). >0 = the Order.CurrentFireBatch
     /// value at the moment it was fired — matches an OrderFireBatch.BatchNumber.</summary>
     public int FireBatch { get; set; }
-    /// <summary>This item's own kitchen progress — the source of truth. The chef can advance
-    /// each item independently (New→Preparing→Ready→Served), so within one KOT the Paneer can
-    /// be Ready while the Roti is still New. OrderFireBatch.Status and Order.Status are both
-    /// computed rollups of item statuses (least-progressed active item), never set directly.</summary>
+    /// <summary>How many of this line's <see cref="Qty"/> units have reached each kitchen
+    /// stage. The per-UNIT distribution is the real source of truth — a "Chowmein ×6" line
+    /// can have 3 units Preparing and 3 still New (partial-quantity production). Units only
+    /// move forward. NewQty is derived: Qty - (ReadQty + PreparingQty + ReadyQty + ServedQty).
+    /// These are non-cumulative counts of units CURRENTLY at that stage; they always sum
+    /// (with NewQty) to Qty.</summary>
+    public int ReadQty { get; set; }
+    public int PreparingQty { get; set; }
+    public int ReadyQty { get; set; }
+    public int ServedQty { get; set; }
+    /// <summary>Derived overall stage for this line — the least-progressed stage that still
+    /// has ≥1 unit (or Served once every unit is served). Maintained by RecomputeItemStatus
+    /// whenever the unit counts change; the KOT/order status rollups read this. Never set
+    /// directly.</summary>
     public OrderStatus Status { get; set; } = OrderStatus.New;
+
+    /// <summary>Units still at New (not yet acknowledged) — derived, not stored.</summary>
+    [NotMapped]
+    public int NewQty => Qty - (ReadQty + PreparingQty + ReadyQty + ServedQty);
 }
 
 /// <summary>A single fire round (KOT) — see Order.FireBatches. Created when
