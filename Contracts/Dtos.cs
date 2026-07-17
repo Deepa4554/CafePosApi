@@ -60,7 +60,7 @@ public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, Li
 /// fields are the real per-unit distribution (partial-quantity production) — they sum to
 /// Qty. KDS renders per-stage counts and picks the card's column from the lowest non-empty.</summary>
 public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
-    int NewQty, int PreparingQty, int ReadyQty, int ServedQty);
+    int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty);
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
@@ -111,7 +111,7 @@ public record OrderDto(
         o.GuestPhone,
         o.CustomerId,
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
-            i.NewQty, i.PreparingQty, i.ReadyQty, i.ServedQty)).ToList(),
+            i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
