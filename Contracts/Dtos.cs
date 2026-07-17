@@ -60,8 +60,10 @@ public record OrderItemDto(int Id, string Name, int Qty, decimal Price, string? 
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
-/// on the single rollup Status below.</summary>
-public record FireBatchDto(int BatchNumber, string Status, DateTime FiredAt);
+/// on the single rollup Status below. KotNumber is a tenant-wide sequential ticket id (same
+/// "#1000+id" convention as Order.Number) — the KOT-wise KDS view sorts/labels by this
+/// instead of by table, matching how a KOT chit works in a physical kitchen.</summary>
+public record FireBatchDto(int BatchNumber, string Status, DateTime FiredAt, string KotNumber);
 
 public record OrderDto(
     int Id,
@@ -126,7 +128,7 @@ public record OrderDto(
         o.PaymentMethod,
         o.CurrentFireBatch,
         o.FireBatches.OrderBy(b => b.BatchNumber)
-            .Select(b => new FireBatchDto(b.BatchNumber, b.Status.ToString().ToUpperInvariant(), b.FiredAt))
+            .Select(b => new FireBatchDto(b.BatchNumber, b.Status.ToString().ToUpperInvariant(), b.FiredAt, $"#{1000 + b.Id}"))
             .ToList());
 }
 
