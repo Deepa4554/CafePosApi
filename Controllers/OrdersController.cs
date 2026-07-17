@@ -534,6 +534,10 @@ public class OrdersController(
     private static int UnitsAtStage(OrderItem item, OrderStatus stage) => stage switch
     {
         OrderStatus.New => item.NewQty,
+<<<<<<< HEAD
+=======
+        OrderStatus.Read => item.ReadQty,
+>>>>>>> e1a66acdad31659fa28807317aa1b647ed32ddb8
         OrderStatus.Preparing => item.PreparingQty,
         OrderStatus.Ready => item.ReadyQty,
         OrderStatus.Served => item.ServedQty,
@@ -560,9 +564,16 @@ public class OrdersController(
         if (n == 0) return;
         switch (fromStage)
         {
+<<<<<<< HEAD
             case OrderStatus.New: item.PreparingQty += n; break;                           // New→Preparing (READ stage removed)
             case OrderStatus.Preparing: item.PreparingQty -= n; item.ReadyQty += n; break; // Preparing→Ready
             case OrderStatus.Ready: item.ReadyQty -= n; item.ServedQty += n; break;       // Ready→Served
+=======
+            case OrderStatus.New: item.ReadQty += n; break;                             // New→Read (NewQty derived, shrinks)
+            case OrderStatus.Read: item.ReadQty -= n; item.PreparingQty += n; break;    // Read→Preparing
+            case OrderStatus.Preparing: item.PreparingQty -= n; item.ReadyQty += n; break; // Preparing→Ready
+            case OrderStatus.Ready: item.ReadyQty -= n; item.ServedQty += n; break;     // Ready→Served
+>>>>>>> e1a66acdad31659fa28807317aa1b647ed32ddb8
         }
         RecomputeItemStatus(item);
     }
