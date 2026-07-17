@@ -56,7 +56,7 @@ public record RushForecastDto(
 /// anonymous caller could otherwise claim any table it likes).</summary>
 public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, List<CreateOrderItemDto> Items);
 
-public record OrderItemDto(int Id, string Name, int Qty, decimal Price, string? Modifier, int FireBatch);
+public record OrderItemDto(int Id, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status);
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
@@ -106,7 +106,7 @@ public record OrderDto(
         o.GuestName,
         o.GuestPhone,
         o.CustomerId,
-        o.Items.Select(i => new OrderItemDto(i.Id, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch)).ToList(),
+        o.Items.Select(i => new OrderItemDto(i.Id, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant())).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,

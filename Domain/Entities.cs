@@ -154,15 +154,18 @@ public class OrderItem : ITenantScoped
     public string? Modifier { get; set; }
     /// <summary>Which "fire round" this item was sent to the kitchen in. 0 = not yet fired
     /// (still freely editable/removable, invisible on KDS). >0 = the Order.CurrentFireBatch
-    /// value at the moment it was fired — matches an OrderFireBatch.BatchNumber, which tracks
-    /// that round's own kitchen status independently of every other round.</summary>
+    /// value at the moment it was fired — matches an OrderFireBatch.BatchNumber.</summary>
     public int FireBatch { get; set; }
+    /// <summary>This item's own kitchen progress — the source of truth. The chef can advance
+    /// each item independently (New→Preparing→Ready→Served), so within one KOT the Paneer can
+    /// be Ready while the Roti is still New. OrderFireBatch.Status and Order.Status are both
+    /// computed rollups of item statuses (least-progressed active item), never set directly.</summary>
+    public OrderStatus Status { get; set; } = OrderStatus.New;
 }
 
-/// <summary>A single fire round's kitchen progress — see Order.FireBatches. Created when
-/// OrdersController.FireUnfiredItems fires a new batch (Status starts New); advanced via
-/// PATCH /orders/{id}/advance/{batchNumber}, independently of every other batch on the same
-/// order.</summary>
+/// <summary>A single fire round (KOT) — see Order.FireBatches. Created when
+/// OrdersController.FireUnfiredItems fires a new batch. Its Id doubles as the KOT number
+/// (see FireBatchDto), and FiredAt drives the KDS timer.</summary>
 public class OrderFireBatch : ITenantScoped
 {
     public int Id { get; set; }
@@ -171,6 +174,9 @@ public class OrderFireBatch : ITenantScoped
     /// <summary>Matches the OrderItem.FireBatch value of the items fired in this round —
     /// and the Order.CurrentFireBatch value at the moment this round was fired.</summary>
     public int BatchNumber { get; set; }
+    /// <summary>Rollup of this batch's items' statuses (least-progressed active item, or
+    /// Served once all are) — computed by RecomputeBatchStatus, never set directly. Drives
+    /// which KDS status-tab the ticket appears under.</summary>
     public OrderStatus Status { get; set; } = OrderStatus.New;
     public DateTime FiredAt { get; set; } = DateTime.UtcNow;
 }

@@ -142,6 +142,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // Store enums as readable strings rather than opaque ints.
         modelBuilder.Entity<Order>().Property(o => o.Status).HasConversion<string>();
         modelBuilder.Entity<OrderFireBatch>().Property(b => b.Status).HasConversion<string>();
+        modelBuilder.Entity<OrderItem>().Property(i => i.Status).HasConversion<string>();
         modelBuilder.Entity<AppUser>().Property(u => u.Role).HasConversion<string>();
         modelBuilder.Entity<Coupon>().Property(c => c.Type).HasConversion<string>();
         modelBuilder.Entity<GiftCard>().Property(g => g.Status).HasConversion<string>();

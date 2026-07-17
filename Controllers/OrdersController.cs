@@ -397,22 +397,48 @@ public class OrdersController(
         return order;
     }
 
-    /// <summary>Moves ONE fire-batch's kitchen ticket one step along NEW → PREPARING →
-    /// READY → SERVED (KDS buttons) — every other batch on the same order is untouched, so
-    /// a round already Preparing/Ready/Served never gets disturbed by a later round's
-    /// progress. Order.Status is recomputed as a rollup afterward (see
-    /// RecomputeOrderStatus).</summary>
+    /// <summary>Moves ONE item one step along NEW → PREPARING → READY → SERVED — the chef can
+    /// advance each item independently, so within one KOT the Paneer can be Ready while the
+    /// Roti is still New. The item's batch status and the order status are recomputed as
+    /// rollups afterward (least-progressed active item).</summary>
+    [HttpPatch("{id:int}/items/{itemId:int}/advance")]
+    public async Task<ActionResult<OrderDto>> AdvanceItem(int id, int itemId)
+    {
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        var item = order.Items.FirstOrDefault(i => i.Id == itemId);
+        if (item is null) return NotFound();
+        if (item.FireBatch == 0) throw new ApiValidationException("Item hasn't been fired to the kitchen yet.");
+
+        var idx = Array.IndexOf(StatusFlow, item.Status);
+        if (idx < StatusFlow.Length - 1) item.Status = StatusFlow[idx + 1];
+        RecomputeBatchStatus(order, item.FireBatch);
+        RecomputeOrderStatus(order);
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Advance-all: moves every not-yet-Served item in ONE fire batch one step
+    /// forward at once (the KDS "Advance All" button and the Tables screen's per-batch "Mark
+    /// Served"). Every other batch on the order is untouched. Recomputes the batch + order
+    /// status rollups afterward.</summary>
     [HttpPatch("{id:int}/advance/{batchNumber:int}")]
     public async Task<ActionResult<OrderDto>> Advance(int id, int batchNumber)
     {
         var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Order is already paid.");
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
         if (batch is null) return NotFound();
 
-        var idx = Array.IndexOf(StatusFlow, batch.Status);
-        if (idx < StatusFlow.Length - 1) batch.Status = StatusFlow[idx + 1];
-        NotifyBatchIfReady(order, batch);
+        foreach (var item in order.Items.Where(i => i.FireBatch == batchNumber && i.Status != OrderStatus.Served))
+        {
+            var idx = Array.IndexOf(StatusFlow, item.Status);
+            if (idx < StatusFlow.Length - 1) item.Status = StatusFlow[idx + 1];
+        }
+        RecomputeBatchStatus(order, batchNumber);
         RecomputeOrderStatus(order);
 
         await db.SaveChangesAsync();
@@ -438,21 +464,31 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
-    /// <summary>Fires an in-app "ready to serve" notification the moment a SPECIFIC batch
-    /// hits READY, so waiters/staff watching Notifications (not just the KDS screen) know to
-    /// go pick up that round — scoped to just that round's items, not the whole order.</summary>
-    private void NotifyBatchIfReady(Order order, OrderFireBatch batch)
+    /// <summary>Recomputes ONE fire batch's status as a rollup of its items (least-progressed
+    /// active item, or Served once all its items are). Fires the "ready to serve" notification
+    /// when the whole batch first reaches READY (i.e. every item in the round is Ready).</summary>
+    private void RecomputeBatchStatus(Order order, int batchNumber)
     {
-        if (batch.Status != OrderStatus.Ready) return;
-        var items = order.Items.Where(i => i.FireBatch == batch.BatchNumber).ToList();
-        db.Notifications.Add(new AppNotification
+        var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
+        if (batch is null) return;
+        var items = order.Items.Where(i => i.FireBatch == batchNumber).ToList();
+        if (items.Count == 0) return;
+
+        var previous = batch.Status;
+        var active = items.Where(i => i.Status != OrderStatus.Served).ToList();
+        batch.Status = active.Count > 0 ? active.Min(i => i.Status) : OrderStatus.Served;
+
+        if (previous != OrderStatus.Ready && batch.Status == OrderStatus.Ready)
         {
-            Title = "Order ready to serve",
-            Body = $"{order.Title} is ready — {items.Count} item{(items.Count == 1 ? "" : "s")}.",
-            Category = NotificationCategory.Order,
-            Channel = NotificationChannel.InApp,
-            ActionUrl = $"/orders/{order.Id}",
-        });
+            db.Notifications.Add(new AppNotification
+            {
+                Title = "Order ready to serve",
+                Body = $"{order.Title} is ready — {items.Count} item{(items.Count == 1 ? "" : "s")}.",
+                Category = NotificationCategory.Order,
+                Channel = NotificationChannel.InApp,
+                ActionUrl = $"/orders/{order.Id}",
+            });
+        }
     }
 
     /// <summary>Order.Status is a computed rollup of every active (non-Served) fire batch,
@@ -483,6 +519,7 @@ public class OrdersController(
         order.CurrentFireBatch += 1;
         foreach (var item in unfired) item.FireBatch = order.CurrentFireBatch;
         order.FireBatches.Add(new OrderFireBatch { OrderId = order.Id, BatchNumber = order.CurrentFireBatch });
+        RecomputeBatchStatus(order, order.CurrentFireBatch); // freshly-fired items are all New → batch New
         RecomputeOrderStatus(order);
 
         // OrderPlaced is the ONLY category Chef/KitchenStaff logins see (see
@@ -567,9 +604,9 @@ public class OrdersController(
     }
 
     /// <summary>Removes an item from a not-yet-paid order. Freely allowed while the item is
-    /// still unfired (even if other batches on the same order are already Served — this one
+    /// still unfired (even if other items on the same order are already Served — this one
     /// hasn't reached the kitchen at all yet); once it's been fired (FireBatch &gt; 0) only an
-    /// Owner/Manager may pull it back, and only if its own batch hasn't already been Served.</summary>
+    /// Owner/Manager may pull it back, and only if that item itself hasn't been Served.</summary>
     [HttpDelete("{id:int}/items/{itemId:int}")]
     public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId)
     {
@@ -583,14 +620,20 @@ public class OrdersController(
         if (item.FireBatch > 0)
         {
             if (!IsOwnerOrManager()) return Forbid();
-            var itemBatch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == item.FireBatch);
-            if (itemBatch?.Status == OrderStatus.Served) throw new ApiConflictException("Cannot remove an item that's already been served.");
+            if (item.Status == OrderStatus.Served) throw new ApiConflictException("Cannot remove an item that's already been served.");
         }
 
         order.Items.Remove(item);
         db.OrderItems.Remove(item);
         order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
         RecomputeTotals(order, await GetTaxRatePctAsync());
+        // Pulling a fired item can shift its batch's rollup (e.g. removing the last still-New
+        // item leaves the batch all-Ready) — and the order status with it.
+        if (item.FireBatch > 0)
+        {
+            RecomputeBatchStatus(order, item.FireBatch);
+            RecomputeOrderStatus(order);
+        }
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
