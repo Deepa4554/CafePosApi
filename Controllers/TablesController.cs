@@ -10,8 +10,18 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/tables")]
-public class TablesController(CafePosDbContext db, QrTokenService qrTokens) : ControllerBase
+public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITenantContext tenant) : ControllerBase
 {
+    /// <summary>A QR token with no table attached — for browsing/ordering when every
+    /// table is occupied, or for a counter/takeaway QR that isn't tied to a seat.
+    /// PublicController/OrdersController.CreatePublic both treat an empty table code
+    /// as "no table" (order comes back TAKEAWAY instead of DINE_IN).</summary>
+    [HttpGet("menu-qr-token")]
+    public ActionResult<object> GetMenuOnlyQrToken()
+    {
+        return new { token = qrTokens.Encode(tenant.TenantIdOrDefault, "") };
+    }
+
     /// <summary>Tables with live occupancy — a table only shows "empty" once its order
     /// is BOTH paid AND served (paying alone doesn't free it; the guest may still be
     /// sitting there waiting on food). Each table also carries an encrypted QrToken —

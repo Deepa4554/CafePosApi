@@ -12,6 +12,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/audit-log")]
 [Authorize(Policy = Policies.OwnerOrManager)]
+[Authorize(Policy = Policies.RequirePlus)]
 public class AuditController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]

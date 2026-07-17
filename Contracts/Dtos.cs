@@ -11,17 +11,33 @@ public record CreateOrderRequest(
     string? TableCode,
     string? GuestName,
     List<CreateOrderItemDto> Items,
+    // Order-time manual discount only. Coupons and gift cards are NO LONGER applied here —
+    // they're billing-time actions on a served order (see bill-coupon / bill-giftcard).
     decimal DiscountPct = 0,
-    string? CouponCode = null,
     int? BranchId = null,
     string? GuestPhone = null,
     // Who actually took/served this order — omit to default to the logged-in user's
     // own StaffMember record (self-service waiter); explicit when a Cashier/Manager/
     // Owner rings up an order on behalf of a different waiter from a shared counter POS.
-    int? ServedByStaffId = null,
-    string? GiftCardCode = null);
+    int? ServedByStaffId = null);
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
+
+// ---------- Order lifecycle (add item / fire / billing-time discounts / payment) ----------
+
+public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier);
+
+/// <summary>Manager-only markdown applied at the billing stage (Served). Supply exactly
+/// one of Pct (percentage of subtotal) or Amount (flat).</summary>
+public record BillDiscountRequest(decimal? Pct, decimal? Amount);
+
+public record BillCouponRequest(string Code);
+
+public record BillGiftCardRequest(string Code);
+
+/// <summary>How the settled bill was paid — Cash / Card / UPI / Multiple. Optional; the
+/// legacy pay call with no body still works (payment method just stays unrecorded).</summary>
+public record PayRequest(string? PaymentMethod);
 
 /// <summary>
 /// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData
@@ -38,9 +54,20 @@ public record RushForecastDto(
 /// discounts/coupons. No TableCode here on purpose: the table comes from the
 /// encrypted QrToken in the route, never from client-supplied input (a public/
 /// anonymous caller could otherwise claim any table it likes).</summary>
-public record CreatePublicOrderRequest(string? GuestName, List<CreateOrderItemDto> Items);
+public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, List<CreateOrderItemDto> Items);
 
-public record OrderItemDto(string Name, int Qty, decimal Price, string? Modifier);
+/// <summary>Status is the derived overall stage; the New/Read/Preparing/Ready/Served Qty
+/// fields are the real per-unit distribution (partial-quantity production) — they sum to
+/// Qty. KDS renders per-stage counts and picks the card's column from the lowest non-empty.</summary>
+public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
+    int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty);
+
+/// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
+/// order's non-Served batches into separate ticket cards from this list, instead of relying
+/// on the single rollup Status below. KotNumber is a tenant-wide sequential ticket id (same
+/// "#1000+id" convention as Order.Number) — the KOT-wise KDS view sorts/labels by this
+/// instead of by table, matching how a KOT chit works in a physical kitchen.</summary>
+public record FireBatchDto(int BatchNumber, string Status, DateTime FiredAt, string KotNumber);
 
 public record OrderDto(
     int Id,
@@ -55,6 +82,8 @@ public record OrderDto(
     decimal Subtotal,
     decimal DiscountPct,
     decimal DiscountAmount,
+    decimal BillDiscountAmount,
+    decimal CouponDiscountAmount,
     decimal Tax,
     decimal Total,
     string Status,
@@ -65,8 +94,12 @@ public record OrderDto(
     int? BranchId,
     string? CreatedByName,
     string? ServedByName,
+    string? CouponCode,
     string? GiftCardCode,
-    decimal GiftCardAmountApplied)
+    decimal GiftCardAmountApplied,
+    string? PaymentMethod,
+    int CurrentFireBatch,
+    List<FireBatchDto> FireBatches)
 {
     public static OrderDto From(Order o) => new(
         o.Id,
@@ -77,10 +110,13 @@ public record OrderDto(
         o.GuestName,
         o.GuestPhone,
         o.CustomerId,
-        o.Items.Select(i => new OrderItemDto(i.Name, i.Qty, i.Price, i.Modifier)).ToList(),
+        o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
+            i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
+        o.BillDiscountAmount,
+        o.CouponDiscountAmount,
         o.Tax,
         o.Total,
         o.Status.ToString().ToUpperInvariant(),
@@ -91,11 +127,27 @@ public record OrderDto(
         o.BranchId,
         o.CreatedByName,
         o.ServedByName,
+        o.CouponCode,
         o.GiftCardCode,
-        o.GiftCardAmountApplied);
+        o.GiftCardAmountApplied,
+        o.PaymentMethod,
+        o.CurrentFireBatch,
+        o.FireBatches.OrderBy(b => b.BatchNumber)
+            .Select(b => new FireBatchDto(b.BatchNumber, b.Status.ToString().ToUpperInvariant(), b.FiredAt, $"#{1000 + b.Id}"))
+            .ToList());
 }
 
 public record SetStatusRequest(string Status);
+
+/// <summary>Advance some units of one line one stage forward. FromStage null = the line's
+/// current least-progressed stage; Qty null = every unit at that stage.</summary>
+public record AdvanceUnitsRequest(string? FromStage, int? Qty);
+
+/// <summary>Production View bulk action. Allocations non-empty = advance exactly those
+/// line/quantities; otherwise FIFO-allocate Qty across the dish's fired lines (oldest KOT
+/// first).</summary>
+public record BulkAdvanceRequest(int MenuItemId, string FromStage, int? Qty, List<BulkAdvanceAllocation>? Allocations);
+public record BulkAdvanceAllocation(int OrderId, int ItemId, int Qty);
 
 // ---------- Menu ----------
 

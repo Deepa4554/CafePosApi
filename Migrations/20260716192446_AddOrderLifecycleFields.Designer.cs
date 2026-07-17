@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260716192446_AddOrderLifecycleFields")]
+    partial class AddOrderLifecycleFields
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1150,42 +1153,6 @@ namespace CafePOS.Api.Migrations
                     b.ToTable("Orders");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.OrderFireBatch", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("BatchNumber")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("FiredAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("OrderId")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.HasIndex("OrderId", "BatchNumber")
-                        .IsUnique();
-
-                    b.ToTable("OrderFireBatches");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.OrderItem", b =>
                 {
                     b.Property<int>("Id")
@@ -1210,27 +1177,11 @@ namespace CafePOS.Api.Migrations
                     b.Property<int>("OrderId")
                         .HasColumnType("integer");
 
-                    b.Property<int>("PreparingQty")
-                        .HasColumnType("integer");
-
                     b.Property<decimal>("Price")
                         .HasColumnType("numeric");
 
                     b.Property<int>("Qty")
                         .HasColumnType("integer");
-
-                    b.Property<int>("ReadQty")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ReadyQty")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ServedQty")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasColumnType("text");
 
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
@@ -1801,15 +1752,6 @@ namespace CafePOS.Api.Migrations
                     b.Navigation("Customer");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.OrderFireBatch", b =>
-                {
-                    b.HasOne("CafePOS.Api.Domain.Order", null)
-                        .WithMany("FireBatches")
-                        .HasForeignKey("OrderId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.OrderItem", b =>
                 {
                     b.HasOne("CafePOS.Api.Domain.Order", null)
@@ -1859,8 +1801,6 @@ namespace CafePOS.Api.Migrations
 
             modelBuilder.Entity("CafePOS.Api.Domain.Order", b =>
                 {
-                    b.Navigation("FireBatches");
-
                     b.Navigation("Items");
                 });
 

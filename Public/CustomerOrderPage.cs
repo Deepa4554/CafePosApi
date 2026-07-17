@@ -59,6 +59,7 @@ public static class CustomerOrderPage
   .banner.show { display: block; }
   .banner.error { background: var(--danger-bg); color: var(--danger); }
   .banner.occupied { background: #F6ECC8; color: #8A6D1F; }
+  .banner.info { background: var(--input-tint); color: var(--heading); }
   .field-label { font-size: 12px; font-weight: 700; color: var(--muted); margin: 4px 0 6px; }
   .guest-card {
     background: var(--card);
@@ -122,25 +123,34 @@ public static class CustomerOrderPage
   .item-card {
     background: var(--card);
     border-radius: 14px;
-    padding: 12px 14px;
+    padding: 10px;
     margin-bottom: 10px;
     display: flex;
     align-items: center;
     gap: 12px;
   }
+  .item-thumb {
+    width: 56px; height: 56px; border-radius: 10px; flex: 0 0 56px;
+    object-fit: cover; background: var(--input-tint);
+  }
+  .item-thumb.placeholder {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+  }
   .item-info { flex: 1; min-width: 0; }
   .item-name { font-weight: 700; font-size: 14px; }
   .item-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .item-price { color: var(--accent); font-weight: 700; font-size: 13px; margin-top: 4px; }
-  .stepper { display: flex; align-items: center; gap: 10px; }
+  .item-price { color: var(--heading); font-weight: 700; font-size: 13px; margin-top: 2px; }
+  .stepper { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
   .stepper button {
     width: 30px; height: 30px; border-radius: 15px; border: none;
     background: var(--input-tint); color: var(--heading);
     font-size: 18px; font-weight: 700; cursor: pointer;
   }
   .stepper button.add {
-    background: var(--button); color: #fff; width: auto; padding: 0 16px;
-    border-radius: 16px; font-size: 13px;
+    background: var(--card); color: var(--accent); width: auto; padding: 8px 14px;
+    border-radius: 10px; font-size: 12px; font-weight: 800; letter-spacing: 0.2px;
+    border: 1.5px solid var(--accent);
   }
   .stepper .qty { min-width: 16px; text-align: center; font-weight: 700; }
   .unavailable { opacity: 0.5; }
@@ -185,6 +195,17 @@ public static class CustomerOrderPage
     font-weight: 700; font-size: 13px; cursor: pointer;
   }
   #app { display: none; }
+  .processing-overlay {
+    position: fixed; inset: 0; background: rgba(43, 24, 16, 0.45);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+  }
+  .processing-overlay.show { display: flex; }
+  .spinner {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 4px solid rgba(255,255,255,0.35); border-top-color: #fff;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -196,12 +217,17 @@ public static class CustomerOrderPage
     </header>
 
     <div id="occupied-banner" class="banner occupied">This table already has an order in progress. You can still browse — ask a staff member if you'd like to add to the existing order.</div>
+    <div id="browse-banner" class="banner info">Browsing only from this code — ask a staff member to seat you at a table to place an order.</div>
     <div id="error-banner" class="banner error"></div>
 
-    <div class="guest-card">
+    <div id="guest-card" class="guest-card">
       <div class="field-label">Your name (optional)</div>
       <div class="guest-row">
         <input type="text" id="guest-name" placeholder="e.g. Priya" maxlength="60" />
+      </div>
+      <div class="field-label" style="margin-top:12px">Mobile number *</div>
+      <div class="guest-row">
+        <input type="tel" id="guest-phone" placeholder="e.g. 9876543210" maxlength="10" inputmode="numeric" />
       </div>
     </div>
 
@@ -214,6 +240,8 @@ public static class CustomerOrderPage
   </div>
 
   <div id="confirm-root"></div>
+
+  <div id="processing-overlay" class="processing-overlay"><div class="spinner"></div></div>
 
   <div id="cart-bar" class="cart-bar" style="display:none">
     <div class="cart-summary">
@@ -228,7 +256,7 @@ public static class CustomerOrderPage
   var pathParts = location.pathname.split('/').filter(Boolean); // ['order', token]
   var token = decodeURIComponent(pathParts[1] || '');
   var apiBase = '/api/public/' + encodeURIComponent(token);
-  var state = { table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {} };
+  var state = { table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {}, browseOnly: false };
 
   function el(tag, cls, html) {
     var e = document.createElement(tag);
@@ -277,6 +305,16 @@ public static class CustomerOrderPage
         var qty = state.cart[item.id] || 0;
         var card = el('div', 'item-card' + (item.available ? '' : ' unavailable'));
 
+        if (item.image) {
+          var img = document.createElement('img');
+          img.className = 'item-thumb';
+          img.src = item.image;
+          img.alt = item.name;
+          card.appendChild(img);
+        } else {
+          card.appendChild(el('div', 'item-thumb placeholder', '🍽️'));
+        }
+
         var info = el('div', 'item-info');
         info.appendChild(el('div', 'item-name', item.name));
         if (item.subtitle) info.appendChild(el('div', 'item-sub', item.subtitle));
@@ -284,22 +322,27 @@ public static class CustomerOrderPage
         if (!item.available) info.appendChild(el('div', 'unavailable-tag', 'CURRENTLY UNAVAILABLE'));
         card.appendChild(info);
 
-        var stepper = el('div', 'stepper');
-        if (qty > 0) {
-          var minus = el('button', null, '−');
-          minus.onclick = function () { changeQty(item.id, -1); };
-          var qtyEl = el('span', 'qty', String(qty));
-          var plus = el('button', null, '+');
-          plus.onclick = function () { changeQty(item.id, 1); };
-          stepper.appendChild(minus);
-          stepper.appendChild(qtyEl);
-          stepper.appendChild(plus);
-        } else {
-          var add = el('button', 'add', 'Add');
-          add.onclick = function () { changeQty(item.id, 1); };
-          stepper.appendChild(add);
+        // Ordering is a table-only feature — the no-table "general menu" code (see
+        // TablesController.GetMenuOnlyQrToken) is for browsing prices/availability
+        // only, so it never gets an Add/quantity stepper at all.
+        if (!state.browseOnly) {
+          var stepper = el('div', 'stepper');
+          if (qty > 0) {
+            var minus = el('button', null, '−');
+            minus.onclick = function () { changeQty(item.id, -1); };
+            var qtyEl = el('span', 'qty', String(qty));
+            var plus = el('button', null, '+');
+            plus.onclick = function () { changeQty(item.id, 1); };
+            stepper.appendChild(minus);
+            stepper.appendChild(qtyEl);
+            stepper.appendChild(plus);
+          } else {
+            var add = el('button', 'add', 'Add');
+            add.onclick = function () { changeQty(item.id, 1); };
+            stepper.appendChild(add);
+          }
+          card.appendChild(stepper);
         }
-        card.appendChild(stepper);
         root.appendChild(card);
       });
     });
@@ -317,22 +360,24 @@ public static class CustomerOrderPage
       card.appendChild(el('div', 'item-name', item.name));
       card.appendChild(el('div', 'item-price', money(item.price)));
 
-      var stepper = el('div', 'stepper');
-      if (qty > 0) {
-        var minus = el('button', null, '−');
-        minus.onclick = function () { changeQty(item.id, -1); };
-        var qtyEl = el('span', 'qty', String(qty));
-        var plus = el('button', null, '+');
-        plus.onclick = function () { changeQty(item.id, 1); };
-        stepper.appendChild(minus);
-        stepper.appendChild(qtyEl);
-        stepper.appendChild(plus);
-      } else {
-        var add = el('button', 'add', 'Add');
-        add.onclick = function () { changeQty(item.id, 1); };
-        stepper.appendChild(add);
+      if (!state.browseOnly) {
+        var stepper = el('div', 'stepper');
+        if (qty > 0) {
+          var minus = el('button', null, '−');
+          minus.onclick = function () { changeQty(item.id, -1); };
+          var qtyEl = el('span', 'qty', String(qty));
+          var plus = el('button', null, '+');
+          plus.onclick = function () { changeQty(item.id, 1); };
+          stepper.appendChild(minus);
+          stepper.appendChild(qtyEl);
+          stepper.appendChild(plus);
+        } else {
+          var add = el('button', 'add', 'Add');
+          add.onclick = function () { changeQty(item.id, 1); };
+          stepper.appendChild(add);
+        }
+        card.appendChild(stepper);
       }
-      card.appendChild(stepper);
       strip.appendChild(card);
     });
   }
@@ -369,20 +414,36 @@ public static class CustomerOrderPage
     var lines = cartLines();
     if (lines.length === 0) return;
     clearError();
+
+    var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
+    if (phoneDigits.length !== 10) {
+      showError('Enter a valid 10-digit mobile number to place your order.');
+      document.getElementById('guest-phone').focus();
+      return;
+    }
+
     var btn = document.getElementById('place-btn');
     btn.disabled = true;
     btn.textContent = 'Sending…';
+    // Blocks every tap on the menu/cart behind it (fixed, full-viewport, sits above
+    // everything) so items can't be added/removed while the order is in flight —
+    // otherwise a second tap mid-request could submit a cart that no longer matches
+    // what's on screen.
+    document.getElementById('processing-overlay').classList.add('show');
 
     fetchJson('/api/orders/public/' + encodeURIComponent(token), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         guestName: document.getElementById('guest-name').value || null,
+        guestPhone: phoneDigits,
         items: lines.map(function (l) { return { menuItemId: l.item.id, qty: l.qty }; }),
       }),
     }).then(function (order) {
+      document.getElementById('processing-overlay').classList.remove('show');
       showConfirmation(order);
     }).catch(function (err) {
+      document.getElementById('processing-overlay').classList.remove('show');
       showError(err.message);
       btn.disabled = false;
       btn.textContent = 'Place Order';
@@ -401,6 +462,7 @@ public static class CustomerOrderPage
     card.appendChild(el('div', 'order-no', 'Order ' + order.number + ' · ' + order.title));
     card.appendChild(el('div', 'order-total', money(order.total)));
     card.appendChild(el('p', null, "We'll bring it right out. Thank you!"));
+
     var again = el('button', 'again-btn', 'Place another order');
     again.onclick = function () { location.reload(); };
     card.appendChild(again);
@@ -427,10 +489,16 @@ public static class CustomerOrderPage
       state.bestSellers = results[3];
 
       document.getElementById('business-name').textContent = results[2].businessName || 'CafePOS';
-      document.getElementById('table-line').textContent =
-        'Table ' + state.table.code + ' · ' + state.table.seats + ' seats';
+      state.browseOnly = !state.table.code;
+      document.getElementById('table-line').textContent = state.table.code
+        ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
+        : 'Browsing the menu';
       if (state.table.occupied) {
         document.getElementById('occupied-banner').classList.add('show');
+      }
+      if (state.browseOnly) {
+        document.getElementById('browse-banner').classList.add('show');
+        document.getElementById('guest-card').style.display = 'none';
       }
 
       document.getElementById('loading').style.display = 'none';

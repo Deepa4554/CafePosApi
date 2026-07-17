@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260717070303_AddOrderItemStatus")]
+    partial class AddOrderItemStatus
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1210,22 +1213,10 @@ namespace CafePOS.Api.Migrations
                     b.Property<int>("OrderId")
                         .HasColumnType("integer");
 
-                    b.Property<int>("PreparingQty")
-                        .HasColumnType("integer");
-
                     b.Property<decimal>("Price")
                         .HasColumnType("numeric");
 
                     b.Property<int>("Qty")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ReadQty")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ReadyQty")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("ServedQty")
                         .HasColumnType("integer");
 
                     b.Property<string>("Status")

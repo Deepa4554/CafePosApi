@@ -40,6 +40,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<CafeTable> Tables => Set<CafeTable>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
+    public DbSet<OrderFireBatch> OrderFireBatches => Set<OrderFireBatch>();
     public DbSet<InventoryItem> InventoryItems => Set<InventoryItem>();
     public DbSet<CafeSettings> Settings => Set<CafeSettings>();
 
@@ -92,6 +93,16 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasForeignKey(o => o.CustomerId)
             .OnDelete(DeleteBehavior.SetNull);
 
+        modelBuilder.Entity<Order>()
+            .HasMany(o => o.FireBatches)
+            .WithOne()
+            .HasForeignKey(b => b.OrderId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<OrderFireBatch>()
+            .HasIndex(b => new { b.OrderId, b.BatchNumber })
+            .IsUnique();
+
         modelBuilder.Entity<Customer>()
             .HasMany(c => c.Coupons)
             .WithOne()
@@ -130,6 +141,8 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
 
         // Store enums as readable strings rather than opaque ints.
         modelBuilder.Entity<Order>().Property(o => o.Status).HasConversion<string>();
+        modelBuilder.Entity<OrderFireBatch>().Property(b => b.Status).HasConversion<string>();
+        modelBuilder.Entity<OrderItem>().Property(i => i.Status).HasConversion<string>();
         modelBuilder.Entity<AppUser>().Property(u => u.Role).HasConversion<string>();
         modelBuilder.Entity<Coupon>().Property(c => c.Type).HasConversion<string>();
         modelBuilder.Entity<GiftCard>().Property(g => g.Status).HasConversion<string>();
