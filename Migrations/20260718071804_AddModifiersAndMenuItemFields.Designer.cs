@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260718071804_AddModifiersAndMenuItemFields")]
+    partial class AddModifiersAndMenuItemFields
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -70,7 +73,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("Timestamp");
 
-                    b.ToTable("ApiFailureLogs", (string)null);
+                    b.ToTable("ApiFailureLogs");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.AppNotification", b =>
@@ -125,7 +128,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Notifications", (string)null);
+                    b.ToTable("Notifications");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.AppUser", b =>
@@ -175,7 +178,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("Email")
                         .IsUnique();
 
-                    b.ToTable("Users", (string)null);
+                    b.ToTable("Users");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.ApprovalRequest", b =>
@@ -239,7 +242,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Approvals", (string)null);
+                    b.ToTable("Approvals");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.AuditLogEntry", b =>
@@ -291,7 +294,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("AuditLog", (string)null);
+                    b.ToTable("AuditLog");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Branch", b =>
@@ -322,7 +325,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Branches", (string)null);
+                    b.ToTable("Branches");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.CafeExpense", b =>
@@ -369,7 +372,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("CafeExpenses", (string)null);
+                    b.ToTable("CafeExpenses");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.CafeSettings", b =>
@@ -452,7 +455,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Settings", (string)null);
+                    b.ToTable("Settings");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.CafeTable", b =>
@@ -486,7 +489,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId", "Code")
                         .IsUnique();
 
-                    b.ToTable("Tables", (string)null);
+                    b.ToTable("Tables");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Coupon", b =>
@@ -542,7 +545,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId", "Code")
                         .IsUnique();
 
-                    b.ToTable("Coupons", (string)null);
+                    b.ToTable("Coupons");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Customer", b =>
@@ -623,7 +626,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Customers", (string)null);
+                    b.ToTable("Customers");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.EmailOtp", b =>
@@ -658,7 +661,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("Email");
 
-                    b.ToTable("EmailOtps", (string)null);
+                    b.ToTable("EmailOtps");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.FavoriteItem", b =>
@@ -689,7 +692,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("FavoriteItems", (string)null);
+                    b.ToTable("FavoriteItems");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.GiftCard", b =>
@@ -740,7 +743,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId", "Code")
                         .IsUnique();
 
-                    b.ToTable("GiftCards", (string)null);
+                    b.ToTable("GiftCards");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.GuestSession", b =>
@@ -789,7 +792,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("GuestSessions", (string)null);
+                    b.ToTable("GuestSessions");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Integration", b =>
@@ -824,7 +827,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Integrations", (string)null);
+                    b.ToTable("Integrations");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.InventoryItem", b =>
@@ -884,7 +887,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("InventoryItems", (string)null);
+                    b.ToTable("InventoryItems");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.InventoryTransaction", b =>
@@ -946,7 +949,7 @@ namespace CafePOS.Api.Migrations
                         .IsUnique()
                         .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL");
 
-                    b.ToTable("InventoryTransactions", (string)null);
+                    b.ToTable("InventoryTransactions");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.LeaveRequest", b =>
@@ -1000,7 +1003,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("LeaveRequests", (string)null);
+                    b.ToTable("LeaveRequests");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.MenuItem", b =>
@@ -1077,7 +1080,7 @@ namespace CafePOS.Api.Migrations
                         .IsUnique()
                         .HasFilter("\"ShortCode\" IS NOT NULL");
 
-                    b.ToTable("MenuItems", (string)null);
+                    b.ToTable("MenuItems");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.MenuItemImage", b =>
@@ -1109,7 +1112,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("MenuItemImages", (string)null);
+                    b.ToTable("MenuItemImages");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.MissingRecipeAlert", b =>
@@ -1147,7 +1150,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId", "MenuItemId")
                         .IsUnique();
 
-                    b.ToTable("MissingRecipeAlerts", (string)null);
+                    b.ToTable("MissingRecipeAlerts");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Modifier", b =>
@@ -1186,7 +1189,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Modifiers", (string)null);
+                    b.ToTable("Modifiers");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.ModifierOption", b =>
@@ -1221,7 +1224,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("ModifierOptions", (string)null);
+                    b.ToTable("ModifierOptions");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Order", b =>
@@ -1345,7 +1348,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Orders", (string)null);
+                    b.ToTable("Orders");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.OrderFireBatch", b =>
@@ -1381,7 +1384,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("OrderId", "BatchNumber")
                         .IsUnique();
 
-                    b.ToTable("OrderFireBatches", (string)null);
+                    b.ToTable("OrderFireBatches");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.OrderItem", b =>
@@ -1450,7 +1453,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("OrderItems", (string)null);
+                    b.ToTable("OrderItems");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.PlatformExpense", b =>
@@ -1487,7 +1490,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("PlatformExpenses", (string)null);
+                    b.ToTable("PlatformExpenses");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.PurchaseItem", b =>
@@ -1525,7 +1528,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("PurchaseItems", (string)null);
+                    b.ToTable("PurchaseItems");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.PurchaseOrder", b =>
@@ -1561,7 +1564,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("PurchaseOrders", (string)null);
+                    b.ToTable("PurchaseOrders");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Recipe", b =>
@@ -1587,7 +1590,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId", "MenuItemId")
                         .IsUnique();
 
-                    b.ToTable("Recipes", (string)null);
+                    b.ToTable("Recipes");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.RecipeItem", b =>
@@ -1622,7 +1625,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("RecipeItems", (string)null);
+                    b.ToTable("RecipeItems");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.RefreshTokenEntry", b =>
@@ -1656,7 +1659,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("UserId");
 
-                    b.ToTable("RefreshTokens", (string)null);
+                    b.ToTable("RefreshTokens");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Reward", b =>
@@ -1690,7 +1693,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Rewards", (string)null);
+                    b.ToTable("Rewards");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.SessionDevice", b =>
@@ -1731,7 +1734,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TokenHash")
                         .IsUnique();
 
-                    b.ToTable("SessionDevices", (string)null);
+                    b.ToTable("SessionDevices");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Shift", b =>
@@ -1763,7 +1766,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Shifts", (string)null);
+                    b.ToTable("Shifts");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.StaffMember", b =>
@@ -1816,7 +1819,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Staff", (string)null);
+                    b.ToTable("Staff");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.StaffTask", b =>
@@ -1863,7 +1866,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Tasks", (string)null);
+                    b.ToTable("Tasks");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.StockTake", b =>
@@ -1912,7 +1915,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("StockTakes", (string)null);
+                    b.ToTable("StockTakes");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.StockTakeLine", b =>
@@ -1949,7 +1952,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("StockTakeLines", (string)null);
+                    b.ToTable("StockTakeLines");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Subscription", b =>
@@ -1985,7 +1988,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Subscriptions", (string)null);
+                    b.ToTable("Subscriptions");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.SupportTicket", b =>
@@ -2026,7 +2029,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("SupportTickets", (string)null);
+                    b.ToTable("SupportTickets");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.SupportTicketMessage", b =>
@@ -2065,7 +2068,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TicketId");
 
-                    b.ToTable("SupportTicketMessages", (string)null);
+                    b.ToTable("SupportTicketMessages");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Tenant", b =>
@@ -2095,7 +2098,7 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("Slug")
                         .IsUnique();
 
-                    b.ToTable("Tenants", (string)null);
+                    b.ToTable("Tenants");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Variant", b =>
@@ -2136,7 +2139,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("Variants", (string)null);
+                    b.ToTable("Variants");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Coupon", b =>

@@ -14,7 +14,7 @@ namespace CafePOS.Api.Controllers;
 [Route("api/menu-items/{menuItemId:int}/recipe")]
 [Authorize(Policy = Policies.OwnerOrManager)]
 [Authorize(Policy = Policies.RequirePlus)]
-public class RecipesController(CafePosDbContext db) : ControllerBase
+public class RecipesController(CafePosDbContext db, IAuditService audit) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<RecipeDto>> Get(int menuItemId)
@@ -23,6 +23,37 @@ public class RecipesController(CafePosDbContext db) : ControllerBase
         if (recipe is null) return NotFound();
 
         return await ToDto(recipe);
+    }
+
+    /// <summary>Ingredient cost of this recipe vs the menu item's price — ingredient cost is
+    /// more sensitive than the recipe shape itself (which any Owner/Manager already sees via
+    /// Get above), so this stacks its own extra OwnerOrManager policy per the doc's security
+    /// section (cost data must stay Owner/Manager-only).</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpGet("cost")]
+    public async Task<ActionResult<RecipeCostDto>> GetCost(int menuItemId)
+    {
+        var menuItem = await db.MenuItems.FindAsync(menuItemId);
+        if (menuItem is null) return NotFound();
+        var recipe = await db.Recipes.Include(r => r.Items).FirstOrDefaultAsync(r => r.MenuItemId == menuItemId);
+        if (recipe is null) return NotFound();
+
+        var inventoryIds = recipe.Items.Select(i => i.InventoryItemId).ToList();
+        var inventory = await db.InventoryItems.Where(i => inventoryIds.Contains(i.Id)).ToDictionaryAsync(i => i.Id);
+
+        var lines = recipe.Items
+            .Where(ri => inventory.ContainsKey(ri.InventoryItemId))
+            .Select(ri =>
+            {
+                var ingredient = inventory[ri.InventoryItemId];
+                var qtyInIngredientUnit = UnitConverter.Convert(ri.Quantity, ri.Unit, ingredient.Unit);
+                return new RecipeItemCostDto(ingredient.Id, ingredient.Name, ri.Quantity, ri.Unit, Math.Round((decimal)qtyInIngredientUnit * ingredient.UnitCost, 2));
+            })
+            .ToList();
+
+        var ingredientCost = lines.Sum(l => l.LineCost);
+        var foodCostPct = menuItem.Price > 0 ? Math.Round(ingredientCost / menuItem.Price * 100, 1) : 0;
+        return new RecipeCostDto(menuItem.Id, menuItem.Name, ingredientCost, menuItem.Price, foodCostPct, lines);
     }
 
     /// <summary>Full replace — the client always sends the complete ingredient list, not a
@@ -50,6 +81,7 @@ public class RecipesController(CafePosDbContext db) : ControllerBase
         }
 
         var recipe = await db.Recipes.Include(r => r.Items).FirstOrDefaultAsync(r => r.MenuItemId == menuItemId);
+        var oldIngredientIds = recipe?.Items.Select(i => i.InventoryItemId).ToHashSet() ?? [];
         if (recipe is null)
         {
             recipe = new Recipe { MenuItemId = menuItemId };
@@ -69,6 +101,18 @@ public class RecipesController(CafePosDbContext db) : ControllerBase
         }).ToList();
 
         await db.SaveChangesAsync();
+
+        // Recipe changes silently rewrite what auto-deduction consumes — a manager
+        // shrinking a portion's recorded quantity can hide theft/over-portioning from the
+        // variance report (doc Section 11 rule #3), so every edit gets an audit trail.
+        var newIngredientIds = recipe.Items.Select(i => i.InventoryItemId).ToHashSet();
+        var added = newIngredientIds.Except(oldIngredientIds).Count();
+        var removed = oldIngredientIds.Except(newIngredientIds).Count();
+        var kept = newIngredientIds.Intersect(oldIngredientIds).Count();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Menu, menuItemId.ToString(),
+            $"Recipe for '{menuItem.Name}' updated: {added} ingredient(s) added, {removed} removed, {kept} kept/changed.",
+            AuditSeverity.Low);
+
         return await ToDto(recipe);
     }
 

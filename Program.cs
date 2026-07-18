@@ -98,6 +98,13 @@ builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 builder.Services.AddSingleton<IPasswordHasher<AppUser>, PasswordHasher<AppUser>>();
 builder.Services.AddScoped<IAuditService, AuditService>();
 
+// ---------- Order building (staff POS + anonymous QR + guest-session cart, shared) ----------
+builder.Services.AddScoped<IOrderBuildingService, OrderBuildingService>();
+
+// ---------- Guest QR-ordering sessions (see docs/qr-ordering-session-plan) ----------
+builder.Services.AddScoped<IGuestSessionService, GuestSessionService>();
+builder.Services.AddHostedService<GuestSessionSweepService>();
+
 // ---------- Email (cafe-signup OTP) ----------
 // Sends via Gmail SMTP if Email:GmailAddress/GmailAppPassword are configured; otherwise
 // logs the code so local dev isn't blocked. See appsettings.Development.json.
@@ -189,6 +196,10 @@ builder.Services.AddCors(options =>
 // cafe registration) — 200/min globally is nowhere near tight enough to stop
 // password/OTP brute-forcing against a single account.
 const string AuthLimiterPolicy = "AuthLimiter";
+// Matches the literal string GuestSessionController's [EnableRateLimiting(...)] attribute
+// uses — attribute arguments must be compile-time constants, so that reference can't
+// share this const directly across files.
+const string GuestSessionLimiterPolicy = "GuestSessionLimiter";
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -209,6 +220,19 @@ builder.Services.AddRateLimiter(options =>
             {
                 PermitLimit = 800,
                 Window = TimeSpan.FromMinutes(5),
+                QueueLimit = 0,
+            }));
+
+    // Guest QR-ordering endpoints (GuestSessionController) had no dedicated limit at all
+    // before — just the generous 200/min global cap — despite being the one surface a
+    // stranger can hit with nothing but a photo of a printed QR code (doc Section 9 #1/#5).
+    options.AddPolicy(GuestSessionLimiterPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
 });

@@ -37,12 +37,17 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     // Core catalog / ordering
     public DbSet<MenuItem> MenuItems => Set<MenuItem>();
     public DbSet<MenuItemImage> MenuItemImages => Set<MenuItemImage>();
+    public DbSet<Variant> Variants => Set<Variant>();
+    public DbSet<Modifier> Modifiers => Set<Modifier>();
+    public DbSet<ModifierOption> ModifierOptions => Set<ModifierOption>();
     public DbSet<CafeTable> Tables => Set<CafeTable>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderFireBatch> OrderFireBatches => Set<OrderFireBatch>();
     public DbSet<InventoryItem> InventoryItems => Set<InventoryItem>();
     public DbSet<CafeSettings> Settings => Set<CafeSettings>();
+    public DbSet<GuestSession> GuestSessions => Set<GuestSession>();
+    public DbSet<SessionDevice> SessionDevices => Set<SessionDevice>();
 
     // Auth
     public DbSet<AppUser> Users => Set<AppUser>();
@@ -78,6 +83,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<InventoryTransaction> InventoryTransactions => Set<InventoryTransaction>();
     public DbSet<PurchaseOrder> PurchaseOrders => Set<PurchaseOrder>();
     public DbSet<PurchaseItem> PurchaseItems => Set<PurchaseItem>();
+    public DbSet<StockTake> StockTakes => Set<StockTake>();
+    public DbSet<StockTakeLine> StockTakeLines => Set<StockTakeLine>();
+    public DbSet<MissingRecipeAlert> MissingRecipeAlerts => Set<MissingRecipeAlert>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -127,6 +135,12 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasForeignKey(m => m.TicketId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        modelBuilder.Entity<Modifier>()
+            .HasMany(m => m.Options)
+            .WithOne()
+            .HasForeignKey(o => o.ModifierId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         modelBuilder.Entity<Recipe>()
             .HasMany(r => r.Items)
             .WithOne()
@@ -137,6 +151,12 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasMany(p => p.Items)
             .WithOne()
             .HasForeignKey(i => i.PurchaseOrderId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<StockTake>()
+            .HasMany(s => s.Lines)
+            .WithOne()
+            .HasForeignKey(l => l.StockTakeId)
             .OnDelete(DeleteBehavior.Cascade);
 
         // Store enums as readable strings rather than opaque ints.
@@ -161,7 +181,13 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<Integration>().Property(i => i.Status).HasConversion<string>();
         modelBuilder.Entity<SupportTicket>().Property(t => t.Status).HasConversion<string>();
         modelBuilder.Entity<MenuItem>().Property(m => m.ProductType).HasConversion<string>();
+        modelBuilder.Entity<MenuItem>().Property(m => m.ItemType).HasConversion<string>();
+        modelBuilder.Entity<MenuItem>().Property(m => m.VegNonVegType).HasConversion<string>();
         modelBuilder.Entity<InventoryTransaction>().Property(t => t.Type).HasConversion<string>();
+        modelBuilder.Entity<InventoryTransaction>().Property(t => t.WasteReasonCode).HasConversion<string>();
+        modelBuilder.Entity<StockTake>().Property(s => s.Status).HasConversion<string>();
+        modelBuilder.Entity<GuestSession>().Property(s => s.Status).HasConversion<string>();
+        modelBuilder.Entity<GuestSession>().Property(s => s.ClosedReason).HasConversion<string>();
 
         // Codes only need to be unique within a cafe — two different tenants can
         // both have a table "T1" or a coupon "WELCOME10" without colliding.
@@ -177,13 +203,36 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // One recipe per menu item per tenant.
         modelBuilder.Entity<Recipe>().HasIndex(r => new { r.TenantId, r.MenuItemId }).IsUnique();
         modelBuilder.Entity<MenuItemImage>().HasIndex(i => i.MenuItemId);
+        // ShortCode is optional but must be unique when set (per tenant).
+        modelBuilder.Entity<MenuItem>().HasIndex(m => new { m.TenantId, m.ShortCode }).IsUnique()
+            .HasFilter("\"ShortCode\" IS NOT NULL");
         // Looked up on every single authenticated request that needs a token refresh.
         modelBuilder.Entity<RefreshTokenEntry>().HasIndex(t => t.Token).IsUnique();
         modelBuilder.Entity<RefreshTokenEntry>().HasIndex(t => t.UserId);
+        // Enforces "one active session per table" at the DB level (doc Section 7) — a
+        // second scan while one is ACTIVE/LOCKED must go through the join flow, never
+        // create a second row.
+        modelBuilder.Entity<GuestSession>().HasIndex(s => s.TableId).IsUnique()
+            .HasFilter("\"Status\" IN ('Active','Locked')");
+        // Looked up on every guest-session-scoped request (see ValidateGuestSessionAttribute)
+        // — one row per device credential, not per session (see SessionDevice doc comment).
+        modelBuilder.Entity<SessionDevice>().HasIndex(d => d.TokenHash).IsUnique();
+        modelBuilder.Entity<SessionDevice>().HasIndex(d => d.SessionId);
         // Always sorted newest-first and commonly filtered by status — this table
         // grows with every failed request, so both need to stay index-backed.
         modelBuilder.Entity<ApiFailureLog>().HasIndex(f => f.Timestamp);
         modelBuilder.Entity<ApiFailureLog>().HasIndex(f => f.StatusCode);
+
+        // Idempotency guard — one Sale-type (fire-time) deduction per (OrderItem,
+        // Ingredient). Existing rows all have OrderItemId == NULL; Postgres treats NULLs
+        // as distinct in a unique index, so historical Sale rows never collide with each
+        // other or with this filter — no backfill needed.
+        modelBuilder.Entity<InventoryTransaction>()
+            .HasIndex(t => new { t.OrderItemId, t.InventoryItemId })
+            .IsUnique()
+            .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL");
+
+        modelBuilder.Entity<MissingRecipeAlert>().HasIndex(a => new { a.TenantId, a.MenuItemId }).IsUnique();
 
         ApplyTenantIsolation(modelBuilder);
     }

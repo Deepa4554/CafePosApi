@@ -65,7 +65,7 @@ public class PublicController(CafePosDbContext db, QrTokenService qrTokens, Rece
         if (table is null) return NotFound();
 
         var busy = await db.Orders.IgnoreQueryFilters()
-            .AnyAsync(o => o.TenantId == tenantId && o.TableCode == tableCode && (!o.Paid || o.Status != OrderStatus.Served));
+            .AnyAsync(o => o.TenantId == tenantId && o.TableCode == tableCode && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
         return new { table.Code, table.Zone, table.Seats, Occupied = busy };
     }
 

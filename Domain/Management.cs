@@ -79,7 +79,7 @@ public enum AuditAction
     ApprovalGranted, ApprovalDenied,
 }
 
-public enum AuditResource { Order, Customer, Staff, Inventory, Menu, Invoice, Subscription, Auth, Settings, Branch }
+public enum AuditResource { Order, Customer, Staff, Inventory, Menu, Invoice, Subscription, Auth, Settings, Branch, Table }
 public enum AuditSeverity { Low, Medium, High, Critical }
 
 public class AuditLogEntry : ITenantScoped

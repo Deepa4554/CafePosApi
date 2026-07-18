@@ -82,10 +82,10 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
         if (item is null) return NotFound();
         if (req.Quantity <= 0)
             throw new ApiValidationException("Waste quantity must be greater than zero.");
-        if (string.IsNullOrWhiteSpace(req.Reason))
-            throw new ApiValidationException("A reason is required to log waste.");
 
-        ApplyTransaction(item, InventoryTransactionType.Waste, -req.Quantity, req.Reason.Trim(), referenceId: null);
+        var label = req.Reason.ToString();
+        var reasonText = string.IsNullOrWhiteSpace(req.Note) ? label : $"{label} — {req.Note.Trim()}";
+        ApplyTransaction(item, InventoryTransactionType.Waste, -req.Quantity, reasonText, referenceId: null, wasteReasonCode: req.Reason);
 
         await db.SaveChangesAsync();
         return InventoryItemDto.From(item);
@@ -144,7 +144,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
     /// <summary>Applies a signed stock change to <paramref name="item"/> and records the
     /// matching ledger row. Stock is allowed to go negative — never blocked here.</summary>
-    private void ApplyTransaction(InventoryItem item, InventoryTransactionType type, double changedQuantity, string? reason, string? referenceId)
+    private void ApplyTransaction(InventoryItem item, InventoryTransactionType type, double changedQuantity, string? reason, string? referenceId, WasteReason? wasteReasonCode = null)
     {
         var previous = item.Current;
         item.Current += changedQuantity;
@@ -156,6 +156,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
             ChangedQuantity = changedQuantity,
             RemainingStock = item.Current,
             Reason = reason,
+            WasteReasonCode = wasteReasonCode,
             ReferenceId = referenceId,
             UserId = CurrentUserId(),
             UserName = CurrentUserName(),
@@ -168,7 +169,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
         var names = await db.InventoryItems.Where(i => ids.Contains(i.Id)).ToDictionaryAsync(i => i.Id, i => i.Name);
         return txns.Select(t => new InventoryTransactionDto(
             t.Id, t.InventoryItemId, names.TryGetValue(t.InventoryItemId, out var n) ? n : "Unknown",
-            t.Type.ToString(), t.PreviousStock, t.ChangedQuantity, t.RemainingStock, t.Reason, t.ReferenceId, t.UserName, t.CreatedAt)).ToList();
+            t.Type.ToString(), t.PreviousStock, t.ChangedQuantity, t.RemainingStock, t.Reason, t.WasteReasonCode?.ToString(), t.ReferenceId, t.UserName, t.CreatedAt)).ToList();
     }
 
     private int? CurrentUserId()

@@ -23,6 +23,8 @@ public record CreateOrderRequest(
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
 
+public record CancelOrderRequest(string? Reason);
+
 // ---------- Order lifecycle (add item / fire / billing-time discounts / payment) ----------
 
 public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier);
@@ -60,7 +62,7 @@ public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, Li
 /// fields are the real per-unit distribution (partial-quantity production) — they sum to
 /// Qty. KDS renders per-stage counts and picks the card's column from the lowest non-empty.</summary>
 public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
-    int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty);
+    int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty, bool Voided, DateTime? VoidedAt);
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
@@ -90,6 +92,9 @@ public record OrderDto(
     bool Paid,
     bool Refunded,
     decimal? RefundedAmount,
+    bool Cancelled,
+    DateTime? CancelledAt,
+    string? CancelReason,
     DateTime CreatedAt,
     int? BranchId,
     string? CreatedByName,
@@ -111,7 +116,7 @@ public record OrderDto(
         o.GuestPhone,
         o.CustomerId,
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
-            i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty)).ToList(),
+            i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
@@ -123,6 +128,9 @@ public record OrderDto(
         o.Paid,
         o.Refunded,
         o.RefundedAmount,
+        o.Cancelled,
+        o.CancelledAt,
+        o.CancelReason,
         o.CreatedAt,
         o.BranchId,
         o.CreatedByName,
@@ -149,11 +157,65 @@ public record AdvanceUnitsRequest(string? FromStage, int? Qty);
 public record BulkAdvanceRequest(int MenuItemId, string FromStage, int? Qty, List<BulkAdvanceAllocation>? Allocations);
 public record BulkAdvanceAllocation(int OrderId, int ItemId, int Qty);
 
+// ---------- Guest sessions (QR ordering — see docs/qr-ordering-session-plan) ----------
+
+/// <summary>GuestName/GuestPhone are only used (and GuestPhone required, 10 digits — same
+/// rule OrdersController.CreatePublic already enforces) the very first time a cart item is
+/// added for a session, since that's what creates the underlying Order/Customer record;
+/// every later call ignores them.</summary>
+public record AddCartItemRequest(int MenuItemId, int Qty, string? Modifier, string? GuestName = null, string? GuestPhone = null);
+
+/// <summary>Everything the guest page needs to render: the session's own status, the
+/// cart (unfired items — FireBatch == 0 on the underlying order, see OrderBuildingService)
+/// and, once the first item has been fired, the live order/KOT status. Order is null until
+/// the very first cart-add creates the underlying (still-unfired) Order row.</summary>
+public record GuestSessionStateDto(string Status, string TableCode, OrderDto? Order)
+{
+    public static GuestSessionStateDto From(GuestSession session, string tableCode, Order? order) =>
+        new(session.Status.ToString().ToUpperInvariant(), tableCode, order is null ? null : OrderDto.From(order));
+}
+
+/// <summary>Result of POST session/scan — Case drives which screen the guest page shows
+/// (doc Section 3's 5-CASE decision tree). State is populated for READY/BILL_LOCKED;
+/// null for JOIN (another device already owns an active session on this table — the guest
+/// page should prompt for POST session/join) and STAFF_ASSIST (an unpaid order sits on
+/// this table with no live session — no new session is auto-created).</summary>
+public record ScanResultDto(string Case, GuestSessionStateDto? State);
+
+public record RevokeSessionRequest(string? Reason);
+
 // ---------- Menu ----------
 
-public record CreateMenuItemRequest(string Name, string Category, decimal Price, string? Icon, string? Subtitle, string? Image, string? Description, ProductType? ProductType = null, int? LinkedInventoryItemId = null);
+public record CreateMenuItemRequest(
+    string Name,
+    string Category,
+    decimal Price,
+    string? Icon,
+    string? Subtitle,
+    string? Image,
+    string? Description,
+    ProductType? ProductType = null,
+    int? LinkedInventoryItemId = null,
+    string? ShortCode = null,
+    string? KitchenStation = null,
+    string? ItemType = null,
+    string? VegNonVegType = null);
 
-public record UpdateMenuItemRequest(string? Name, string? Category, decimal? Price, bool? Available, string? Subtitle, string? Image, string? Description, bool? Popular, ProductType? ProductType = null, int? LinkedInventoryItemId = null);
+public record UpdateMenuItemRequest(
+    string? Name,
+    string? Category,
+    decimal? Price,
+    bool? Available,
+    string? Subtitle,
+    string? Image,
+    string? Description,
+    bool? Popular,
+    ProductType? ProductType = null,
+    int? LinkedInventoryItemId = null,
+    string? ShortCode = null,
+    string? KitchenStation = null,
+    string? ItemType = null,
+    string? VegNonVegType = null);
 
 public record BulkImportResultDto(int CreatedCount, int SkippedCount);
 
@@ -190,13 +252,13 @@ public record InventoryItemDto(
 
 public record RestockRequest(double Quantity, decimal? UnitCost);
 
-public record WasteRequest(double Quantity, string Reason);
+public record WasteRequest(double Quantity, WasteReason Reason, string? Note = null);
 
 public record AdjustStockRequest(double NewQuantity, string Reason);
 
 public record InventoryTransactionDto(
     int Id, int InventoryItemId, string InventoryItemName, string Type, double PreviousStock,
-    double ChangedQuantity, double RemainingStock, string? Reason, string? ReferenceId, string UserName, DateTime CreatedAt);
+    double ChangedQuantity, double RemainingStock, string? Reason, string? WasteReasonCode, string? ReferenceId, string UserName, DateTime CreatedAt);
 
 // ---------- Purchase Orders ----------
 
@@ -218,6 +280,31 @@ public record RecipeItemDto(int InventoryItemId, string InventoryItemName, strin
 
 public record RecipeDto(int MenuItemId, List<RecipeItemDto> Items);
 
+/// <summary>Cost of one portion of a recipe against its menu price — see
+/// RecipesController.GetCost / ReportsController.FoodCost.</summary>
+public record RecipeItemCostDto(int InventoryItemId, string Name, double Quantity, string Unit, decimal LineCost);
+
+public record RecipeCostDto(int MenuItemId, string MenuItemName, decimal IngredientCost, decimal MenuPrice, decimal FoodCostPct, List<RecipeItemCostDto> Items);
+
+// ---------- Stock Take ----------
+
+public record CreateStockTakeRequest(int? BranchId, string? Note);
+
+public record RecordCountRequest(double CountedQty);
+
+public record StockTakeLineDto(int Id, int InventoryItemId, string InventoryItemName, string Unit, double SystemQty, double? CountedQty, double? Variance);
+
+public record StockTakeDto(int Id, string Status, int? BranchId, string? Note, string CreatedByName, DateTime CreatedAt,
+    DateTime? FinalizedAt, string? FinalizedByName, List<StockTakeLineDto> Lines);
+
+// ---------- Reports ----------
+
+public record VarianceReportLineDto(int InventoryItemId, string Name, string Unit,
+    double TheoreticalConsumption, double PurchasedQty, double WastageQty,
+    double? LatestStockTakeVariance, DateTime? LatestStockTakeAt);
+
+public record MissingRecipeAlertDto(int Id, int MenuItemId, string MenuItemName, int OccurrenceCount, DateTime FirstOccurredAt, DateTime LastOccurredAt);
+
 // ---------- Settings ----------
 
 public record UpdateSettingsRequest(
@@ -238,3 +325,35 @@ public record UpdateSettingsRequest(
     string? Phone = null,
     string? Address = null,
     string? StoreHoursJson = null);
+
+// ---------- Menu Features ----------
+
+public record CreateVariantRequest(string Name, decimal Price);
+
+public record UpdateVariantRequest(string? Name, decimal? Price, bool? IsAvailable = null);
+
+public record VariantDto(int Id, int MenuItemId, string Name, decimal Price, int SortOrder)
+{
+    public static VariantDto From(Variant v) => new(v.Id, v.MenuItemId, v.Name, v.Price, v.SortOrder);
+}
+
+// ---------- Modifiers (Spice, Add-ons, etc.) ----------
+
+public record CreateModifierOptionRequest(string Name, decimal Price = 0);
+
+public record UpdateModifierOptionRequest(string? Name, decimal? Price);
+
+public record ModifierOptionDto(int Id, int ModifierId, string Name, decimal Price, int SortOrder)
+{
+    public static ModifierOptionDto From(ModifierOption o) => new(o.Id, o.ModifierId, o.Name, o.Price, o.SortOrder);
+}
+
+public record CreateModifierRequest(string Name, string Type = "MultiSelect", bool IsRequired = false);
+
+public record UpdateModifierRequest(string? Name, string? Type, bool? IsRequired);
+
+public record ModifierDto(int Id, int MenuItemId, string Name, string Type, bool IsRequired, int SortOrder, List<ModifierOptionDto> Options)
+{
+    public static ModifierDto From(Modifier m) => new(m.Id, m.MenuItemId, m.Name, m.Type, m.IsRequired, m.SortOrder,
+        m.Options.OrderBy(o => o.SortOrder).Select(ModifierOptionDto.From).ToList());
+}

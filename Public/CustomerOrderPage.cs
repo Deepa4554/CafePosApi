@@ -4,9 +4,11 @@ namespace CafePOS.Api.Public;
 /// The customer-facing QR ordering page: a single self-contained HTML document (inline
 /// CSS/JS, no build step, no external requests) served by PublicOrderPageController at
 /// GET /order/{token}. It talks to the same origin's token-aware anonymous endpoints
-/// (see PublicController) and posts the order to POST /api/orders/public/{token}. The
+/// (see PublicController) plus the guest-session lifecycle under {apiBase}/session
+/// (see GuestSessionController — scan/join/state/cart/order/request-bill/bill). The
 /// encrypted token (never the cafe name or table code in plain text) is read
 /// client-side from the URL path so this one document serves every table of every cafe.
+/// Cookies work here with zero extra config: this page and the API share an origin.
 /// </summary>
 public static class CustomerOrderPage
 {
@@ -32,6 +34,8 @@ public static class CustomerOrderPage
     --success-bg: #DCEBDD;
     --danger: #B3261E;
     --danger-bg: #F8D9D3;
+    --locked: #8A6D1F;
+    --locked-bg: #F6ECC8;
   }
   * { box-sizing: border-box; }
   body {
@@ -58,7 +62,6 @@ public static class CustomerOrderPage
   }
   .banner.show { display: block; }
   .banner.error { background: var(--danger-bg); color: var(--danger); }
-  .banner.occupied { background: #F6ECC8; color: #8A6D1F; }
   .banner.info { background: var(--input-tint); color: var(--heading); }
   .field-label { font-size: 12px; font-weight: 700; color: var(--muted); margin: 4px 0 6px; }
   .guest-card {
@@ -172,6 +175,11 @@ public static class CustomerOrderPage
     cursor: pointer;
   }
   .place-btn:disabled { opacity: 0.5; cursor: default; }
+  .secondary-btn {
+    background: none; border: 1px solid var(--divider);
+    color: var(--heading); padding: 12px 20px; border-radius: 12px;
+    font-weight: 700; font-size: 13px; cursor: pointer;
+  }
   .center-screen {
     min-height: 70vh; display: flex; flex-direction: column;
     align-items: center; justify-content: center; text-align: center; padding: 24px;
@@ -189,12 +197,20 @@ public static class CustomerOrderPage
   }
   .confirm-card .order-no { color: var(--muted); font-size: 13px; margin-top: 4px; }
   .confirm-card .order-total { font-size: 26px; font-weight: 800; margin: 10px 0; }
-  .again-btn {
-    margin-top: 18px; background: none; border: 1px solid var(--divider);
-    color: var(--heading); padding: 12px 20px; border-radius: 12px;
-    font-weight: 700; font-size: 13px; cursor: pointer;
+  .again-btn { margin-top: 18px; }
+  .status-pill {
+    display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: 0.3px;
+    padding: 3px 8px; border-radius: 8px; background: var(--input-tint); color: var(--muted);
+    text-transform: uppercase; margin-top: 3px;
   }
-  #app { display: none; }
+  .status-pill.ready { background: var(--success-bg); color: var(--success); }
+  .status-pill.served { background: var(--input-tint); color: var(--muted); }
+  .bill-line { display: flex; justify-content: space-between; font-size: 13px; padding: 6px 0; }
+  .bill-line.total { font-weight: 800; font-size: 16px; border-top: 1px solid var(--divider); margin-top: 6px; padding-top: 10px; }
+  .action-row { display: flex; gap: 10px; margin-top: 18px; }
+  .action-row button { flex: 1; }
+  .locked-note { background: var(--locked-bg); color: var(--locked); border-radius: 12px; padding: 12px 14px; font-size: 13px; font-weight: 600; margin-top: 14px; }
+  #app, #placed-screen, #bill-screen, #join-screen, #staff-assist-screen, #ended-screen { display: none; }
   .processing-overlay {
     position: fixed; inset: 0; background: rgba(43, 24, 16, 0.45);
     display: none; align-items: center; justify-content: center; z-index: 50;
@@ -210,13 +226,13 @@ public static class CustomerOrderPage
 </head>
 <body>
   <div id="loading" class="center-screen"><p>Loading menu…</p></div>
+
   <div id="app" class="wrap">
     <header>
       <h1 id="business-name">CafePOS</h1>
       <div class="table-line" id="table-line"></div>
     </header>
 
-    <div id="occupied-banner" class="banner occupied">This table already has an order in progress. You can still browse — ask a staff member if you'd like to add to the existing order.</div>
     <div id="browse-banner" class="banner info">Browsing only from this code — ask a staff member to seat you at a table to place an order.</div>
     <div id="error-banner" class="banner error"></div>
 
@@ -239,7 +255,44 @@ public static class CustomerOrderPage
     <div id="menu-root"></div>
   </div>
 
-  <div id="confirm-root"></div>
+  <div id="join-screen" class="center-screen">
+    <h2>Someone's already ordering at this table</h2>
+    <p>Are you sitting with them? Join their order and see the same cart.</p>
+    <button class="place-btn again-btn" id="join-btn">Yes, I'm at this table</button>
+  </div>
+
+  <div id="staff-assist-screen" class="center-screen">
+    <h2>Please call a staff member</h2>
+    <p>There's already a bill open on this table that isn't linked to a live session — a staff member can help you continue or start fresh.</p>
+  </div>
+
+  <div id="ended-screen" class="center-screen">
+    <h2 id="ended-title">Session ended</h2>
+    <p id="ended-message">Please scan the QR code on your table again.</p>
+  </div>
+
+  <div id="placed-screen" class="wrap">
+    <header><h1 id="placed-business-name">CafePOS</h1><div class="table-line" id="placed-table-line"></div></header>
+    <div class="confirm-card">
+      <div class="badge">✓</div>
+      <h2>Order sent to the kitchen!</h2>
+      <div id="placed-items"></div>
+      <div class="order-total" id="placed-total"></div>
+      <div class="action-row">
+        <button class="secondary-btn" id="add-more-btn">Add more items</button>
+        <button class="place-btn" id="request-bill-btn">Request Bill</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="bill-screen" class="wrap">
+    <header><h1 id="bill-business-name">CafePOS</h1><div class="table-line" id="bill-table-line"></div></header>
+    <div class="confirm-card">
+      <h2>Your Bill</h2>
+      <div id="bill-lines" style="text-align:left"></div>
+      <div class="locked-note">Bill requested — ordering is closed. Please pay at the counter.</div>
+    </div>
+  </div>
 
   <div id="processing-overlay" class="processing-overlay"><div class="spinner"></div></div>
 
@@ -256,7 +309,12 @@ public static class CustomerOrderPage
   var pathParts = location.pathname.split('/').filter(Boolean); // ['order', token]
   var token = decodeURIComponent(pathParts[1] || '');
   var apiBase = '/api/public/' + encodeURIComponent(token);
-  var state = { table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {}, browseOnly: false };
+  var sessionBase = apiBase + '/session';
+  var state = {
+    table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {}, browseOnly: false,
+    order: null, // last known OrderDto from the server (session-scoped), or null
+  };
+  var pollTimer = null;
 
   function el(tag, cls, html) {
     var e = document.createElement(tag);
@@ -284,10 +342,112 @@ public static class CustomerOrderPage
       return res.json().catch(function () { return null; }).then(function (body) {
         if (!res.ok) {
           var message = (body && (body.title || body.detail)) || ('Request failed (' + res.status + ')');
-          throw new Error(message);
+          var err = new Error(message);
+          err.status = res.status;
+          throw err;
         }
         return body;
       });
+    });
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(function () {
+      fetchJson(sessionBase + '/state').then(handleStateUpdate).catch(function (err) {
+        if (err.status === 410) showEnded('This session has ended.');
+      });
+    }, 5000);
+  }
+
+  // Applied both right after an action and on each poll tick — the session's own status
+  // (LOCKED from another device requesting the bill, etc.) always wins over whatever
+  // screen we were already showing.
+  function handleStateUpdate(s) {
+    state.order = s.order;
+    if (s.status === 'LOCKED') { showBillScreen(s); return; }
+    if (s.order && s.order.currentFireBatch > 0) { showPlacedScreen(s); return; }
+    syncCartFromOrder();
+    renderMenu();
+    renderBestSellers();
+    renderCartBar();
+  }
+
+  function hideAllScreens() {
+    ['app', 'join-screen', 'staff-assist-screen', 'ended-screen', 'placed-screen', 'bill-screen'].forEach(function (id) {
+      document.getElementById(id).style.display = 'none';
+    });
+    document.getElementById('cart-bar').style.display = 'none';
+    document.getElementById('loading').style.display = 'none';
+  }
+
+  function showEnded(message) {
+    stopPolling();
+    hideAllScreens();
+    document.getElementById('ended-message').textContent = message;
+    document.getElementById('ended-screen').style.display = 'flex';
+  }
+
+  function showMenuScreen() {
+    hideAllScreens();
+    document.getElementById('app').style.display = 'block';
+    renderMenu();
+    renderBestSellers();
+    renderCartBar();
+    startPolling();
+  }
+
+  function showPlacedScreen(s) {
+    hideAllScreens();
+    document.getElementById('placed-business-name').textContent = document.getElementById('business-name').textContent;
+    document.getElementById('placed-table-line').textContent = document.getElementById('table-line').textContent;
+    var itemsEl = document.getElementById('placed-items');
+    itemsEl.innerHTML = '';
+    (s.order.items || []).forEach(function (item) {
+      var row = el('div', null);
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;text-align:left';
+      var label = el('span', null, item.qty + '× ' + item.name);
+      var badge = el('span', 'status-pill' + (item.status === 'READY' ? ' ready' : item.status === 'SERVED' ? ' served' : ''), item.status);
+      row.appendChild(label);
+      row.appendChild(badge);
+      itemsEl.appendChild(row);
+    });
+    document.getElementById('placed-total').textContent = money(s.order.total);
+    document.getElementById('placed-screen').style.display = 'block';
+    startPolling();
+  }
+
+  function showBillScreen(s) {
+    hideAllScreens();
+    document.getElementById('bill-business-name').textContent = document.getElementById('business-name').textContent;
+    document.getElementById('bill-table-line').textContent = document.getElementById('table-line').textContent;
+    var linesEl = document.getElementById('bill-lines');
+    linesEl.innerHTML = '';
+    if (s.order) {
+      (s.order.items || []).forEach(function (item) {
+        var row = el('div', 'bill-line');
+        row.appendChild(el('span', null, item.qty + '× ' + item.name));
+        row.appendChild(el('span', null, money(item.price * item.qty)));
+        linesEl.appendChild(row);
+      });
+      linesEl.appendChild((function () { var r = el('div', 'bill-line'); r.appendChild(el('span', null, 'Tax')); r.appendChild(el('span', null, money(s.order.tax))); return r; })());
+      linesEl.appendChild((function () { var r = el('div', 'bill-line total'); r.appendChild(el('span', null, 'Total')); r.appendChild(el('span', null, money(s.order.total))); return r; })());
+    }
+    document.getElementById('bill-screen').style.display = 'block';
+    // Ordering is closed once LOCKED — no further polling needed; staff settling the
+    // bill (OrdersController.Pay) is what ends the session from here.
+    stopPolling();
+  }
+
+  function syncCartFromOrder() {
+    state.cart = {};
+    if (!state.order) return;
+    (state.order.items || []).filter(function (i) { return i.fireBatch === 0; }).forEach(function (i) {
+      state.cart[i.menuItemId] = i.qty;
     });
   }
 
@@ -382,92 +542,129 @@ public static class CustomerOrderPage
     });
   }
 
+  // Every tap immediately calls the server (the cart lives session-side, not just in
+  // this tab — see GuestSessionController.AddCartItem) and re-syncs from its response,
+  // rather than trusting local arithmetic.
   function changeQty(menuItemId, delta) {
-    var next = (state.cart[menuItemId] || 0) + delta;
-    if (next <= 0) delete state.cart[menuItemId];
-    else state.cart[menuItemId] = next;
-    renderMenu();
-    renderBestSellers();
-    renderCartBar();
+    clearError();
+    var next = Math.max(0, (state.cart[menuItemId] || 0) + delta);
+    var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
+    if (!state.order && phoneDigits.length !== 10) {
+      showError('Enter a valid 10-digit mobile number before adding items.');
+      document.getElementById('guest-phone').focus();
+      return;
+    }
+
+    fetchJson(sessionBase + '/cart/items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        menuItemId: menuItemId,
+        qty: next,
+        modifier: null,
+        guestName: document.getElementById('guest-name').value || null,
+        guestPhone: phoneDigits || null,
+      }),
+    }).then(function (s) {
+      state.order = s.order;
+      syncCartFromOrder();
+      if (state.order) document.getElementById('guest-card').style.display = 'none';
+      renderMenu();
+      renderBestSellers();
+      renderCartBar();
+    }).catch(function (err) {
+      if (err.status === 410) { showEnded('This session has ended.'); return; }
+      if (err.status === 423) { showBillScreen({ order: state.order }); return; }
+      showError(err.message);
+    });
   }
 
-  function cartLines() {
-    return Object.keys(state.cart).map(function (id) {
+  function cartCount() {
+    var count = 0;
+    Object.keys(state.cart).forEach(function (id) { count += state.cart[id]; });
+    return count;
+  }
+
+  function cartSubtotal() {
+    var sum = 0;
+    Object.keys(state.cart).forEach(function (id) {
       var item = state.menu.find(function (m) { return m.id === Number(id); });
-      return { item: item, qty: state.cart[id] };
-    }).filter(function (l) { return l.item; });
+      if (item) sum += item.price * state.cart[id];
+    });
+    return sum;
   }
 
   function renderCartBar() {
-    var lines = cartLines();
     var bar = document.getElementById('cart-bar');
-    if (lines.length === 0) { bar.style.display = 'none'; return; }
+    var count = cartCount();
+    if (count === 0) { bar.style.display = 'none'; return; }
     bar.style.display = 'flex';
-    var count = lines.reduce(function (sum, l) { return sum + l.qty; }, 0);
-    var subtotal = lines.reduce(function (sum, l) { return sum + l.qty * l.item.price; }, 0);
+    var subtotal = cartSubtotal();
     var tax = subtotal * (state.taxRatePct / 100);
     document.getElementById('cart-count').textContent = count + (count === 1 ? ' item' : ' items') + ' · incl. tax';
     document.getElementById('cart-total').textContent = money(subtotal + tax);
   }
 
   function placeOrder() {
-    var lines = cartLines();
-    if (lines.length === 0) return;
+    if (cartCount() === 0) return;
     clearError();
-
-    var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
-    if (phoneDigits.length !== 10) {
-      showError('Enter a valid 10-digit mobile number to place your order.');
-      document.getElementById('guest-phone').focus();
-      return;
-    }
 
     var btn = document.getElementById('place-btn');
     btn.disabled = true;
     btn.textContent = 'Sending…';
-    // Blocks every tap on the menu/cart behind it (fixed, full-viewport, sits above
-    // everything) so items can't be added/removed while the order is in flight —
-    // otherwise a second tap mid-request could submit a cart that no longer matches
-    // what's on screen.
     document.getElementById('processing-overlay').classList.add('show');
 
-    fetchJson('/api/orders/public/' + encodeURIComponent(token), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        guestName: document.getElementById('guest-name').value || null,
-        guestPhone: phoneDigits,
-        items: lines.map(function (l) { return { menuItemId: l.item.id, qty: l.qty }; }),
-      }),
-    }).then(function (order) {
+    fetchJson(sessionBase + '/order', { method: 'POST' }).then(function (s) {
       document.getElementById('processing-overlay').classList.remove('show');
-      showConfirmation(order);
+      state.order = s.order;
+      showPlacedScreen(s);
     }).catch(function (err) {
       document.getElementById('processing-overlay').classList.remove('show');
-      showError(err.message);
       btn.disabled = false;
       btn.textContent = 'Place Order';
+      if (err.status === 410) { showEnded('This session has ended.'); return; }
+      showError(err.message);
     });
   }
 
-  function showConfirmation(order) {
-    document.getElementById('app').style.display = 'none';
-    document.getElementById('cart-bar').style.display = 'none';
-    var root = document.getElementById('confirm-root');
-    root.innerHTML = '';
-    var wrap = el('div', 'wrap');
-    var card = el('div', 'confirm-card');
-    card.appendChild(el('div', 'badge', '✓'));
-    card.appendChild(el('h2', null, 'Order sent to the kitchen!'));
-    card.appendChild(el('div', 'order-no', 'Order ' + order.number + ' · ' + order.title));
-    card.appendChild(el('div', 'order-total', money(order.total)));
-    card.appendChild(el('p', null, "We'll bring it right out. Thank you!"));
+  function requestBill() {
+    fetchJson(sessionBase + '/request-bill', { method: 'POST' }).then(function (s) {
+      showBillScreen(s);
+    }).catch(function (err) {
+      if (err.status === 410) { showEnded('This session has ended.'); return; }
+      showError(err.message);
+    });
+  }
 
-    var again = el('button', 'again-btn', 'Place another order');
-    again.onclick = function () { location.reload(); };
-    card.appendChild(again);
-    wrap.appendChild(card);
-    root.appendChild(wrap);
+  function doScan() {
+    fetchJson(sessionBase + '/scan', { method: 'POST' }).then(function (result) {
+      document.getElementById('loading').style.display = 'none';
+      if (result.case === 'STAFF_ASSIST') { hideAllScreens(); document.getElementById('staff-assist-screen').style.display = 'flex'; return; }
+      if (result.case === 'JOIN') { hideAllScreens(); document.getElementById('join-screen').style.display = 'flex'; return; }
+      state.order = result.state.order;
+      if (result.case === 'BILL_LOCKED') { showBillScreen(result.state); return; }
+      syncCartFromOrder();
+      if (state.order) document.getElementById('guest-card').style.display = 'none';
+      if (state.order && state.order.currentFireBatch > 0) { showPlacedScreen(result.state); return; }
+      showMenuScreen();
+    }).catch(function () {
+      document.getElementById('loading').innerHTML =
+        '<h2>Something went wrong</h2><p>Please re-scan the QR code on your table, or ask a staff member for help.</p>';
+    });
+  }
+
+  function joinSession() {
+    fetchJson(sessionBase + '/join', { method: 'POST' }).then(function (s) {
+      state.order = s.order;
+      syncCartFromOrder();
+      if (state.order) document.getElementById('guest-card').style.display = 'none';
+      if (state.order && state.order.currentFireBatch > 0) { showPlacedScreen(s); return; }
+      showMenuScreen();
+    }).catch(function (err) {
+      showError(err.message);
+      hideAllScreens();
+      document.getElementById('app').style.display = 'block';
+    });
   }
 
   function init() {
@@ -493,20 +690,21 @@ public static class CustomerOrderPage
       document.getElementById('table-line').textContent = state.table.code
         ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
         : 'Browsing the menu';
-      if (state.table.occupied) {
-        document.getElementById('occupied-banner').classList.add('show');
-      }
+      document.getElementById('place-btn').onclick = placeOrder;
+      document.getElementById('join-btn').onclick = joinSession;
+      document.getElementById('add-more-btn').onclick = showMenuScreen;
+      document.getElementById('request-bill-btn').onclick = requestBill;
+
       if (state.browseOnly) {
+        // No table = no session (see GuestSessionController.ResolveAsync) — browsing
+        // only, exactly as before this feature existed.
         document.getElementById('browse-banner').classList.add('show');
         document.getElementById('guest-card').style.display = 'none';
+        showMenuScreen();
+        return;
       }
 
-      document.getElementById('loading').style.display = 'none';
-      document.getElementById('app').style.display = 'block';
-      document.getElementById('place-btn').onclick = placeOrder;
-      renderBestSellers();
-      renderMenu();
-      renderCartBar();
+      doScan();
     }).catch(function () {
       document.getElementById('loading').innerHTML =
         '<h2>Table not found</h2><p>This QR code doesn\'t match an open table. Please ask a staff member for help.</p>';

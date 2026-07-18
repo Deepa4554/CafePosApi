@@ -15,6 +15,10 @@ public enum OrderStatus
 /// items decrease their own linked InventoryItem stock directly (e.g. bottled water).</summary>
 public enum ProductType { Prepared, Independent }
 
+public enum ItemType { Recipe, Retail, Service, Combo }
+
+public enum VegNonVegType { Veg, NonVeg, Jain, Eggetarian }
+
 public class MenuItem : ITenantScoped
 {
     public int Id { get; set; }
@@ -32,6 +36,13 @@ public class MenuItem : ITenantScoped
     /// <summary>Only set when ProductType == Independent — the InventoryItem this menu
     /// item sells directly from.</summary>
     public int? LinkedInventoryItemId { get; set; }
+    public string? ShortCode { get; set; } // e.g., "CAPP" for Cappuccino, max 5 chars, unique per tenant
+    public string KitchenStation { get; set; } = "KITCHEN"; // e.g., "KITCHEN", "BAKERY", "GRILL"
+    public ItemType ItemType { get; set; } = ItemType.Recipe;
+    public VegNonVegType? VegNonVegType { get; set; } // null if not applicable
+
+    public List<Variant> Variants { get; set; } = [];
+    public List<Modifier> Modifiers { get; set; } = [];
 }
 
 /// <summary>Extra photos for a menu item beyond its single cover Image (e.g. plating shot,
@@ -46,6 +57,46 @@ public class MenuItemImage : ITenantScoped
     public required string DataUri { get; set; }
     public int SortOrder { get; set; }
 }
+
+/// <summary>Half/Full plate or size variants — same dish, different portion/size, different price.</summary>
+public class Variant : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int MenuItemId { get; set; }
+    public required string Name { get; set; } // "Half", "Full", "Small", "Medium", "Large", etc.
+    public decimal Price { get; set; } // absolute price, not delta
+    public bool IsAvailable { get; set; } = true; // variant-level 86 toggle
+    public bool IsDefault { get; set; } = false; // single tap on order screen selects this
+    public int SortOrder { get; set; } = 0;
+}
+
+/// <summary>Modifiers are optional add-ons or customizations — spice level, extra toppings, etc.
+/// Think of it as a group (e.g., "Spice Level" or "Add-ons") containing multiple options.</summary>
+public class Modifier : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int MenuItemId { get; set; }
+    public required string Name { get; set; } // e.g., "Spice Level", "Add-ons"
+    public string Type { get; set; } = "MultiSelect"; // Radio, MultiSelect, Quantity
+    public bool IsRequired { get; set; } = false;
+    public int SortOrder { get; set; } = 0;
+
+    public List<ModifierOption> Options { get; set; } = [];
+}
+
+/// <summary>Individual option within a modifier — e.g., "Mild", "Medium", "Spicy" for spice level.</summary>
+public class ModifierOption : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int ModifierId { get; set; }
+    public required string Name { get; set; } // e.g., "Mild", "Extra Cheese"
+    public decimal Price { get; set; } = 0; // price adjustment, can be 0 or negative
+    public int SortOrder { get; set; } = 0;
+}
+
 
 public class CafeTable : ITenantScoped
 {
@@ -120,6 +171,12 @@ public class Order : ITenantScoped
     public decimal? RefundedAmount { get; set; }
     public string? RefundReason { get; set; }
     public DateTime? RefundedAt { get; set; }
+    /// <summary>Whole-order cancel (see OrdersController.Cancel) — a distinct terminal
+    /// state from Refunded, which only applies to an already-Paid order. Cancelling voids
+    /// every not-yet-served line via the same reversal rules as a single-item void.</summary>
+    public bool Cancelled { get; set; }
+    public DateTime? CancelledAt { get; set; }
+    public string? CancelReason { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     /// <summary>Whoever was logged in when this order was rung up — the till operator,
     /// not necessarily the waiter who actually took it (a shared counter POS is often
@@ -174,6 +231,13 @@ public class OrderItem : ITenantScoped
     /// whenever the unit counts change; the KOT/order status rollups read this. Never set
     /// directly.</summary>
     public OrderStatus Status { get; set; } = OrderStatus.New;
+    /// <summary>Set by OrdersController.VoidItemAsync — either a same-KOT single-item void
+    /// (RemoveItem, once fired) or part of a whole-order Cancel. A flag rather than a hard
+    /// delete so KOT/fire-batch history and reporting survive. Voided lines are excluded
+    /// from Subtotal/Total recomputation and from batch-status rollups.</summary>
+    public bool Voided { get; set; }
+    public DateTime? VoidedAt { get; set; }
+    public string? VoidReason { get; set; }
 
     /// <summary>Units still at New (not yet acknowledged) — derived, not stored.</summary>
     [NotMapped]
@@ -181,8 +245,8 @@ public class OrderItem : ITenantScoped
 }
 
 /// <summary>A single fire round (KOT) — see Order.FireBatches. Created when
-/// OrdersController.FireUnfiredItems fires a new batch. Its Id doubles as the KOT number
-/// (see FireBatchDto), and FiredAt drives the KDS timer.</summary>
+/// OrderBuildingService.FireUnfiredItemsAsync fires a new batch. Its Id doubles as the KOT
+/// number (see FireBatchDto), and FiredAt drives the KDS timer.</summary>
 public class OrderFireBatch : ITenantScoped
 {
     public int Id { get; set; }

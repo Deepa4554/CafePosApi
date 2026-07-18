@@ -5,15 +5,14 @@ using CafePOS.Api.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/orders")]
 public class OrdersController(
-    CafePosDbContext db, IAuditService audit, QrTokenService qrTokens, ReceiptTokenService receiptTokens, ILogger<OrdersController> logger,
-    ITaxRateCache taxRateCache, ITenantContext tenantContext) : ControllerBase
+    CafePosDbContext db, IAuditService audit, QrTokenService qrTokens, ReceiptTokenService receiptTokens,
+    ITaxRateCache taxRateCache, ITenantContext tenantContext, IOrderBuildingService orderBuilder) : ControllerBase
 {
     private static readonly OrderStatus[] StatusFlow =
         [OrderStatus.New, OrderStatus.Read, OrderStatus.Preparing, OrderStatus.Ready, OrderStatus.Served];
@@ -41,7 +40,7 @@ public class OrdersController(
         // an order stays active (visible on KDS, counted as in-progress) until it's
         // BOTH paid AND served. Paying early must not make it vanish from the
         // kitchen's ticket list while the food still hasn't gone out.
-        if (activeOnly) query = query.Where(o => !o.Paid || o.Status != OrderStatus.Served);
+        if (activeOnly) query = query.Where(o => !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
         if (kdsReady) query = query.Where(o => o.Items.Any(i => i.FireBatch > 0));
         // No branch selected -> see everything (single-location cafes, and cafes that
         // haven't set up branches yet, are unaffected). A branch selected -> only that
@@ -142,7 +141,7 @@ public class OrdersController(
         // it to the kitchen — the POS calls POST /orders/{id}/fire as an explicit second
         // step (or "Hold Order" skips firing). This is what separates ordering from kitchen
         // dispatch: an order can exist and be edited before any item is sent to the line.
-        var order = await BuildOrderAsync(req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId);
+        var order = await orderBuilder.BuildOrderAsync(db, req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, User, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId);
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -181,220 +180,22 @@ public class OrdersController(
         if (string.IsNullOrEmpty(tableCode))
             throw new ApiValidationException("This code is for browsing the menu only. Please order from your table's QR code.");
 
-        var order = await BuildOrderAsync("DINE_IN", tableCode, req.GuestName, req.Items, discountPct: 0, explicitTenantId: tenantId, guestPhone: normalizedPhone);
+        var order = await orderBuilder.BuildOrderAsync(db, "DINE_IN", tableCode, req.GuestName, req.Items, discountPct: 0, user: null, explicitTenantId: tenantId, guestPhone: normalizedPhone);
 
         // A QR-self-ordering guest has no POS to come back and "fire" from — so unlike the
         // staff path (which fires as an explicit second step), a public order auto-fires
         // immediately on creation, keeping it a single atomic create-and-send action.
-        FireUnfiredItems(order, tenantId);
-        await db.SaveChangesAsync();
-
-        return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
-    }
-
-    /// <summary>Restricts a DbSet to one specific tenant, bypassing the ambient
-    /// JWT-derived filter — used only by the anonymous QR flow, which has no JWT and so
-    /// must be told the tenant explicitly via <paramref name="explicitTenantId"/>.
-    /// Returns the DbSet unchanged (normal ambient-filtered behaviour) for the staff POS
-    /// path, where explicitTenantId is null.</summary>
-    private static IQueryable<T> TenantScoped<T>(DbSet<T> set, int? explicitTenantId) where T : class, ITenantScoped =>
-        explicitTenantId is int tid ? set.IgnoreQueryFilters().Where(e => e.TenantId == tid) : set;
-
-    /// <summary>
-    /// Shared order-pricing/creation core used by both the staff POS (<see cref="Create"/>)
-    /// and the anonymous QR ordering flow (<see cref="CreatePublic"/>), so the two can never
-    /// drift on pricing, inventory, or CRM behaviour.
-    /// </summary>
-    private async Task<Order> BuildOrderAsync(
-        string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
-        decimal discountPct, int? explicitTenantId = null, int? branchId = null, string? guestPhone = null,
-        int? servedByStaffId = null)
-    {
-        if (items.Count == 0)
-            throw new ApiValidationException("Order must contain at least one item.");
-
-        if (orderType == "DINE_IN")
-        {
-            if (string.IsNullOrWhiteSpace(tableCode))
-                throw new ApiValidationException("Dine-in orders need a tableCode.");
-
-            // One round trip instead of two separate AnyAsync calls (table-exists,
-            // then table-busy) — each round trip to the remote Postgres instance is a
-            // real, measurable cost here, so every one removed from this hot path
-            // (fired on every single order) helps. A table only frees up once its
-            // order is BOTH paid AND served — matches TablesController/PublicController.
-            var tableCheck = await TenantScoped(db.Tables, explicitTenantId)
-                .Where(t => t.Code == tableCode)
-                .Select(t => new
-                {
-                    Busy = TenantScoped(db.Orders, explicitTenantId)
-                        .Any(o => o.TableCode == tableCode && (!o.Paid || o.Status != OrderStatus.Served)),
-                })
-                .FirstOrDefaultAsync();
-            if (tableCheck is null)
-                throw new ApiValidationException($"Table {tableCode} does not exist.");
-            if (tableCheck.Busy)
-                throw new ApiConflictException($"Table {tableCode} already has an open order.");
-        }
-
-        var menuIds = items.Select(i => i.MenuItemId).ToList();
-        var menu = await TenantScoped(db.MenuItems, explicitTenantId).Where(m => menuIds.Contains(m.Id)).ToDictionaryAsync(m => m.Id);
-
-        var orderItems = new List<OrderItem>();
-        foreach (var line in items)
-        {
-            if (!menu.TryGetValue(line.MenuItemId, out var menuItem))
-                throw new ApiValidationException($"Menu item {line.MenuItemId} not found.");
-            if (!menuItem.Available)
-                throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
-            if (line.Qty <= 0)
-                throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
-
-            orderItems.Add(new OrderItem
-            {
-                MenuItemId = menuItem.Id,
-                Name = menuItem.Name,
-                Qty = line.Qty,
-                Price = menuItem.Price,
-                Modifier = line.Modifier,
-            });
-        }
-
-        // Order pricing only ever needs the tax rate out of Settings, and that number
-        // almost never changes — cached (30s TTL, invalidated on SettingsController.Update)
-        // instead of paying a full round trip to the remote Postgres instance on every
-        // single order, which was the single biggest recurring cost on this hot path.
-        var effectiveTenantId = explicitTenantId ?? tenantContext.TenantIdOrDefault;
-        var taxRatePct = await taxRateCache.GetTaxRatePctAsync(effectiveTenantId,
-            async () => (await TenantScoped(db.Settings, explicitTenantId).FirstAsync()).TaxRatePct);
-        var subtotal = orderItems.Sum(i => i.Price * i.Qty);
-        var clampedDiscountPct = Math.Clamp(discountPct, 0, 100);
-        // Order-time discount is the manual % only now. Coupons and gift cards moved to the
-        // billing stage (bill-coupon / bill-giftcard on a Served order) — see plan.
-        var discountAmount = Math.Round(subtotal * clampedDiscountPct / 100, 2);
-
-        // Anonymous QR self-orders (explicitTenantId set) have no JWT/logged-in staff
-        // member at all — CreatedByUserId stays null for those, same as a guest
-        // ordering from their own table with no staff involvement.
-        int? createdByUserId = null;
-        string? createdByName = null;
-        StaffMember? servedBy = null;
-        if (explicitTenantId is null)
-        {
-            var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
-                ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-            if (idClaim is not null && int.TryParse(idClaim, out var currentUserId))
-            {
-                var currentUser = await db.Users.FindAsync(currentUserId);
-                createdByUserId = currentUser?.Id;
-                createdByName = currentUser?.Name;
-            }
-
-            // Who actually served this order: explicit pick (a Cashier/Manager ringing
-            // up on behalf of a waiter from a shared counter POS) takes priority; with
-            // none given, default to the logged-in user's own StaffMember record — the
-            // common case of a waiter taking their own order on their own login.
-            servedBy = servedByStaffId is int sid
-                ? await db.Staff.FirstOrDefaultAsync(s => s.Id == sid)
-                : await db.Staff.FirstOrDefaultAsync(s => s.UserId == createdByUserId);
-            if (servedByStaffId is int explicitSid && servedBy is null)
-                throw new ApiValidationException("Selected waiter not found.");
-        }
-
-        var guest = string.IsNullOrWhiteSpace(guestName) ? null : guestName.Trim();
-        var guestSuffix = guest is null ? "" : $" – {guest}";
-        var typeLabel = orderType switch
-        {
-            "TAKEAWAY" => "Takeaway",
-            "DELIVERY" => "Delivery",
-            _ => "Dine In",
-        };
-        var title = orderType == "DINE_IN"
-            ? $"Table #{tableCode}{guestSuffix}"
-            : $"{typeLabel} – {guest ?? "Walk-in"}";
-
-        var order = new Order
-        {
-            BranchId = branchId,
-            Title = title,
-            OrderType = orderType,
-            TableCode = orderType == "DINE_IN" ? tableCode : null,
-            GuestName = guest,
-            GuestPhone = string.IsNullOrWhiteSpace(guestPhone) ? null : guestPhone.Trim(),
-            Items = orderItems,
-            Subtotal = subtotal,
-            DiscountPct = clampedDiscountPct,
-            DiscountAmount = discountAmount,
-            CreatedByUserId = createdByUserId,
-            CreatedByName = createdByName,
-            ServedByStaffId = servedBy?.Id,
-            ServedByName = servedBy?.Name,
-        };
-        // Tax/Total from the single shared formula (Subtotal minus all discount components).
-        RecomputeTotals(order, taxRatePct);
-        // Anonymous QR orders have no JWT, so the DbContext's auto-stamp (which reads
-        // the ambient tenant from the token) would default to tenant 1 — set it
-        // explicitly from the resolved slug instead.
-        if (explicitTenantId is int tid) order.TenantId = tid;
-        db.Orders.Add(order);
-
-        var customer = await FindOrCreateCustomerAsync(guest ?? "Walk-in Guest", guestPhone, explicitTenantId);
-        // Link via the navigation, not a copied CustomerId int: for a brand-new
-        // customer, customer.Id is still 0 until SaveChanges assigns the real
-        // Postgres-generated identity value. EF Core's change tracker fixes up
-        // the FK automatically through the tracked object reference.
-        order.Customer = customer;
-        RecordVisit(customer, order.Total);
-        TrackFavorites(customer, orderItems, explicitTenantId);
-
-        // Explicit transaction (relational providers only — InMemory, used when no
-        // Postgres connection string is configured, doesn't support transactions) so
-        // that if inventory deduction fails after the order row is written, the whole
-        // order rolls back too rather than leaving stock un-deducted for a placed order.
-        IDbContextTransaction? txn = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync() : null;
         try
         {
-            // Order needs its real, Postgres-assigned Id before inventory transactions
-            // (and the discount audit entry below) can reference it, so this happens
-            // as its own save inside the transaction. NOTE: no kitchen notification here
-            // anymore — the order is created "Open" and only reaches the kitchen when
-            // POST /orders/{id}/fire runs (see Fire), keeping ordering and dispatch separate.
-
-            // Added to the same tracked context rather than via IAuditService.LogAsync
-            // (which does its own immediate SaveChangesAsync) — riding along in the
-            // save below instead of costing a third round trip to the remote Postgres
-            // instance on every discounted order.
+            await orderBuilder.FireUnfiredItemsAsync(db, order, tenantId);
             await db.SaveChangesAsync();
-            if (clampedDiscountPct > 0)
-            {
-                var discountEntry = new AuditLogEntry
-                {
-                    Action = AuditAction.Discount,
-                    Resource = AuditResource.Order,
-                    ResourceId = order.Id.ToString(),
-                    Details = $"Order {order.Id} applied {clampedDiscountPct}% discount (−{discountAmount:C}).",
-                    Severity = AuditSeverity.Medium,
-                };
-                if (explicitTenantId is int auditTid) discountEntry.TenantId = auditTid;
-                db.AuditLog.Add(discountEntry);
-            }
-
-            await ConsumeInventoryAsync(menu, orderItems, order.Id, explicitTenantId);
-            await db.SaveChangesAsync();
-
-            if (txn is not null) await txn.CommitAsync();
         }
-        catch
+        catch (DbUpdateException)
         {
-            if (txn is not null) await txn.RollbackAsync();
-            throw;
-        }
-        finally
-        {
-            if (txn is not null) await txn.DisposeAsync();
+            throw new ApiConflictException("This order was already placed — please try again.");
         }
 
-        return order;
+        return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
     /// <summary>Moves a given number of ONE line's units one stage forward (New→Read→
@@ -415,8 +216,8 @@ public class OrdersController(
         if (fromStage is null) throw new ApiValidationException("Nothing to advance on this item.");
         var qty = req.Qty ?? UnitsAtStage(item, fromStage.Value);
         AdvanceUnits(item, fromStage.Value, qty);
-        RecomputeBatchStatus(order, item.FireBatch);
-        RecomputeOrderStatus(order);
+        orderBuilder.RecomputeBatchStatus(db, order, item.FireBatch);
+        OrderBuildingService.RecomputeOrderStatus(order);
 
         await db.SaveChangesAsync();
         return OrderDto.From(order);
@@ -441,8 +242,8 @@ public class OrdersController(
             var fromStage = ResolveFromStage(item, null);
             if (fromStage is not null) AdvanceUnits(item, fromStage.Value, UnitsAtStage(item, fromStage.Value));
         }
-        RecomputeBatchStatus(order, batchNumber);
-        RecomputeOrderStatus(order);
+        orderBuilder.RecomputeBatchStatus(db, order, batchNumber);
+        OrderBuildingService.RecomputeOrderStatus(order);
 
         await db.SaveChangesAsync();
         return OrderDto.From(order);
@@ -470,8 +271,8 @@ public class OrdersController(
                 var item = order?.Items.FirstOrDefault(i => i.Id == alloc.ItemId);
                 if (order is null || item is null || order.Paid) continue;
                 AdvanceUnits(item, fromStage, alloc.Qty);
-                RecomputeBatchStatus(order, item.FireBatch);
-                RecomputeOrderStatus(order);
+                orderBuilder.RecomputeBatchStatus(db, order, item.FireBatch);
+                OrderBuildingService.RecomputeOrderStatus(order);
                 touchedOrderIds.Add(order.Id);
             }
         }
@@ -496,8 +297,8 @@ public class OrdersController(
                 var take = Math.Min(remaining, UnitsAtStage(line.Item, fromStage));
                 if (take <= 0) continue;
                 AdvanceUnits(line.Item, fromStage, take);
-                RecomputeBatchStatus(line.Order, line.Item.FireBatch);
-                RecomputeOrderStatus(line.Order);
+                orderBuilder.RecomputeBatchStatus(db, line.Order, line.Item.FireBatch);
+                OrderBuildingService.RecomputeOrderStatus(line.Order);
                 touchedOrderIds.Add(line.Order.Id);
                 remaining -= take;
             }
@@ -577,114 +378,39 @@ public class OrdersController(
         item.Status = OrderStatus.Served;
     }
 
-    /// <summary>Recomputes ONE fire batch's status as a rollup of its items (least-progressed
-    /// active item, or Served once all its items are). Fires the "ready to serve" notification
-    /// when the whole batch first reaches READY (i.e. every item in the round is Ready).</summary>
-    private void RecomputeBatchStatus(Order order, int batchNumber)
-    {
-        var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
-        if (batch is null) return;
-        var items = order.Items.Where(i => i.FireBatch == batchNumber).ToList();
-        if (items.Count == 0) return;
-
-        var previous = batch.Status;
-        var active = items.Where(i => i.Status != OrderStatus.Served).ToList();
-        batch.Status = active.Count > 0 ? active.Min(i => i.Status) : OrderStatus.Served;
-
-        if (previous != OrderStatus.Ready && batch.Status == OrderStatus.Ready)
-        {
-            db.Notifications.Add(new AppNotification
-            {
-                Title = "Order ready to serve",
-                Body = $"{order.Title} is ready — {items.Count} item{(items.Count == 1 ? "" : "s")}.",
-                Category = NotificationCategory.Order,
-                Channel = NotificationChannel.InApp,
-                ActionUrl = $"/orders/{order.Id}",
-            });
-        }
-    }
-
-    /// <summary>Order.Status is a computed rollup of every active (non-Served) fire batch,
-    /// not a value set directly — the LEAST-progressed active batch surfaces here (enum
-    /// ordering New&lt;Preparing&lt;Ready&lt;Served means Min picks it), so table
-    /// occupancy/billing-eligibility checks elsewhere in the app (which only ever ask "is
-    /// this order fully served") keep working unchanged: Served only once every batch is.
-    /// Called after any batch is created (Fire) or advanced.</summary>
-    private static void RecomputeOrderStatus(Order order)
-    {
-        var active = order.FireBatches.Where(b => b.Status != OrderStatus.Served).ToList();
-        order.Status = active.Count > 0
-            ? active.Min(b => b.Status)
-            : (order.FireBatches.Count > 0 ? OrderStatus.Served : OrderStatus.New);
-    }
-
-    /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
-    /// batch's own independent kitchen-ticket row (starts New), and notifies the kitchen
-    /// about JUST those items (never the whole order again on a re-fire) — any OTHER batch
-    /// already Preparing/Ready/Served on this order keeps its own status, untouched. Returns
-    /// false if there was nothing new to fire. Recomputes Order.Status but does not save —
-    /// the caller saves.</summary>
-    private bool FireUnfiredItems(Order order, int? explicitTenantId)
-    {
-        var unfired = order.Items.Where(i => i.FireBatch == 0).ToList();
-        if (unfired.Count == 0) return false;
-
-        order.CurrentFireBatch += 1;
-        foreach (var item in unfired) item.FireBatch = order.CurrentFireBatch;
-        order.FireBatches.Add(new OrderFireBatch { OrderId = order.Id, BatchNumber = order.CurrentFireBatch });
-        RecomputeBatchStatus(order, order.CurrentFireBatch); // freshly-fired items are all New → batch New
-        RecomputeOrderStatus(order);
-
-        // OrderPlaced is the ONLY category Chef/KitchenStaff logins see (see
-        // NotificationsController.List's role filter). Wording branches so the kitchen can
-        // tell a fresh order from extra items appended to one already on the line.
-        var isFirstFire = order.CurrentFireBatch == 1;
-        var count = unfired.Count;
-        var notification = new AppNotification
-        {
-            Title = isFirstFire ? "New order placed" : "New items added to order",
-            Body = isFirstFire
-                ? $"{order.Title} — {count} item{(count == 1 ? "" : "s")}, ₹{order.Total:0.00}."
-                : $"{order.Title} — {count} new item{(count == 1 ? "" : "s")} fired.",
-            Category = NotificationCategory.OrderPlaced,
-            Channel = NotificationChannel.InApp,
-            ActionUrl = $"/orders/{order.Id}",
-        };
-        // Anonymous QR orders have no JWT to auto-stamp the tenant from — same reason
-        // order.TenantId is set explicitly in BuildOrderAsync.
-        if (explicitTenantId is int tid) notification.TenantId = tid;
-        db.Notifications.Add(notification);
-        return true;
-    }
-
     /// <summary>Fires all not-yet-fired items on an existing order to the kitchen as their
     /// own new fire batch. The separate "dispatch" step that the staff POS calls right after
     /// Create (or later, for a held order) — distinct from ordering so items can be
     /// added/edited before hitting the line. Order.Status is recomputed as a rollup (see
-    /// RecomputeOrderStatus) — any other batch already Preparing/Ready/Served on this order
-    /// keeps its own status, untouched.</summary>
+    /// OrderBuildingService.RecomputeOrderStatus) — any other batch already
+    /// Preparing/Ready/Served on this order keeps its own status, untouched.</summary>
     [HttpPost("{id:int}/fire")]
     public async Task<ActionResult<OrderDto>> Fire(int id)
     {
         var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
-        if (!FireUnfiredItems(order, explicitTenantId: null))
-            throw new ApiValidationException("No new items to fire.");
-
-        await db.SaveChangesAsync();
+        try
+        {
+            if (!await orderBuilder.FireUnfiredItemsAsync(db, order, explicitTenantId: null))
+                throw new ApiValidationException("No new items to fire.");
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            throw new ApiConflictException("This order was already fired — refresh and try again.");
+        }
         return OrderDto.From(order);
     }
 
     /// <summary>Adds one item to an existing, not-yet-paid order (new item starts unfired,
-    /// FireBatch 0, so it only reaches the kitchen — as its own new fire batch, see
-    /// FireUnfiredItems — on the next Fire). Allowed at any stage, even after every existing
-    /// batch has been Served (e.g. the table asks for one more item at the billing stage):
-    /// adding the item doesn't touch any existing OrderFireBatch, so whatever's already
-    /// Preparing/Ready/Served keeps its own status undisturbed — only once this item is
-    /// fired does it become its own separate ticket. The bill still totals every item
-    /// together regardless of which fire round it came from. Recomputes totals and deducts
-    /// inventory for just the new line.</summary>
+    /// FireBatch 0, so it only reaches the kitchen — and only then deducts inventory — as
+    /// its own new fire batch, see FireUnfiredItemsAsync — on the next Fire). Allowed at any
+    /// stage, even after every existing batch has been Served (e.g. the table asks for one
+    /// more item at the billing stage): adding the item doesn't touch any existing
+    /// OrderFireBatch, so whatever's already Preparing/Ready/Served keeps its own status
+    /// undisturbed — only once this item is fired does it become its own separate ticket.
+    /// The bill still totals every item together regardless of which fire round it came from.</summary>
     [HttpPost("{id:int}/items")]
     public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
     {
@@ -708,47 +434,144 @@ public class OrdersController(
             FireBatch = 0,
         };
         order.Items.Add(newItem);
-        order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
-        RecomputeTotals(order, await GetTaxRatePctAsync());
+        order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
 
-        await ConsumeInventoryAsync(new Dictionary<int, MenuItem> { [menuItem.Id] = menuItem }, [newItem], order.Id);
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
 
-    /// <summary>Removes an item from a not-yet-paid order. Freely allowed while the item is
-    /// still unfired (even if other items on the same order are already Served — this one
-    /// hasn't reached the kitchen at all yet); once it's been fired (FireBatch &gt; 0) only an
-    /// Owner/Manager may pull it back, and only if that item itself hasn't been Served.</summary>
+    /// <summary>Removes/voids an item from a not-yet-paid order.
+    /// Unfired (FireBatch == 0): freely hard-deleted — nothing was ever deducted, even if
+    /// other items on the same order are already Served (this one never reached the kitchen).
+    /// Fired: only an Owner/Manager may pull it back, only if it hasn't been Served, and it's
+    /// VOIDED rather than deleted (see VoidItemAsync) so KOT/ledger history survives. Still
+    /// New/Read (prep hasn't started) reverses its inventory deduction automatically; once
+    /// Preparing/Ready a reason is required and stock is NOT reversed (food is genuinely
+    /// spent) — matches the doc's "void before cooking vs void with wastage" rule.</summary>
     [HttpDelete("{id:int}/items/{itemId:int}")]
-    public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId)
+    public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId, [FromQuery] string? reason = null)
     {
         var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
 
-        var item = order.Items.FirstOrDefault(i => i.Id == itemId);
+        var item = order.Items.FirstOrDefault(i => i.Id == itemId && !i.Voided);
         if (item is null) return NotFound();
-        if (order.Items.Count == 1) throw new ApiValidationException("Order must contain at least one item.");
+        if (order.Items.Count(i => !i.Voided) == 1) throw new ApiValidationException("Order must contain at least one item.");
         if (item.FireBatch > 0)
         {
             if (!IsOwnerOrManager()) return Forbid();
             if (item.Status == OrderStatus.Served) throw new ApiConflictException("Cannot remove an item that's already been served.");
+            if (item.Status is OrderStatus.Preparing or OrderStatus.Ready && string.IsNullOrWhiteSpace(reason))
+                throw new ApiValidationException("A reason is required to void an item that's already in preparation.");
         }
 
-        order.Items.Remove(item);
-        db.OrderItems.Remove(item);
-        order.Subtotal = order.Items.Sum(i => i.Price * i.Qty);
-        RecomputeTotals(order, await GetTaxRatePctAsync());
-        // Pulling a fired item can shift its batch's rollup (e.g. removing the last still-New
-        // item leaves the batch all-Ready) — and the order status with it.
+        await VoidItemAsync(order, item, reason);
+        order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+        // Pulling/voiding a fired item can shift its batch's rollup (e.g. removing the last
+        // still-New item leaves the batch all-Ready) — and the order status with it.
         if (item.FireBatch > 0)
         {
-            RecomputeBatchStatus(order, item.FireBatch);
-            RecomputeOrderStatus(order);
+            orderBuilder.RecomputeBatchStatus(db, order, item.FireBatch);
+            OrderBuildingService.RecomputeOrderStatus(order);
         }
         await db.SaveChangesAsync();
         return OrderDto.From(order);
+    }
+
+    /// <summary>Cancels the whole order — voids every not-yet-served line via the same
+    /// before-cook-reverses/after-cook-doesn't rule as RemoveItem (see VoidItemAsync).
+    /// Already-served items are left untouched (food that's out can't be un-served); staff
+    /// still Pay/Refund normally for whatever was actually served. Requires Owner/Manager if
+    /// any item has already been served — a floor waiter can freely cancel a still-New order,
+    /// but walking back served food needs a manager's say-so.</summary>
+    [HttpPost("{id:int}/cancel")]
+    public async Task<ActionResult<OrderDto>> Cancel(int id, CancelOrderRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot cancel a paid order — use Refund instead.");
+        if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
+
+        var hasServedItems = order.Items.Any(i => !i.Voided && i.Status == OrderStatus.Served);
+        if (hasServedItems && !IsOwnerOrManager()) return Forbid();
+
+        foreach (var item in order.Items.Where(i => !i.Voided && i.Status != OrderStatus.Served).ToList())
+            await VoidItemAsync(order, item, req.Reason);
+
+        order.Cancelled = true;
+        order.CancelledAt = DateTime.UtcNow;
+        order.CancelReason = req.Reason;
+        order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+        foreach (var batch in order.FireBatches)
+            orderBuilder.RecomputeBatchStatus(db, order, batch.BatchNumber);
+        OrderBuildingService.RecomputeOrderStatus(order);
+
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+            $"Order {order.Id} cancelled. Reason: {req.Reason ?? "not specified"}.", AuditSeverity.Medium);
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Voids one line. Unfired (FireBatch==0): hard-deletes exactly as before fire-time
+    /// deduction existed — nothing was ever deducted. Fired + New/Read (prep hasn't started):
+    /// reverses the Sale deduction via new Return-type ledger rows keyed to this OrderItemId.
+    /// Fired + Preparing/Ready: flags Voided with NO reversal (wastage) and audits it. Served
+    /// is expected to already be rejected by the caller before this runs.</summary>
+    private async Task VoidItemAsync(Order order, OrderItem item, string? reason)
+    {
+        if (item.FireBatch == 0)
+        {
+            order.Items.Remove(item);
+            db.OrderItems.Remove(item);
+            return;
+        }
+
+        item.Voided = true;
+        item.VoidedAt = DateTime.UtcNow;
+        item.VoidReason = reason;
+
+        if (item.Status is OrderStatus.New or OrderStatus.Read)
+        {
+            var deductions = await db.InventoryTransactions
+                .Where(t => t.OrderItemId == item.Id && t.Type == InventoryTransactionType.Sale)
+                .ToListAsync();
+            foreach (var d in deductions)
+            {
+                var ingredient = await db.InventoryItems.FindAsync(d.InventoryItemId);
+                if (ingredient is null) continue;
+                var previous = ingredient.Current;
+                ingredient.Current += -d.ChangedQuantity; // ChangedQuantity was negative on the original Sale row
+                db.InventoryTransactions.Add(new InventoryTransaction
+                {
+                    InventoryItemId = ingredient.Id,
+                    OrderItemId = item.Id,
+                    Type = InventoryTransactionType.Return,
+                    PreviousStock = previous,
+                    ChangedQuantity = -d.ChangedQuantity,
+                    RemainingStock = ingredient.Current,
+                    ReferenceId = order.Id.ToString(),
+                    Reason = "Void before prep",
+                    UserId = CurrentUserId(),
+                    UserName = User.Identity?.Name ?? "Cafe Staff",
+                });
+            }
+        }
+        else
+        {
+            await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
+                $"Voided '{item.Name}' (order {order.Id}) after prep started — no stock reversal (wastage). Reason: {reason ?? "not specified"}.",
+                AuditSeverity.Medium);
+        }
+    }
+
+    private int? CurrentUserId()
+    {
+        var claim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+        return int.TryParse(claim, out var id) ? id : null;
     }
 
     /// <summary>Manager-only markdown applied at the billing stage (order must be Served,
@@ -767,7 +590,7 @@ public class OrdersController(
         if (amount < 0) throw new ApiValidationException("Discount cannot be negative.");
 
         order.BillDiscountAmount = amount;
-        RecomputeTotals(order, await GetTaxRatePctAsync());
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Discount, AuditResource.Order, order.Id.ToString(),
             $"Bill discount of {amount:C} applied to order {order.Id}.", AuditSeverity.Medium);
@@ -800,7 +623,7 @@ public class OrdersController(
         };
         order.CouponCode = coupon.Code;
         coupon.IsUsed = true;
-        RecomputeTotals(order, await GetTaxRatePctAsync());
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
@@ -828,24 +651,13 @@ public class OrdersController(
         order.GiftCardAmountApplied = redeem;
         giftCard.Balance -= redeem;
         if (giftCard.Balance <= 0) giftCard.Status = GiftCardStatus.Used;
-        RecomputeTotals(order, await GetTaxRatePctAsync());
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
 
-    /// <summary>Recomputes Tax + Total from Subtotal minus every discount component (order
-    /// discount, bill discount, coupon, gift card). The single source of truth for order
-    /// pricing math, so create/add/remove/bill-discount/coupon/giftcard never drift.</summary>
-    private static void RecomputeTotals(Order o, decimal taxRatePct)
-    {
-        var totalDiscount = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied;
-        var taxable = Math.Max(0, o.Subtotal - totalDiscount);
-        o.Tax = Math.Round(taxable * taxRatePct / 100, 2);
-        o.Total = taxable + o.Tax;
-    }
-
     /// <summary>Tax rate for the current (staff/JWT) tenant — same cached source
-    /// BuildOrderAsync uses.</summary>
+    /// OrderBuildingService.BuildOrderAsync uses.</summary>
     private async Task<decimal> GetTaxRatePctAsync() =>
         await taxRateCache.GetTaxRatePctAsync(tenantContext.TenantIdOrDefault,
             async () => (await db.Settings.FirstAsync()).TaxRatePct);
@@ -871,6 +683,20 @@ public class OrdersController(
 
         order.Paid = true;
         order.PaymentMethod = string.IsNullOrWhiteSpace(req?.PaymentMethod) ? null : req.PaymentMethod.Trim();
+
+        // Guest-session settle hook (doc Section 5.1): the exact instant a table's bill
+        // is settled, close its GuestSession too — this is what makes the old phone's
+        // cookie start getting 410s immediately instead of staying usable until the
+        // next expiry sweep. IgnoreQueryFilters: an anonymous QR settle has no JWT tenant.
+        var session = await db.GuestSessions.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.OrderId == order.Id && (s.Status == GuestSessionStatus.Active || s.Status == GuestSessionStatus.Locked));
+        if (session is not null)
+        {
+            session.Status = GuestSessionStatus.Closed;
+            session.ClosedReason = SessionCloseReason.Settled;
+            session.ClosedAt = DateTime.UtcNow;
+        }
+
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }
@@ -903,154 +729,4 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
-    /// <summary>
-    /// Deducts real ingredient stock for every line item: Prepared items consume their
-    /// admin-defined Recipe (BOM), scaled by quantity ordered; Independent items decrease
-    /// their own linked InventoryItem directly. Every deduction writes an auditable
-    /// InventoryTransaction row referencing this order. Stock is allowed to go negative —
-    /// insufficient stock never blocks the sale, it's surfaced via low-stock alerts
-    /// instead. Prepared items with no recipe yet (nothing built for them in the Recipe
-    /// Builder) deduct nothing — logged, not silently ignored.
-    /// </summary>
-    private async Task ConsumeInventoryAsync(Dictionary<int, MenuItem> menu, List<OrderItem> items, int orderId, int? explicitTenantId = null)
-    {
-        var lineMenuItemIds = items.Select(i => i.MenuItemId).ToHashSet();
-        var preparedMenuItemIds = menu.Values
-            .Where(m => lineMenuItemIds.Contains(m.Id) && m.ProductType == ProductType.Prepared)
-            .Select(m => m.Id)
-            .ToList();
-
-        var recipes = await TenantScoped(db.Recipes, explicitTenantId)
-            .Include(r => r.Items)
-            .Where(r => preparedMenuItemIds.Contains(r.MenuItemId))
-            .ToListAsync();
-        var recipeByMenuItem = recipes.ToDictionary(r => r.MenuItemId);
-
-        var inventoryIds = recipes.SelectMany(r => r.Items).Select(ri => ri.InventoryItemId).ToHashSet();
-        foreach (var m in menu.Values)
-            if (m.ProductType == ProductType.Independent && m.LinkedInventoryItemId is int linkedId)
-                inventoryIds.Add(linkedId);
-
-        var inventory = await TenantScoped(db.InventoryItems, explicitTenantId)
-            .Where(i => inventoryIds.Contains(i.Id))
-            .ToDictionaryAsync(i => i.Id);
-
-        void Deduct(InventoryItem ingredient, double amount)
-        {
-            var previous = ingredient.Current;
-            ingredient.Current -= amount;
-            db.InventoryTransactions.Add(new InventoryTransaction
-            {
-                TenantId = ingredient.TenantId,
-                InventoryItemId = ingredient.Id,
-                Type = InventoryTransactionType.Sale,
-                PreviousStock = previous,
-                ChangedQuantity = -amount,
-                RemainingStock = ingredient.Current,
-                ReferenceId = orderId.ToString(),
-            });
-        }
-
-        foreach (var line in items)
-        {
-            if (!menu.TryGetValue(line.MenuItemId, out var menuItem)) continue;
-
-            if (menuItem.ProductType == ProductType.Independent)
-            {
-                if (menuItem.LinkedInventoryItemId is int linkedId && inventory.TryGetValue(linkedId, out var linked))
-                    Deduct(linked, line.Qty);
-                continue;
-            }
-
-            if (!recipeByMenuItem.TryGetValue(menuItem.Id, out var recipe))
-            {
-                logger.LogInformation("No recipe defined for menu item {MenuItemName} (id {MenuItemId}) — order {OrderId} deducted no ingredients for this line.", menuItem.Name, menuItem.Id, orderId);
-                continue;
-            }
-
-            foreach (var recipeItem in recipe.Items)
-            {
-                if (!inventory.TryGetValue(recipeItem.InventoryItemId, out var ingredient)) continue;
-                var amount = UnitConverter.Convert(recipeItem.Quantity * line.Qty, recipeItem.Unit, ingredient.Unit);
-                Deduct(ingredient, amount);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Identifies a returning customer primarily by phone number (guestPhone, already
-    /// digits-only from Create()'s normalization) — a name alone is unreliable, since two
-    /// guests can share one and the same guest can spell theirs differently across visits.
-    /// Falls back to a name match only when no phone is available (the anonymous QR flow,
-    /// which has no phone field yet) — and backfills the phone onto that record once one
-    /// does show up, so identity converges onto phone over time instead of staying split.
-    /// </summary>
-    private async Task<Customer> FindOrCreateCustomerAsync(string guestName, string? guestPhone, int? explicitTenantId = null)
-    {
-        // Includes FavoriteItems so TrackFavoritesAsync can reuse this same result
-        // instead of paying its own separate round trip right after.
-        var customersQuery = TenantScoped(db.Customers, explicitTenantId).Include(c => c.FavoriteItems);
-
-        Customer? customer = null;
-        if (guestPhone is not null)
-            customer = await customersQuery.FirstOrDefaultAsync(c => c.Phone == guestPhone);
-
-        if (customer is null)
-        {
-            var normalizedName = guestName.Trim().ToLower();
-            customer = await customersQuery.FirstOrDefaultAsync(c => c.Name.ToLower() == normalizedName);
-        }
-
-        if (customer is not null)
-        {
-            // Backfill: a legacy/no-phone record just supplied one for the first time.
-            if (guestPhone is not null && customer.Phone is null) customer.Phone = guestPhone;
-            return customer;
-        }
-
-        var slug = new string(guestName.Where(char.IsLetter).ToArray()).ToUpperInvariant();
-        customer = new Customer
-        {
-            Name = guestName,
-            Phone = guestPhone,
-            ReferralCode = $"{(slug.Length >= 4 ? slug[..4] : slug.PadRight(4, 'X'))}{Random.Shared.Next(100, 999)}",
-        };
-        if (explicitTenantId is int tid) customer.TenantId = tid;
-        db.Customers.Add(customer);
-        return customer;
-    }
-
-    private static void RecordVisit(Customer customer, decimal amountSpent)
-    {
-        customer.VisitCount += 1;
-        customer.TotalSpent += amountSpent;
-        customer.TotalPoints += (int)Math.Floor(amountSpent);
-        customer.LastVisitAt = DateTime.UtcNow;
-    }
-
-    private void TrackFavorites(Customer customer, List<OrderItem> items, int? explicitTenantId = null)
-    {
-        // customer.FavoriteItems is already loaded — FindOrCreateCustomerAsync's query
-        // includes it, so this no longer needs its own separate round trip. A brand-new
-        // customer's collection is simply empty, which behaves the same as the old
-        // "skip the lookup" case did.
-        var existing = customer.FavoriteItems;
-
-        foreach (var line in items)
-        {
-            var fav = existing.FirstOrDefault(f => f.MenuItemId == line.MenuItemId);
-            if (fav is null)
-            {
-                // Link via the navigation (not CustomerId) so EF resolves the
-                // real id for brand-new customers — see Order.Customer comment.
-                var newFav = new FavoriteItem { Customer = customer, MenuItemId = line.MenuItemId, OrderCount = line.Qty };
-                if (explicitTenantId is int tid) newFav.TenantId = tid;
-                db.FavoriteItems.Add(newFav);
-            }
-            else
-            {
-                fav.OrderCount += line.Qty;
-            }
-        }
-    }
 }

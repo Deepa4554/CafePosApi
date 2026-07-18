@@ -63,8 +63,17 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
             var addedInIngredientUnit = UnitConverter.AreCompatible(line.Unit, ingredient.Unit)
                 ? UnitConverter.Convert(line.Quantity, line.Unit, ingredient.Unit)
                 : line.Quantity; // fallback: units already match in practice (same picker list)
+
+            // Weighted-average cost: (balanceBefore*avgCostBefore + addedQty*lineCost) /
+            // (balanceBefore+addedQty) — computed from the PRE-addition balance, before
+            // Current is bumped below. Falls back to the incoming cost when there's no
+            // positive existing balance to average against (first-ever purchase, or a
+            // balance that was at/below zero).
+            var balanceBefore = previous;
+            ingredient.UnitCost = balanceBefore + addedInIngredientUnit > 0
+                ? Math.Round(((decimal)balanceBefore * ingredient.UnitCost + (decimal)addedInIngredientUnit * line.UnitCost) / (decimal)(balanceBefore + addedInIngredientUnit), 4)
+                : line.UnitCost;
             ingredient.Current += addedInIngredientUnit;
-            ingredient.UnitCost = line.UnitCost;
             ingredient.LastRestockAt = DateTime.UtcNow;
 
             db.InventoryTransactions.Add(new InventoryTransaction
