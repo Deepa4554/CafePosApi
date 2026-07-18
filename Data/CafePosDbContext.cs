@@ -48,6 +48,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<CafeSettings> Settings => Set<CafeSettings>();
     public DbSet<GuestSession> GuestSessions => Set<GuestSession>();
     public DbSet<SessionDevice> SessionDevices => Set<SessionDevice>();
+    public DbSet<TokenCounter> TokenCounters => Set<TokenCounter>();
 
     // Auth
     public DbSet<AppUser> Users => Set<AppUser>();
@@ -243,6 +244,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL");
 
         modelBuilder.Entity<MissingRecipeAlert>().HasIndex(a => new { a.TenantId, a.MenuItemId }).IsUnique();
+
+        // One counter row per (tenant, day) — NextTokenNumberAsync UPSERTs into this via
+        // ON CONFLICT, so the constraint must match exactly what the UPSERT targets.
+        modelBuilder.Entity<TokenCounter>().HasIndex(c => new { c.TenantId, c.Date }).IsUnique();
 
         // FIFO consumption walks batches ordered by (InventoryItemId, ExpiryDate, ReceivedAt)
         // for one ingredient at a time — this compound index backs that query directly.

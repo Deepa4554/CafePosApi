@@ -117,6 +117,18 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var clampedDiscountPct = Math.Clamp(discountPct, 0, 100);
         var discountAmount = Math.Round(subtotal * clampedDiscountPct / 100, 2);
 
+        // QSR counter orders get a daily-resetting token instead of a table — stamped here
+        // (not inside the SaveChanges transaction below) since the UPSERT is already
+        // atomic on its own; a rolled-back order can at worst waste one token number, same
+        // as any sequence counter skipping on a failed insert.
+        int? tokenNumber = null;
+        DateOnly? tokenDate = null;
+        if (orderType == "QSR")
+        {
+            tokenDate = DateOnly.FromDateTime(DateTime.UtcNow);
+            tokenNumber = await NextTokenNumberAsync(db, effectiveTenantId, tokenDate.Value);
+        }
+
         int? createdByUserId = null;
         string? createdByName = null;
         StaffMember? servedBy = null;
@@ -144,11 +156,14 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         {
             "TAKEAWAY" => "Takeaway",
             "DELIVERY" => "Delivery",
+            "QSR" => "Token",
             _ => "Dine In",
         };
         var title = orderType == "DINE_IN"
             ? $"Table #{tableCode}{guestSuffix}"
-            : $"{typeLabel} – {guest ?? "Walk-in"}";
+            : orderType == "QSR"
+                ? $"Token #{tokenNumber}"
+                : $"{typeLabel} – {guest ?? "Walk-in"}";
 
         var order = new Order
         {
@@ -156,6 +171,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             Title = title,
             OrderType = orderType,
             TableCode = orderType == "DINE_IN" ? tableCode : null,
+            TokenNumber = tokenNumber,
+            TokenDate = tokenDate,
             GuestName = guest,
             GuestPhone = string.IsNullOrWhiteSpace(guestPhone) ? null : guestPhone.Trim(),
             Items = orderItems,
@@ -212,6 +229,21 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
 
         return order;
+    }
+
+    /// <summary>Atomically hands out the next QSR token number for (tenantId, date) — a plain
+    /// SELECT-then-UPDATE would race under concurrent order creation (two counter orders
+    /// rung up at the same moment could get the same number), so this is a single UPSERT:
+    /// insert a fresh counter row at 1, or bump the existing one, in one round-trip.</summary>
+    private static async Task<int> NextTokenNumberAsync(CafePosDbContext db, int tenantId, DateOnly date)
+    {
+        var result = await db.Database.SqlQuery<int>(
+            $@"INSERT INTO ""TokenCounters"" (""TenantId"", ""Date"", ""LastNumber"")
+               VALUES ({tenantId}, {date}, 1)
+               ON CONFLICT (""TenantId"", ""Date"")
+               DO UPDATE SET ""LastNumber"" = ""TokenCounters"".""LastNumber"" + 1
+               RETURNING ""LastNumber""").ToListAsync();
+        return result[0];
     }
 
     public async Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId)

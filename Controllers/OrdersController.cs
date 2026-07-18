@@ -34,7 +34,10 @@ public class OrdersController(
         // KDS-only: exclude "Open" orders that exist but have never been fired (all items
         // FireBatch == 0). Additive, so `activeOnly`'s meaning is unchanged — the Tables
         // screen still counts unfired Open orders as active/occupied.
-        [FromQuery] bool kdsReady = false)
+        [FromQuery] bool kdsReady = false,
+        // Token Dashboard: "?orderType=QSR&activeOnly=true" is how it asks for just today's
+        // counter orders, same active-order rule as every other order type.
+        [FromQuery] string? orderType = null)
     {
         var query = db.Orders.Include(o => o.Items).Include(o => o.FireBatches).AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
@@ -43,6 +46,7 @@ public class OrdersController(
         // kitchen's ticket list while the food still hasn't gone out.
         if (activeOnly) query = query.Where(o => !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
         if (kdsReady) query = query.Where(o => o.Items.Any(i => i.FireBatch > 0));
+        if (orderType is not null) query = query.Where(o => o.OrderType == orderType);
         // No branch selected -> see everything (single-location cafes, and cafes that
         // haven't set up branches yet, are unaffected). A branch selected -> only that
         // branch's orders; pre-branch-scoping orders (BranchId null) intentionally drop
@@ -133,16 +137,30 @@ public class OrdersController(
         // FindOrCreateCustomerAsync) instead of by name, which two different guests can
         // share and one guest can spell inconsistently across visits. Enforced here (the
         // staff POS path) only — CreatePublic (anonymous QR self-ordering) has no phone
-        // field on its request DTO yet and is deliberately left unaffected.
+        // field on its request DTO yet and is deliberately left unaffected. QSR counter
+        // orders are the one staff-POS exception: a token number already identifies the
+        // order, so the phone stays genuinely optional (spec requirement) instead of
+        // being forced just to satisfy CRM matching.
         var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
-        if (normalizedPhone is null || normalizedPhone.Length != 10)
+        if (req.OrderType != "QSR" && (normalizedPhone is null || normalizedPhone.Length != 10))
             throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
+        if (req.OrderType == "QSR" && normalizedPhone is not null && normalizedPhone.Length != 10)
+            throw new ApiValidationException("Mobile number must be exactly 10 digits.");
 
         // Creates the order in the "Open" state (persisted, table occupied) WITHOUT firing
         // it to the kitchen — the POS calls POST /orders/{id}/fire as an explicit second
         // step (or "Hold Order" skips firing). This is what separates ordering from kitchen
         // dispatch: an order can exist and be edited before any item is sent to the line.
         var order = await orderBuilder.BuildOrderAsync(db, req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, User, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId);
+
+        // A QSR counter order has no staff member coming back to press "Fire" — like the
+        // guest-QR path, it goes straight to the kitchen the instant it's rung up.
+        if (req.OrderType == "QSR")
+        {
+            await orderBuilder.FireUnfiredItemsAsync(db, order, null);
+            await db.SaveChangesAsync();
+        }
+
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
     }
 
@@ -244,6 +262,61 @@ public class OrdersController(
             if (fromStage is not null) AdvanceUnits(item, fromStage.Value, UnitsAtStage(item, fromStage.Value));
         }
         orderBuilder.RecomputeBatchStatus(db, order, batchNumber);
+        OrderBuildingService.RecomputeOrderStatus(order);
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Jumps every not-yet-served unit of a line straight to Served, skipping
+    /// whatever intermediate stage it's currently at — the QSR token flow's "tap the status
+    /// to mark served" action has no use for the granular stage-by-stage KDS pipeline (see
+    /// AdvanceUnits above), it just wants one line done in one tap.</summary>
+    private static void JumpToServed(OrderItem item)
+    {
+        item.ServedQty = item.Qty;
+        item.ReadQty = 0;
+        item.PreparingQty = 0;
+        RecomputeItemStatus(item);
+    }
+
+    /// <summary>QSR token flow: mark one line fully served in a single tap (no stage-by-stage
+    /// stepping, no confirmation) — see JumpToServed.</summary>
+    [HttpPatch("{id:int}/items/{itemId:int}/serve")]
+    public async Task<ActionResult<OrderDto>> ServeItem(int id, int itemId)
+    {
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        var item = order.Items.FirstOrDefault(i => i.Id == itemId);
+        if (item is null) return NotFound();
+        if (item.FireBatch == 0) throw new ApiValidationException("Item hasn't been fired to the kitchen yet.");
+
+        JumpToServed(item);
+        orderBuilder.RecomputeBatchStatus(db, order, item.FireBatch);
+        OrderBuildingService.RecomputeOrderStatus(order);
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>QSR token flow: "Mark All as Served" — jumps every fired line on the order
+    /// straight to Served in one tap, across every KOT/fire-batch. See JumpToServed.</summary>
+    [HttpPatch("{id:int}/serve-all")]
+    public async Task<ActionResult<OrderDto>> ServeAll(int id)
+    {
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+
+        var touchedBatches = new HashSet<int>();
+        foreach (var item in order.Items.Where(i => i.FireBatch != 0 && !i.Voided))
+        {
+            JumpToServed(item);
+            touchedBatches.Add(item.FireBatch);
+        }
+        foreach (var batchNumber in touchedBatches)
+            orderBuilder.RecomputeBatchStatus(db, order, batchNumber);
         OrderBuildingService.RecomputeOrderStatus(order);
 
         await db.SaveChangesAsync();
@@ -512,6 +585,50 @@ public class OrdersController(
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
             $"Order {order.Id} cancelled. Reason: {req.Reason ?? "not specified"}.", AuditSeverity.Medium);
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Cancels one whole KOT/fire-batch — voids every not-yet-served line in THAT
+    /// round only, via the same before-cook-reverses/after-cook-doesn't rule as
+    /// RemoveItem/Cancel (see VoidItemAsync). Every other round on the order (already
+    /// Preparing/Ready/Served, or fired later) is untouched. If this was the order's last
+    /// remaining active line anywhere, the order itself is marked Cancelled too — an order
+    /// can't be left sitting open with nothing on it. Requires Owner/Manager if this KOT
+    /// already has a served line (walking back served food needs a manager's say-so, same
+    /// rule as the whole-order Cancel).</summary>
+    [HttpPost("{id:int}/batches/{batchNumber:int}/cancel")]
+    public async Task<ActionResult<OrderDto>> CancelBatch(int id, int batchNumber, CancelOrderRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot cancel a KOT on a paid order — use Refund instead.");
+        var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
+        if (batch is null) return NotFound();
+
+        var batchItems = order.Items.Where(i => i.FireBatch == batchNumber && !i.Voided).ToList();
+        if (batchItems.Count == 0) throw new ApiValidationException("This KOT has nothing left to cancel.");
+
+        var hasServedItems = batchItems.Any(i => i.Status == OrderStatus.Served);
+        if (hasServedItems && !IsOwnerOrManager()) return Forbid();
+
+        foreach (var item in batchItems.Where(i => i.Status != OrderStatus.Served))
+            await VoidItemAsync(order, item, req.Reason);
+
+        order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+        orderBuilder.RecomputeBatchStatus(db, order, batchNumber);
+        OrderBuildingService.RecomputeOrderStatus(order);
+
+        if (!order.Items.Any(i => !i.Voided))
+        {
+            order.Cancelled = true;
+            order.CancelledAt = DateTime.UtcNow;
+            order.CancelReason = req.Reason;
+        }
+
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+            $"KOT #{1000 + batch.Id} (order {order.Id}) cancelled. Reason: {req.Reason ?? "not specified"}.", AuditSeverity.Medium);
         return OrderDto.From(order);
     }
 

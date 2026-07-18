@@ -108,6 +108,18 @@ public class CafeTable : ITenantScoped
     public int Seats { get; set; }
 }
 
+/// <summary>One row per (tenant, calendar day) — LastNumber is incremented atomically via an
+/// UPSERT (see OrderBuildingService.NextTokenNumberAsync) to hand out the next QSR token
+/// number for that day without a race under concurrent order creation. A new day gets a new
+/// row starting at 1 — tokens never carry over.</summary>
+public class TokenCounter : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public DateOnly Date { get; set; }
+    public int LastNumber { get; set; }
+}
+
 public class Order : ITenantScoped
 {
     public int Id { get; set; }
@@ -120,6 +132,14 @@ public class Order : ITenantScoped
     public required string Title { get; set; }
     public required string OrderType { get; set; } // DINE_IN / TAKEAWAY / DELIVERY
     public string? TableCode { get; set; }
+    /// <summary>Counter/QSR ticket number — stamped only for OrderType == "QSR", scoped to
+    /// TokenDate via TokenCounter (see OrderBuildingService.NextTokenNumberAsync). Null for
+    /// every other order type.</summary>
+    public int? TokenNumber { get; set; }
+    /// <summary>The calendar day TokenNumber was issued on (cafe-local date) — lets the Token
+    /// Dashboard scope "today's active tokens" without the number itself ever needing to be
+    /// globally unique across days.</summary>
+    public DateOnly? TokenDate { get; set; }
     public string? GuestName { get; set; }
     /// <summary>10-digit mobile, captured so the bill can be sent (WhatsApp, SMS) after
     /// the order is placed — e.g. when it's marked paid, not necessarily at creation.</summary>
