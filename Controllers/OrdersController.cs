@@ -543,21 +543,8 @@ public class OrdersController(
             {
                 var ingredient = await db.InventoryItems.FindAsync(d.InventoryItemId);
                 if (ingredient is null) continue;
-                var previous = ingredient.Current;
-                ingredient.Current += -d.ChangedQuantity; // ChangedQuantity was negative on the original Sale row
-                db.InventoryTransactions.Add(new InventoryTransaction
-                {
-                    InventoryItemId = ingredient.Id,
-                    OrderItemId = item.Id,
-                    Type = InventoryTransactionType.Return,
-                    PreviousStock = previous,
-                    ChangedQuantity = -d.ChangedQuantity,
-                    RemainingStock = ingredient.Current,
-                    ReferenceId = order.Id.ToString(),
-                    Reason = "Void before prep",
-                    UserId = CurrentUserId(),
-                    UserName = User.Identity?.Name ?? "Cafe Staff",
-                });
+                await InventoryBatchService.ReverseAsync(db, d, ingredient, "Void before prep",
+                    CurrentUserId(), User.Identity?.Name ?? "Cafe Staff");
             }
         }
         else

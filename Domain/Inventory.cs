@@ -52,9 +52,41 @@ public class InventoryTransaction : ITenantScoped
     public int? OrderItemId { get; set; }
     /// <summary>Structured sub-reason for Type == Waste rows only; null otherwise.</summary>
     public WasteReason? WasteReasonCode { get; set; }
+    /// <summary>Which lot (see InventoryBatch) this row moved — set on every new
+    /// Sale/Purchase/Waste/ManualAdjustment/Return row going forward. Null on historical
+    /// rows written before batch tracking existed.</summary>
+    public int? InventoryBatchId { get; set; }
+    /// <summary>Set this (not InventoryBatchId directly) when writing a row for a
+    /// just-created, not-yet-saved batch — EF Core resolves the real generated id through
+    /// the tracked reference at SaveChanges time (same pattern as Order.Customer).</summary>
+    public InventoryBatch? Batch { get; set; }
     public int? UserId { get; set; }
     public string UserName { get; set; } = "System";
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// ---------- Inventory Batches (FIFO + expiry) ----------
+
+/// <summary>One physical lot of an ingredient — created by a purchase (or a positive
+/// stock-take/manual-adjustment correction) and drained in FIFO order (soonest expiry
+/// first, then oldest received) by sales, waste, and negative corrections. Quantity can go
+/// negative on the last-consumed batch when overall stock runs out — matches the existing
+/// "allow negative, alert don't block" policy (see InventoryBatchService).</summary>
+public class InventoryBatch : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int InventoryItemId { get; set; }
+    public double Quantity { get; set; }
+    /// <summary>Cost per base unit for just THIS lot — distinct from
+    /// InventoryItem.UnitCost's weighted average, which stays the quick display figure.</summary>
+    public decimal UnitCost { get; set; }
+    /// <summary>Null = doesn't expire (packaging, long-shelf-life dry goods, etc.).</summary>
+    public DateOnly? ExpiryDate { get; set; }
+    public DateTime ReceivedAt { get; set; } = DateTime.UtcNow;
+    /// <summary>PurchaseOrder.Id / StockTake.Id / null for a quick restock — same loose
+    /// string-reference convention as InventoryTransaction.ReferenceId.</summary>
+    public string? SourceReferenceId { get; set; }
 }
 
 // ---------- Stock Take ----------
@@ -133,4 +165,5 @@ public class PurchaseItem : ITenantScoped
     public double Quantity { get; set; }
     public required string Unit { get; set; }
     public decimal UnitCost { get; set; }
+    public DateOnly? ExpiryDate { get; set; }
 }

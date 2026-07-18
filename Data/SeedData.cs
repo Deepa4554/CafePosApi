@@ -104,6 +104,11 @@ public static class SeedData
         BackfillUserTenantIds(db);
         BackfillPlatformAdmin(db);
 
+        // BackfillInventoryBatches needs real InventoryItem ids (a freshly-seeded item
+        // above has none yet — identity values only exist post-save on a relational
+        // provider), so it runs as its own pass after this save, with its own save.
+        db.SaveChanges();
+        BackfillInventoryBatches(db);
         db.SaveChanges();
     }
 
@@ -188,6 +193,31 @@ public static class SeedData
             if (item.UnitCost != 0) continue;
             if (!costs.TryGetValue(item.Name, out var cost)) continue;
             item.UnitCost = cost;
+        }
+    }
+
+    /// <summary>One-time patch for every InventoryItem that predates batch tracking (FIFO +
+    /// expiry) — gives each one a single no-expiry batch matching its current balance, so
+    /// FIFO consumption has something to draw from immediately. Runs after the item-creation
+    /// save above so ids are real; safe to run on every startup (skips items that already
+    /// have a batch).</summary>
+    private static void BackfillInventoryBatches(CafePosDbContext db)
+    {
+        // Materialize both queries up front — Npgsql doesn't allow a nested query to run
+        // against the same connection while an outer one is still being enumerated.
+        var itemsWithBatches = db.InventoryBatches.Select(b => b.InventoryItemId).Distinct().ToHashSet();
+        foreach (var item in db.InventoryItems.ToList())
+        {
+            if (item.Current == 0) continue;
+            if (itemsWithBatches.Contains(item.Id)) continue;
+            db.InventoryBatches.Add(new InventoryBatch
+            {
+                InventoryItemId = item.Id,
+                Quantity = item.Current,
+                UnitCost = item.UnitCost,
+                ExpiryDate = null,
+                ReceivedAt = item.LastRestockAt ?? DateTime.UtcNow,
+            });
         }
     }
 }

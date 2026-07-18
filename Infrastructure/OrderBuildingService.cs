@@ -442,22 +442,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             .Where(i => inventoryIds.Contains(i.Id))
             .ToDictionaryAsync(i => i.Id);
 
-        void Deduct(InventoryItem ingredient, double amount, int orderItemId)
-        {
-            var previous = ingredient.Current;
-            ingredient.Current -= amount;
-            db.InventoryTransactions.Add(new InventoryTransaction
-            {
-                TenantId = ingredient.TenantId,
-                InventoryItemId = ingredient.Id,
-                OrderItemId = orderItemId,
-                Type = InventoryTransactionType.Sale,
-                PreviousStock = previous,
-                ChangedQuantity = -amount,
-                RemainingStock = ingredient.Current,
-                ReferenceId = orderId.ToString(),
-            });
-        }
+        Task Deduct(InventoryItem ingredient, double amount, int orderItemId) =>
+            InventoryBatchService.ConsumeFifoAsync(db, ingredient, amount, InventoryTransactionType.Sale,
+                orderId.ToString(), orderItemId, reason: null, wasteReasonCode: null, userId: null, userName: "System");
 
         async Task TrackMissingRecipeAsync(MenuItem menuItem)
         {
@@ -484,7 +471,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (menuItem.ProductType == ProductType.Independent)
             {
                 if (menuItem.LinkedInventoryItemId is int linkedId && inventory.TryGetValue(linkedId, out var linked))
-                    Deduct(linked, line.Qty, line.Id);
+                    await Deduct(linked, line.Qty, line.Id);
                 continue;
             }
 
@@ -498,7 +485,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             {
                 if (!inventory.TryGetValue(recipeItem.InventoryItemId, out var ingredient)) continue;
                 var amount = UnitConverter.Convert(recipeItem.Quantity * line.Qty, recipeItem.Unit, ingredient.Unit);
-                Deduct(ingredient, amount, line.Id);
+                await Deduct(ingredient, amount, line.Id);
             }
         }
     }

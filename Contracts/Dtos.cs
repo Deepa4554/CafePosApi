@@ -237,7 +237,7 @@ public record CreateTableRequest(string Zone, int Seats);
 
 // ---------- Inventory ----------
 
-public record CreateInventoryItemRequest(string Name, string Category, double Max, string? Unit, decimal? UnitCost, double? MinStock = null, double? ReorderLevel = null, int? BranchId = null);
+public record CreateInventoryItemRequest(string Name, string Category, double Max, string? Unit, decimal? UnitCost, double? MinStock = null, double? ReorderLevel = null, int? BranchId = null, DateOnly? ExpiryDate = null);
 
 /// <summary>InventoryItem plus a server-computed LowStock flag (Current &lt;= ReorderLevel)
 /// — replaces the frontend's old hardcoded current/max &lt;= 0.25 ratio guess.</summary>
@@ -250,7 +250,7 @@ public record InventoryItemDto(
         i.UnitCost, i.MinStock, i.ReorderLevel, i.Current <= i.ReorderLevel, i.BranchId);
 }
 
-public record RestockRequest(double Quantity, decimal? UnitCost);
+public record RestockRequest(double Quantity, decimal? UnitCost, DateOnly? ExpiryDate = null);
 
 public record WasteRequest(double Quantity, WasteReason Reason, string? Note = null);
 
@@ -260,13 +260,20 @@ public record InventoryTransactionDto(
     int Id, int InventoryItemId, string InventoryItemName, string Type, double PreviousStock,
     double ChangedQuantity, double RemainingStock, string? Reason, string? WasteReasonCode, string? ReferenceId, string UserName, DateTime CreatedAt);
 
+// ---------- Inventory Batches (FIFO + expiry) ----------
+
+/// <summary>One physical lot — see InventoryBatchService. DaysUntilExpiry is negative once
+/// past ExpiryDate (IsExpired true); null for a batch with no ExpiryDate at all.</summary>
+public record InventoryBatchDto(int Id, int InventoryItemId, string InventoryItemName, string Unit,
+    double Quantity, decimal UnitCost, DateOnly? ExpiryDate, DateTime ReceivedAt, int? DaysUntilExpiry, bool IsExpired);
+
 // ---------- Purchase Orders ----------
 
-public record PurchaseItemRequest(int InventoryItemId, double Quantity, string Unit, decimal UnitCost);
+public record PurchaseItemRequest(int InventoryItemId, double Quantity, string Unit, decimal UnitCost, DateOnly? ExpiryDate = null);
 
 public record CreatePurchaseOrderRequest(string? SupplierName, string? Note, List<PurchaseItemRequest> Items);
 
-public record PurchaseItemDto(int InventoryItemId, string InventoryItemName, double Quantity, string Unit, decimal UnitCost);
+public record PurchaseItemDto(int InventoryItemId, string InventoryItemName, double Quantity, string Unit, decimal UnitCost, DateOnly? ExpiryDate);
 
 public record PurchaseOrderDto(int Id, string? SupplierName, string? Note, string CreatedByName, DateTime CreatedAt, List<PurchaseItemDto> Items);
 

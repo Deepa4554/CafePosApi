@@ -51,6 +51,7 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
                 Quantity = i.Quantity,
                 Unit = i.Unit.Trim(),
                 UnitCost = i.UnitCost,
+                ExpiryDate = i.ExpiryDate,
             }).ToList(),
         };
         db.PurchaseOrders.Add(order);
@@ -66,27 +67,18 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
 
             // Weighted-average cost: (balanceBefore*avgCostBefore + addedQty*lineCost) /
             // (balanceBefore+addedQty) — computed from the PRE-addition balance, before
-            // Current is bumped below. Falls back to the incoming cost when there's no
-            // positive existing balance to average against (first-ever purchase, or a
-            // balance that was at/below zero).
+            // CreateBatch bumps Current below. Falls back to the incoming cost when there's
+            // no positive existing balance to average against (first-ever purchase, or a
+            // balance that was at/below zero). Stays the quick "current avg cost" display
+            // figure — distinct from the new batch's own real UnitCost.
             var balanceBefore = previous;
             ingredient.UnitCost = balanceBefore + addedInIngredientUnit > 0
                 ? Math.Round(((decimal)balanceBefore * ingredient.UnitCost + (decimal)addedInIngredientUnit * line.UnitCost) / (decimal)(balanceBefore + addedInIngredientUnit), 4)
                 : line.UnitCost;
-            ingredient.Current += addedInIngredientUnit;
             ingredient.LastRestockAt = DateTime.UtcNow;
 
-            db.InventoryTransactions.Add(new InventoryTransaction
-            {
-                InventoryItemId = ingredient.Id,
-                Type = InventoryTransactionType.Purchase,
-                PreviousStock = previous,
-                ChangedQuantity = addedInIngredientUnit,
-                RemainingStock = ingredient.Current,
-                ReferenceId = order.Id.ToString(),
-                UserId = CurrentUserId(),
-                UserName = CurrentUserName(),
-            });
+            InventoryBatchService.CreateBatch(db, ingredient, addedInIngredientUnit, line.UnitCost, line.ExpiryDate,
+                InventoryTransactionType.Purchase, order.Id.ToString(), CurrentUserId(), CurrentUserName());
         }
 
         await db.SaveChangesAsync();
@@ -99,7 +91,7 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
         var names = await db.InventoryItems.Where(i => ids.Contains(i.Id)).ToDictionaryAsync(i => i.Id, i => i.Name);
         return orders.Select(o => new PurchaseOrderDto(
             o.Id, o.SupplierName, o.Note, o.CreatedByName, o.CreatedAt,
-            o.Items.Select(i => new PurchaseItemDto(i.InventoryItemId, names.TryGetValue(i.InventoryItemId, out var n) ? n : "Unknown", i.Quantity, i.Unit, i.UnitCost)).ToList()
+            o.Items.Select(i => new PurchaseItemDto(i.InventoryItemId, names.TryGetValue(i.InventoryItemId, out var n) ? n : "Unknown", i.Quantity, i.Unit, i.UnitCost, i.ExpiryDate)).ToList()
         )).ToList();
     }
 

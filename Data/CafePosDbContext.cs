@@ -86,6 +86,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<StockTake> StockTakes => Set<StockTake>();
     public DbSet<StockTakeLine> StockTakeLines => Set<StockTakeLine>();
     public DbSet<MissingRecipeAlert> MissingRecipeAlerts => Set<MissingRecipeAlert>();
+    public DbSet<InventoryBatch> InventoryBatches => Set<InventoryBatch>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -152,6 +153,15 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .WithOne()
             .HasForeignKey(i => i.PurchaseOrderId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        // Unidirectional — InventoryBatch has no collection navigation back, matching the
+        // ledger's other loose string-reference fields. SetNull rather than cascade: a
+        // depleted batch is never deleted, only zeroed out, so this is defense-in-depth only.
+        modelBuilder.Entity<InventoryTransaction>()
+            .HasOne(t => t.Batch)
+            .WithMany()
+            .HasForeignKey(t => t.InventoryBatchId)
+            .OnDelete(DeleteBehavior.SetNull);
 
         modelBuilder.Entity<StockTake>()
             .HasMany(s => s.Lines)
@@ -233,6 +243,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL");
 
         modelBuilder.Entity<MissingRecipeAlert>().HasIndex(a => new { a.TenantId, a.MenuItemId }).IsUnique();
+
+        // FIFO consumption walks batches ordered by (InventoryItemId, ExpiryDate, ReceivedAt)
+        // for one ingredient at a time — this compound index backs that query directly.
+        modelBuilder.Entity<InventoryBatch>().HasIndex(b => new { b.InventoryItemId, b.ExpiryDate, b.ReceivedAt });
 
         ApplyTenantIsolation(modelBuilder);
     }

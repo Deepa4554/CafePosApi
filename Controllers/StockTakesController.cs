@@ -100,19 +100,14 @@ public class StockTakesController(CafePosDbContext db) : ControllerBase
             if (Math.Abs(liveBalance - line.CountedQty.Value) < 0.0001) continue; // already matches, no adjustment needed
 
             var delta = line.CountedQty.Value - liveBalance;
-            ingredient.Current = line.CountedQty.Value;
-            db.InventoryTransactions.Add(new InventoryTransaction
-            {
-                InventoryItemId = ingredient.Id,
-                Type = InventoryTransactionType.ManualAdjustment,
-                PreviousStock = liveBalance,
-                ChangedQuantity = delta,
-                RemainingStock = ingredient.Current,
-                ReferenceId = stockTake.Id.ToString(),
-                Reason = $"Stock take #{stockTake.Id}",
-                UserId = CurrentUserId(),
-                UserName = CurrentUserName(),
-            });
+            var referenceId = stockTake.Id.ToString();
+            var reason = $"Stock take #{stockTake.Id}";
+            if (delta < 0)
+                await InventoryBatchService.ConsumeFifoAsync(db, ingredient, -delta, InventoryTransactionType.ManualAdjustment,
+                    referenceId, orderItemId: null, reason, wasteReasonCode: null, CurrentUserId(), CurrentUserName());
+            else
+                InventoryBatchService.CreateBatch(db, ingredient, delta, ingredient.UnitCost, expiryDate: null,
+                    InventoryTransactionType.ManualAdjustment, referenceId, CurrentUserId(), CurrentUserName());
         }
 
         stockTake.Status = StockTakeStatus.Finalized;
