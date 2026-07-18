@@ -14,8 +14,9 @@ public class OrdersController(
     CafePosDbContext db, IAuditService audit, QrTokenService qrTokens, ReceiptTokenService receiptTokens,
     ITaxRateCache taxRateCache, ITenantContext tenantContext, IOrderBuildingService orderBuilder) : ControllerBase
 {
+    // REMOVED: Read stage - workflow simplified: New → Preparing → Ready → Served
     private static readonly OrderStatus[] StatusFlow =
-        [OrderStatus.New, OrderStatus.Read, OrderStatus.Preparing, OrderStatus.Ready, OrderStatus.Served];
+        [OrderStatus.New, OrderStatus.Preparing, OrderStatus.Ready, OrderStatus.Served];
 
     [HttpGet]
     public async Task<PagedResult<OrderDto>> List(
@@ -334,7 +335,6 @@ public class OrdersController(
     private static int UnitsAtStage(OrderItem item, OrderStatus stage) => stage switch
     {
         OrderStatus.New => item.NewQty,
-        OrderStatus.Read => item.ReadQty,
         OrderStatus.Preparing => item.PreparingQty,
         OrderStatus.Ready => item.ReadyQty,
         OrderStatus.Served => item.ServedQty,
@@ -361,10 +361,9 @@ public class OrdersController(
         if (n == 0) return;
         switch (fromStage)
         {
-            case OrderStatus.New: item.ReadQty += n; break;                             // New→Read (NewQty derived, shrinks)
-            case OrderStatus.Read: item.ReadQty -= n; item.PreparingQty += n; break;    // Read→Preparing
+            case OrderStatus.New: item.PreparingQty += n; break;                           // New→Preparing (READ stage removed)
             case OrderStatus.Preparing: item.PreparingQty -= n; item.ReadyQty += n; break; // Preparing→Ready
-            case OrderStatus.Ready: item.ReadyQty -= n; item.ServedQty += n; break;     // Ready→Served
+            case OrderStatus.Ready: item.ReadyQty -= n; item.ServedQty += n; break;       // Ready→Served
         }
         RecomputeItemStatus(item);
     }

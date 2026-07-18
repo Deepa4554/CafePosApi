@@ -5,7 +5,7 @@ namespace CafePOS.Api.Domain;
 public enum OrderStatus
 {
     New,
-    Read,      // kitchen has acknowledged/seen the ticket, not yet cooking
+    Read,    // TEMP: Keep for migration, will be removed after data is migrated
     Preparing,
     Ready,
     Served,
