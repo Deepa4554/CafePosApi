@@ -348,7 +348,8 @@ public record UpdateSettingsRequest(
     bool? DineInEnabled = null,
     bool? TakeawayEnabled = null,
     bool? DeliveryEnabled = null,
-    bool? QsrEnabled = null);
+    bool? QsrEnabled = null,
+    bool? CashEnabled = null);
 
 // ---------- Menu Features ----------
 

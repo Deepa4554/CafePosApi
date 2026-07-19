@@ -138,13 +138,14 @@ public class OrdersController(
         // share and one guest can spell inconsistently across visits. Enforced here (the
         // staff POS path) only — CreatePublic (anonymous QR self-ordering) has no phone
         // field on its request DTO yet and is deliberately left unaffected. QSR counter
-        // orders are the one staff-POS exception: a token number already identifies the
-        // order, so the phone stays genuinely optional (spec requirement) instead of
-        // being forced just to satisfy CRM matching.
+        // orders and Cash Sales are the staff-POS exceptions: a token number (QSR) or the
+        // fact that it's paid on the spot (Cash) already identifies/settles the order, so
+        // the phone stays genuinely optional instead of being forced just for CRM matching.
+        var skipsMandatoryPhone = req.OrderType is "QSR" or "CASH";
         var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
-        if (req.OrderType != "QSR" && (normalizedPhone is null || normalizedPhone.Length != 10))
+        if (!skipsMandatoryPhone && (normalizedPhone is null || normalizedPhone.Length != 10))
             throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
-        if (req.OrderType == "QSR" && normalizedPhone is not null && normalizedPhone.Length != 10)
+        if (skipsMandatoryPhone && normalizedPhone is not null && normalizedPhone.Length != 10)
             throw new ApiValidationException("Mobile number must be exactly 10 digits.");
 
         // Creates the order in the "Open" state (persisted, table occupied) WITHOUT firing
@@ -158,6 +159,20 @@ public class OrdersController(
         if (req.OrderType == "QSR")
         {
             await orderBuilder.FireUnfiredItemsAsync(db, order, null);
+            await db.SaveChangesAsync();
+        }
+        // Cash Sale: no kitchen involved at all — fire (so the order still gets a real
+        // fire-batch for the usual status bookkeeping/rollup) and immediately jump every
+        // line straight to Served, so it's payable the instant it's rung up. This never
+        // surfaces on the Kitchen Display: KDS already excludes any batch/item that's
+        // already Served (see KDSScreen's `tickets`/`itemWiseKotGroups`/`prodGroups`), so
+        // no extra order-type filtering is needed there.
+        else if (req.OrderType == "CASH")
+        {
+            await orderBuilder.FireUnfiredItemsAsync(db, order, null);
+            foreach (var item in order.Items) JumpToServed(item);
+            foreach (var batch in order.FireBatches) orderBuilder.RecomputeBatchStatus(db, order, batch.BatchNumber);
+            OrderBuildingService.RecomputeOrderStatus(order);
             await db.SaveChangesAsync();
         }
 

@@ -359,6 +359,7 @@ public class CafeSettings : ITenantScoped
     public bool TakeawayEnabled { get; set; } = true;
     public bool DeliveryEnabled { get; set; } = true;
     public bool QsrEnabled { get; set; } = true;
+    public bool CashEnabled { get; set; } = true;
 
     /// <summary>
     /// The owning Tenant's Slug, populated by SettingsController (not a real column —

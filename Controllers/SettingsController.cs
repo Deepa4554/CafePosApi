@@ -64,7 +64,8 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.TakeawayEnabled is not null) settings.TakeawayEnabled = req.TakeawayEnabled.Value;
         if (req.DeliveryEnabled is not null) settings.DeliveryEnabled = req.DeliveryEnabled.Value;
         if (req.QsrEnabled is not null) settings.QsrEnabled = req.QsrEnabled.Value;
-        if (!(settings.DineInEnabled || settings.TakeawayEnabled || settings.DeliveryEnabled || settings.QsrEnabled))
+        if (req.CashEnabled is not null) settings.CashEnabled = req.CashEnabled.Value;
+        if (!(settings.DineInEnabled || settings.TakeawayEnabled || settings.DeliveryEnabled || settings.QsrEnabled || settings.CashEnabled))
             throw new ApiValidationException("At least one order type must stay enabled.");
 
         await db.SaveChangesAsync();

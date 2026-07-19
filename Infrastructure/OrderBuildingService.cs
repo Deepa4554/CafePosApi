@@ -157,6 +157,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             "TAKEAWAY" => "Takeaway",
             "DELIVERY" => "Delivery",
             "QSR" => "Token",
+            "CASH" => "Cash Sale",
             _ => "Dine In",
         };
         var title = orderType == "DINE_IN"
