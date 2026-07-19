@@ -60,6 +60,12 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
                 throw new ApiValidationException("KdsStageMode must be TWO_STAGE or THREE_STAGE.");
             settings.KdsStageMode = req.KdsStageMode;
         }
+        if (req.DineInEnabled is not null) settings.DineInEnabled = req.DineInEnabled.Value;
+        if (req.TakeawayEnabled is not null) settings.TakeawayEnabled = req.TakeawayEnabled.Value;
+        if (req.DeliveryEnabled is not null) settings.DeliveryEnabled = req.DeliveryEnabled.Value;
+        if (req.QsrEnabled is not null) settings.QsrEnabled = req.QsrEnabled.Value;
+        if (!(settings.DineInEnabled || settings.TakeawayEnabled || settings.DeliveryEnabled || settings.QsrEnabled))
+            throw new ApiValidationException("At least one order type must stay enabled.");
 
         await db.SaveChangesAsync();
         taxRateCache.Invalidate(settings.TenantId);

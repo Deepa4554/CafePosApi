@@ -352,6 +352,14 @@ public class CafeSettings : ITenantScoped
     /// unchanged either way.</summary>
     public string KdsStageMode { get; set; } = "THREE_STAGE";
 
+    // Which order types the POS offers — an Owner turns off whichever this cafe doesn't
+    // do (e.g. a counter-only QSR place hides Dine In/Delivery entirely). At least one
+    // must stay enabled; enforced in SettingsController, not here.
+    public bool DineInEnabled { get; set; } = true;
+    public bool TakeawayEnabled { get; set; } = true;
+    public bool DeliveryEnabled { get; set; } = true;
+    public bool QsrEnabled { get; set; } = true;
+
     /// <summary>
     /// The owning Tenant's Slug, populated by SettingsController (not a real column —
     /// see [NotMapped]). Lets the app build tenant-aware QR ordering links

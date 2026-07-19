@@ -344,7 +344,11 @@ public record UpdateSettingsRequest(
     string? Phone = null,
     string? Address = null,
     string? StoreHoursJson = null,
-    string? KdsStageMode = null);
+    string? KdsStageMode = null,
+    bool? DineInEnabled = null,
+    bool? TakeawayEnabled = null,
+    bool? DeliveryEnabled = null,
+    bool? QsrEnabled = null);
 
 // ---------- Menu Features ----------
 
