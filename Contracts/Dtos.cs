@@ -4,7 +4,12 @@ namespace CafePOS.Api.Contracts;
 
 // ---------- Orders ----------
 
-public record CreateOrderItemDto(int MenuItemId, int Qty, string? Modifier);
+/// <summary>ModifierPriceAdjustment is the sum of whatever ModifierOption prices the client
+/// selected (e.g. "Extra Cheese +₹20") — added on top of the menu item's own price for just
+/// this line. The selection itself isn't tracked structurally server-side (no ModifierOption
+/// FK on OrderItem); Modifier is the free-text label for what was picked, same as it already
+/// was for plain text notes.</summary>
+public record CreateOrderItemDto(int MenuItemId, int Qty, string? Modifier, decimal? ModifierPriceAdjustment = null);
 
 public record CreateOrderRequest(
     string OrderType, // DINE_IN / TAKEAWAY / DELIVERY
@@ -27,7 +32,7 @@ public record CancelOrderRequest(string? Reason);
 
 // ---------- Order lifecycle (add item / fire / billing-time discounts / payment) ----------
 
-public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier);
+public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, decimal? ModifierPriceAdjustment = null);
 
 /// <summary>Manager-only markdown applied at the billing stage (Served). Supply exactly
 /// one of Pct (percentage of subtotal) or Amount (flat).</summary>

@@ -106,7 +106,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 MenuItemId = menuItem.Id,
                 Name = menuItem.Name,
                 Qty = line.Qty,
-                Price = menuItem.Price,
+                Price = menuItem.Price + (line.ModifierPriceAdjustment ?? 0),
                 Modifier = line.Modifier,
             });
         }

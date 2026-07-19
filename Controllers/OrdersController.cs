@@ -516,7 +516,7 @@ public class OrdersController(
             MenuItemId = menuItem.Id,
             Name = menuItem.Name,
             Qty = req.Qty,
-            Price = menuItem.Price,
+            Price = menuItem.Price + (req.ModifierPriceAdjustment ?? 0),
             Modifier = req.Modifier,
             FireBatch = 0,
         };

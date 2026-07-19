@@ -12,11 +12,15 @@ namespace CafePOS.Api.Controllers;
 [Route("api/menu-items")]
 public class MenuController(CafePosDbContext db, IImageStorageService imageStorage) : ControllerBase
 {
-    /// <summary>Public — powers the customer-facing QR Menu as well as the internal POS grid.</summary>
+    /// <summary>Public — powers the customer-facing QR Menu as well as the internal POS grid.
+    /// Modifiers (+ their Options) are eager-loaded so POS can offer topping/add-on
+    /// selection straight from this one list, without an extra round trip per item.</summary>
     [AllowAnonymous]
     [HttpGet]
     public async Task<IEnumerable<MenuItem>> List() =>
-        await db.MenuItems.OrderBy(m => m.Category).ThenBy(m => m.Name).ToListAsync();
+        await db.MenuItems
+            .Include(m => m.Modifiers.OrderBy(mo => mo.SortOrder)).ThenInclude(mo => mo.Options.OrderBy(o => o.SortOrder))
+            .OrderBy(m => m.Category).ThenBy(m => m.Name).ToListAsync();
 
     private const int BestSellerCount = 3;
 
