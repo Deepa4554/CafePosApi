@@ -356,6 +356,15 @@ public record UpdateSettingsRequest(
     bool? QsrEnabled = null,
     bool? CashEnabled = null);
 
+// ---------- Order Note Suggestions ----------
+
+public record OrderNoteSuggestionDto(int Id, string Text, int UsageCount)
+{
+    public static OrderNoteSuggestionDto From(OrderNoteSuggestion s) => new(s.Id, s.Text, s.UsageCount);
+}
+
+public record UpsertOrderNoteSuggestionRequest(string Text);
+
 // ---------- Menu Features ----------
 
 public record CreateVariantRequest(string Name, decimal Price);

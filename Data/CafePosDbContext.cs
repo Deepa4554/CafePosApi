@@ -50,6 +50,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<GuestSession> GuestSessions => Set<GuestSession>();
     public DbSet<SessionDevice> SessionDevices => Set<SessionDevice>();
     public DbSet<TokenCounter> TokenCounters => Set<TokenCounter>();
+    public DbSet<OrderNoteSuggestion> OrderNoteSuggestions => Set<OrderNoteSuggestion>();
 
     // Auth
     public DbSet<AppUser> Users => Set<AppUser>();
@@ -257,6 +258,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // One counter row per (tenant, day) — NextTokenNumberAsync UPSERTs into this via
         // ON CONFLICT, so the constraint must match exactly what the UPSERT targets.
         modelBuilder.Entity<TokenCounter>().HasIndex(c => new { c.TenantId, c.Date }).IsUnique();
+
+        // One row per distinct note text per tenant — repeating an already-known note just
+        // bumps its UsageCount/LastUsedAt instead of creating a duplicate suggestion.
+        modelBuilder.Entity<OrderNoteSuggestion>().HasIndex(s => new { s.TenantId, s.Text }).IsUnique();
 
         // FIFO consumption walks batches ordered by (InventoryItemId, ExpiryDate, ReceivedAt)
         // for one ingredient at a time — this compound index backs that query directly.

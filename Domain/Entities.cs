@@ -98,6 +98,18 @@ public class ModifierOption : ITenantScoped
 }
 
 
+/// <summary>A free-text order-item note (e.g. "No onion", "Extra spicy") this cafe's staff
+/// has typed before — surfaced back as a tap-to-apply suggestion chip next time, so a
+/// recurring instruction only needs to be typed once. See OrderNoteSuggestionsController.</summary>
+public class OrderNoteSuggestion : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Text { get; set; }
+    public int UsageCount { get; set; } = 1;
+    public DateTime LastUsedAt { get; set; } = DateTime.UtcNow;
+}
+
 public class CafeTable : ITenantScoped
 {
     public int Id { get; set; }
