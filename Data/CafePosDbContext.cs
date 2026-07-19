@@ -45,6 +45,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderFireBatch> OrderFireBatches => Set<OrderFireBatch>();
     public DbSet<InventoryItem> InventoryItems => Set<InventoryItem>();
+    public DbSet<Vendor> Vendors => Set<Vendor>();
     public DbSet<CafeSettings> Settings => Set<CafeSettings>();
     public DbSet<GuestSession> GuestSessions => Set<GuestSession>();
     public DbSet<SessionDevice> SessionDevices => Set<SessionDevice>();
@@ -154,6 +155,14 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .WithOne()
             .HasForeignKey(i => i.PurchaseOrderId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        // Vendors are deactivated, never deleted, once referenced by a PO — SetNull is
+        // defense-in-depth only, same convention as InventoryTransaction.Batch below.
+        modelBuilder.Entity<PurchaseOrder>()
+            .HasOne<Vendor>()
+            .WithMany()
+            .HasForeignKey(p => p.VendorId)
+            .OnDelete(DeleteBehavior.SetNull);
 
         // Unidirectional — InventoryBatch has no collection navigation back, matching the
         // ledger's other loose string-reference fields. SetNull rather than cascade: a

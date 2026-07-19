@@ -269,15 +269,25 @@ public record InventoryTransactionDto(
 public record InventoryBatchDto(int Id, int InventoryItemId, string InventoryItemName, string Unit,
     double Quantity, decimal UnitCost, DateOnly? ExpiryDate, DateTime ReceivedAt, int? DaysUntilExpiry, bool IsExpired);
 
+// ---------- Vendors ----------
+
+public record VendorDto(int Id, string Name, string? Phone, string? Email, string? Gstin, string? Address, string? PaymentTerms, string? Notes, bool IsActive, DateTime CreatedAt);
+
+public record CreateVendorRequest(string Name, string? Phone, string? Email, string? Gstin, string? Address, string? PaymentTerms, string? Notes);
+
+public record UpdateVendorRequest(string Name, string? Phone, string? Email, string? Gstin, string? Address, string? PaymentTerms, string? Notes, bool IsActive);
+
 // ---------- Purchase Orders ----------
 
 public record PurchaseItemRequest(int InventoryItemId, double Quantity, string Unit, decimal UnitCost, DateOnly? ExpiryDate = null);
 
-public record CreatePurchaseOrderRequest(string? SupplierName, string? Note, List<PurchaseItemRequest> Items);
+/// <summary>Supply VendorId to link a real vendor (preferred); SupplierName is the legacy
+/// free-text fallback, still accepted when no vendor master entry exists yet.</summary>
+public record CreatePurchaseOrderRequest(int? VendorId, string? SupplierName, string? Note, List<PurchaseItemRequest> Items);
 
 public record PurchaseItemDto(int InventoryItemId, string InventoryItemName, double Quantity, string Unit, decimal UnitCost, DateOnly? ExpiryDate);
 
-public record PurchaseOrderDto(int Id, string? SupplierName, string? Note, string CreatedByName, DateTime CreatedAt, List<PurchaseItemDto> Items);
+public record PurchaseOrderDto(int Id, int? VendorId, string? SupplierName, string? VendorPhone, string? Note, string CreatedByName, DateTime CreatedAt, List<PurchaseItemDto> Items);
 
 // ---------- Recipes ----------
 

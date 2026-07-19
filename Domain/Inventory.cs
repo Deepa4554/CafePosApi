@@ -142,12 +142,39 @@ public class MissingRecipeAlert : ITenantScoped
     public bool Dismissed { get; set; }
 }
 
+// ---------- Vendors ----------
+
+/// <summary>Vendor master — a supplier record with contact/GST/payment-terms detail, so a
+/// PurchaseOrder can reference a real vendor (VendorId) instead of only a free-text name.
+/// Deactivated (IsActive=false) rather than deleted once referenced by history, same
+/// "soft-disable, never hard-delete once referenced" convention as InventoryItem.</summary>
+public class Vendor : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Name { get; set; }
+    /// <summary>10-digit Indian mobile — used for the "Send PO via WhatsApp" click-to-chat link.</summary>
+    public string? Phone { get; set; }
+    public string? Email { get; set; }
+    public string? Gstin { get; set; }
+    public string? Address { get; set; }
+    /// <summary>Free text, e.g. "Net 15", "Cash on delivery" — no ledger/due-date logic reads this yet.</summary>
+    public string? PaymentTerms { get; set; }
+    public string? Notes { get; set; }
+    public bool IsActive { get; set; } = true;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 // ---------- Purchase Orders ----------
 
 public class PurchaseOrder : ITenantScoped
 {
     public int Id { get; set; }
     public int TenantId { get; set; }
+    /// <summary>Preferred going forward — links to a Vendor master record.</summary>
+    public int? VendorId { get; set; }
+    /// <summary>Legacy free-text supplier name, kept for POs recorded before Vendor existed
+    /// and as a fallback display when VendorId is null.</summary>
     public string? SupplierName { get; set; }
     public string? Note { get; set; }
     public int CreatedByUserId { get; set; }

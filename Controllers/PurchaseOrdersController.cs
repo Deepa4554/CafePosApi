@@ -39,9 +39,19 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
                 throw new ApiValidationException("Purchase quantity must be greater than zero.");
         }
 
+        Vendor? vendor = null;
+        if (req.VendorId is int vendorId)
+        {
+            vendor = await db.Vendors.FindAsync(vendorId);
+            if (vendor is null)
+                throw new ApiValidationException("Selected vendor was not found.");
+        }
+
         var order = new PurchaseOrder
         {
-            SupplierName = req.SupplierName?.Trim(),
+            VendorId = vendor?.Id,
+            // Vendor name wins for display once linked; free-text stays as the fallback path.
+            SupplierName = vendor?.Name ?? req.SupplierName?.Trim(),
             Note = req.Note?.Trim(),
             CreatedByUserId = CurrentUserId() ?? 0,
             CreatedByName = CurrentUserName(),
@@ -89,8 +99,12 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
     {
         var ids = orders.SelectMany(o => o.Items).Select(i => i.InventoryItemId).Distinct().ToList();
         var names = await db.InventoryItems.Where(i => ids.Contains(i.Id)).ToDictionaryAsync(i => i.Id, i => i.Name);
+        var vendorIds = orders.Where(o => o.VendorId is not null).Select(o => o.VendorId!.Value).Distinct().ToList();
+        var vendorPhones = await db.Vendors.Where(v => vendorIds.Contains(v.Id)).ToDictionaryAsync(v => v.Id, v => v.Phone);
         return orders.Select(o => new PurchaseOrderDto(
-            o.Id, o.SupplierName, o.Note, o.CreatedByName, o.CreatedAt,
+            o.Id, o.VendorId, o.SupplierName,
+            o.VendorId is int vid && vendorPhones.TryGetValue(vid, out var phone) ? phone : null,
+            o.Note, o.CreatedByName, o.CreatedAt,
             o.Items.Select(i => new PurchaseItemDto(i.InventoryItemId, names.TryGetValue(i.InventoryItemId, out var n) ? n : "Unknown", i.Quantity, i.Unit, i.UnitCost, i.ExpiryDate)).ToList()
         )).ToList();
     }
