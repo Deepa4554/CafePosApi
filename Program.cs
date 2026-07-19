@@ -13,6 +13,13 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
+// Render's containers cap inotify watches low enough that ASP.NET Core's default
+// appsettings.json file-watcher (for config hot-reload) can crash the process at startup
+// with "configured user limit (128) on the number of inotify instances has been reached" —
+// we don't rely on config hot-reload (a deploy always restarts the process anyway), so
+// disable it before CreateBuilder ever sets the watcher up.
+Environment.SetEnvironmentVariable("DOTNET_hostBuilder:reloadConfigOnChange", "false");
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ---------- Controllers, Swagger ----------
