@@ -345,6 +345,13 @@ public class CafeSettings : ITenantScoped
 
     public bool HasCompletedOnboarding { get; set; }
 
+    /// <summary>"TWO_STAGE" (New → Ready, Preparing skipped) or "THREE_STAGE" (New →
+    /// Preparing → Ready, the default) — lets an Owner pick how many taps the kitchen
+    /// needs per item/KOT on the KDS screen. Purely a UI/tap-behavior setting; the
+    /// underlying per-unit stage tracking (NewQty/PreparingQty/ReadyQty/ServedQty) is
+    /// unchanged either way.</summary>
+    public string KdsStageMode { get; set; } = "THREE_STAGE";
+
     /// <summary>
     /// The owning Tenant's Slug, populated by SettingsController (not a real column —
     /// see [NotMapped]). Lets the app build tenant-aware QR ordering links

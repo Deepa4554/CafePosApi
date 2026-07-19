@@ -343,7 +343,8 @@ public record UpdateSettingsRequest(
     bool? ShiftReportsEnabled,
     string? Phone = null,
     string? Address = null,
-    string? StoreHoursJson = null);
+    string? StoreHoursJson = null,
+    string? KdsStageMode = null);
 
 // ---------- Menu Features ----------
 

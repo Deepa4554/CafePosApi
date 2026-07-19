@@ -54,6 +54,12 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.Phone is not null) settings.Phone = req.Phone.Trim();
         if (req.Address is not null) settings.Address = req.Address.Trim();
         if (req.StoreHoursJson is not null) settings.StoreHoursJson = req.StoreHoursJson;
+        if (req.KdsStageMode is not null)
+        {
+            if (req.KdsStageMode is not ("TWO_STAGE" or "THREE_STAGE"))
+                throw new ApiValidationException("KdsStageMode must be TWO_STAGE or THREE_STAGE.");
+            settings.KdsStageMode = req.KdsStageMode;
+        }
 
         await db.SaveChangesAsync();
         taxRateCache.Invalidate(settings.TenantId);
