@@ -141,9 +141,51 @@ public static class CustomerOrderPage
     font-size: 22px;
   }
   .item-info { flex: 1; min-width: 0; }
+  .item-name-row { display: flex; align-items: center; gap: 5px; }
   .item-name { font-weight: 700; font-size: 14px; }
   .item-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .item-price { color: var(--heading); font-weight: 700; font-size: 13px; margin-top: 2px; }
+  .vnv { width: 12px; height: 12px; border: 1.5px solid; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; }
+  .vnv.veg, .vnv.jain { border-color: #0B8043; }
+  .vnv.eggetarian { border-color: #B26A00; }
+  .vnv.nonveg { border-color: #B71C1C; }
+  .vnv .dot { width: 6px; height: 6px; border-radius: 50%; background: #0B8043; }
+  .vnv.eggetarian .dot { background: #B26A00; }
+  .vnv.nonveg .dot { width: 0; height: 0; border-radius: 0; background: transparent; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #B71C1C; }
+  .item-lines { margin-top: 6px; }
+  .item-line-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; }
+  .item-line-row .line-label { flex: 1; color: var(--muted); }
+  .item-line-row .stepper button { width: 24px; height: 24px; border-radius: 12px; font-size: 15px; }
+  .customize-btn {
+    background: var(--card); color: var(--accent); padding: 8px 14px;
+    border-radius: 10px; font-size: 12px; font-weight: 800; letter-spacing: 0.2px;
+    border: 1.5px solid var(--accent); margin-top: 6px; cursor: pointer;
+  }
+  .opt-overlay {
+    position: fixed; inset: 0; background: rgba(43, 24, 16, 0.45);
+    display: none; align-items: flex-end; justify-content: center; z-index: 60;
+  }
+  .opt-overlay.show { display: flex; }
+  .opt-sheet {
+    background: var(--card); border-radius: 20px 20px 0 0; padding: 20px 18px;
+    width: 100%; max-width: 480px; max-height: 82vh; overflow-y: auto;
+  }
+  .opt-sheet h3 { margin: 0 0 14px; font-size: 17px; }
+  .opt-group-title { font-size: 11px; font-weight: 800; letter-spacing: 0.4px; color: var(--muted); text-transform: uppercase; margin: 14px 0 6px; }
+  .opt-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; cursor: pointer; }
+  .opt-row .opt-label { flex: 1; font-size: 14px; font-weight: 600; }
+  .opt-row .opt-price { font-size: 12px; color: var(--muted); font-weight: 700; }
+  .opt-radio, .opt-check { width: 19px; height: 19px; border: 2px solid var(--divider); flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+  .opt-radio { border-radius: 50%; }
+  .opt-check { border-radius: 5px; }
+  .opt-radio.active, .opt-check.active { border-color: var(--accent); }
+  .opt-radio.active::after { content: ''; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+  .opt-check.active { background: var(--accent); color: #fff; font-size: 12px; }
+  .opt-add-btn {
+    width: 100%; background: var(--button); color: #fff; border: none;
+    padding: 14px 0; border-radius: 14px; font-size: 14px; font-weight: 700;
+    cursor: pointer; margin-top: 16px;
+  }
   .stepper { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
   .stepper button {
     width: 30px; height: 30px; border-radius: 15px; border: none;
@@ -210,7 +252,12 @@ public static class CustomerOrderPage
   .action-row { display: flex; gap: 10px; margin-top: 18px; }
   .action-row button { flex: 1; }
   .locked-note { background: var(--locked-bg); color: var(--locked); border-radius: 12px; padding: 12px 14px; font-size: 13px; font-weight: 600; margin-top: 14px; }
-  #app, #placed-screen, #bill-screen, #join-screen, #staff-assist-screen, #ended-screen { display: none; }
+  #app, #placed-screen, #bill-screen, #join-screen, #staff-assist-screen, #ended-screen, #waiting-screen { display: none; }
+  .waiting-spinner {
+    width: 40px; height: 40px; border-radius: 50%; margin: 4px auto 4px;
+    border: 4px solid var(--divider); border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
   .processing-overlay {
     position: fixed; inset: 0; background: rgba(43, 24, 16, 0.45);
     display: none; align-items: center; justify-content: center; z-index: 50;
@@ -271,6 +318,12 @@ public static class CustomerOrderPage
     <p id="ended-message">Please scan the QR code on your table again.</p>
   </div>
 
+  <div id="waiting-screen" class="center-screen">
+    <div class="waiting-spinner"></div>
+    <h2>Order sent — waiting for staff to confirm</h2>
+    <p>Someone from the team will confirm your order in a moment before it goes to the kitchen.</p>
+  </div>
+
   <div id="placed-screen" class="wrap">
     <header><h1 id="placed-business-name">CafePOS</h1><div class="table-line" id="placed-table-line"></div></header>
     <div class="confirm-card">
@@ -295,6 +348,14 @@ public static class CustomerOrderPage
   </div>
 
   <div id="processing-overlay" class="processing-overlay"><div class="spinner"></div></div>
+
+  <div id="opt-overlay" class="opt-overlay">
+    <div class="opt-sheet">
+      <h3 id="opt-item-name"></h3>
+      <div id="opt-body"></div>
+      <button class="opt-add-btn" id="opt-add-btn">Add to Order</button>
+    </div>
+  </div>
 
   <div id="cart-bar" class="cart-bar" style="display:none">
     <div class="cart-summary">
@@ -370,6 +431,7 @@ public static class CustomerOrderPage
   function handleStateUpdate(s) {
     state.order = s.order;
     if (s.status === 'LOCKED') { showBillScreen(s); return; }
+    if (s.order && s.order.pendingStaffConfirmation) { showWaitingScreen(); return; }
     if (s.order && s.order.currentFireBatch > 0) { showPlacedScreen(s); return; }
     syncCartFromOrder();
     renderMenu();
@@ -378,7 +440,7 @@ public static class CustomerOrderPage
   }
 
   function hideAllScreens() {
-    ['app', 'join-screen', 'staff-assist-screen', 'ended-screen', 'placed-screen', 'bill-screen'].forEach(function (id) {
+    ['app', 'join-screen', 'staff-assist-screen', 'ended-screen', 'waiting-screen', 'placed-screen', 'bill-screen'].forEach(function (id) {
       document.getElementById(id).style.display = 'none';
     });
     document.getElementById('cart-bar').style.display = 'none';
@@ -401,6 +463,17 @@ public static class CustomerOrderPage
     startPolling();
   }
 
+  // Staff-Confirm Mode: shown once Place Order is tapped while the order still hasn't
+  // fired (currentFireBatch === 0, same "unfired" signal as an empty cart) but the server
+  // has flagged it pendingStaffConfirmation — i.e. it's been submitted and is sitting with
+  // the floor staff, not silently stuck. Polling (already running) flips to showPlacedScreen
+  // automatically the moment a staff member confirms and it actually fires.
+  function showWaitingScreen() {
+    hideAllScreens();
+    document.getElementById('waiting-screen').style.display = 'flex';
+    startPolling();
+  }
+
   function showPlacedScreen(s) {
     hideAllScreens();
     document.getElementById('placed-business-name').textContent = document.getElementById('business-name').textContent;
@@ -410,7 +483,8 @@ public static class CustomerOrderPage
     (s.order.items || []).forEach(function (item) {
       var row = el('div', null);
       row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;text-align:left';
-      var label = el('span', null, item.qty + '× ' + item.name);
+      var desc = lineDescriptor(item);
+      var label = el('span', null, item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : ''));
       var badge = el('span', 'status-pill' + (item.status === 'READY' ? ' ready' : item.status === 'SERVED' ? ' served' : ''), item.status);
       row.appendChild(label);
       row.appendChild(badge);
@@ -430,7 +504,8 @@ public static class CustomerOrderPage
     if (s.order) {
       (s.order.items || []).forEach(function (item) {
         var row = el('div', 'bill-line');
-        row.appendChild(el('span', null, item.qty + '× ' + item.name));
+        var desc = lineDescriptor(item);
+        row.appendChild(el('span', null, item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : '')));
         row.appendChild(el('span', null, money(item.price * item.qty)));
         linesEl.appendChild(row);
       });
@@ -446,9 +521,37 @@ public static class CustomerOrderPage
   function syncCartFromOrder() {
     state.cart = {};
     if (!state.order) return;
-    (state.order.items || []).filter(function (i) { return i.fireBatch === 0; }).forEach(function (i) {
-      state.cart[i.menuItemId] = i.qty;
+    // Sums (not overwrites) so an item ordered as two different combos — e.g. "Half" and
+    // "Full + Extra Cheese" — still contributes its full total count here, even though this
+    // flat map can't represent WHICH combos; renderMenu() below only uses this map for
+    // items with no variants/modifiers, which can only ever have one line anyway.
+    (state.order.items || []).filter(function (i) { return i.fireBatch === 0 && !i.voided; }).forEach(function (i) {
+      state.cart[i.menuItemId] = (state.cart[i.menuItemId] || 0) + i.qty;
     });
+  }
+
+  // Every unfired (not-yet-sent-to-kitchen) line for one menu item — a customer can have
+  // several at once (different Half/Full or topping combos), unlike the flat state.cart map.
+  function linesForItem(menuItemId) {
+    if (!state.order) return [];
+    return (state.order.items || []).filter(function (i) {
+      return i.menuItemId === menuItemId && i.fireBatch === 0 && !i.voided;
+    });
+  }
+
+  function vnvBadge(type) {
+    if (!type) return null;
+    var cls = type === 'NonVeg' ? 'nonveg' : type === 'Eggetarian' ? 'eggetarian' : type === 'Jain' ? 'jain' : 'veg';
+    var badge = el('span', 'vnv ' + cls);
+    badge.appendChild(el('span', 'dot'));
+    return badge;
+  }
+
+  function lineDescriptor(line) {
+    var parts = [];
+    if (line.variantName) parts.push(line.variantName);
+    (line.selectedModifiers || []).forEach(function (m) { parts.push(m.name); });
+    return parts.join(', ');
   }
 
   function renderMenu() {
@@ -462,6 +565,7 @@ public static class CustomerOrderPage
     categories.forEach(function (cat) {
       root.appendChild(el('div', 'cat-title', cat));
       state.menu.filter(function (m) { return m.category === cat; }).forEach(function (item) {
+        var hasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
         var qty = state.cart[item.id] || 0;
         var card = el('div', 'item-card' + (item.available ? '' : ' unavailable'));
 
@@ -476,32 +580,68 @@ public static class CustomerOrderPage
         }
 
         var info = el('div', 'item-info');
-        info.appendChild(el('div', 'item-name', item.name));
+        var nameRow = el('div', 'item-name-row');
+        var badge = vnvBadge(item.vegNonVegType);
+        if (badge) nameRow.appendChild(badge);
+        nameRow.appendChild(el('div', 'item-name', item.name));
+        info.appendChild(nameRow);
         if (item.subtitle) info.appendChild(el('div', 'item-sub', item.subtitle));
-        info.appendChild(el('div', 'item-price', money(item.price)));
+        info.appendChild(el('div', 'item-price', (hasOptions ? 'from ' : '') + money(hasOptions ? Math.min.apply(null, [item.price].concat(item.variants.map(function (v) { return v.price; }))) : item.price)));
         if (!item.available) info.appendChild(el('div', 'unavailable-tag', 'CURRENTLY UNAVAILABLE'));
+
+        // Existing combos of this item already in the cart, each with its own stepper —
+        // only meaningful once an item can have more than one distinct line (variant/topping
+        // picks), which a plain item never does.
+        if (!state.browseOnly && hasOptions) {
+          var lines = linesForItem(item.id);
+          if (lines.length > 0) {
+            var linesBox = el('div', 'item-lines');
+            lines.forEach(function (line) {
+              var row = el('div', 'item-line-row');
+              row.appendChild(el('span', 'line-label', line.qty + '× ' + (lineDescriptor(line) || 'Regular')));
+              var stepper = el('div', 'stepper');
+              var minus = el('button', null, '−');
+              minus.onclick = function () { changeLineQty(item.id, line.variantId, (line.selectedModifiers || []).map(function (m) { return m.modifierOptionId; }), line.qty - 1); };
+              var qtyEl = el('span', 'qty', String(line.qty));
+              var plus = el('button', null, '+');
+              plus.onclick = function () { changeLineQty(item.id, line.variantId, (line.selectedModifiers || []).map(function (m) { return m.modifierOptionId; }), line.qty + 1); };
+              stepper.appendChild(minus);
+              stepper.appendChild(qtyEl);
+              stepper.appendChild(plus);
+              row.appendChild(stepper);
+              linesBox.appendChild(row);
+            });
+            info.appendChild(linesBox);
+          }
+        }
         card.appendChild(info);
 
         // Ordering is a table-only feature — the no-table "general menu" code (see
         // TablesController.GetMenuOnlyQrToken) is for browsing prices/availability
         // only, so it never gets an Add/quantity stepper at all.
         if (!state.browseOnly) {
-          var stepper = el('div', 'stepper');
-          if (qty > 0) {
-            var minus = el('button', null, '−');
-            minus.onclick = function () { changeQty(item.id, -1); };
-            var qtyEl = el('span', 'qty', String(qty));
-            var plus = el('button', null, '+');
-            plus.onclick = function () { changeQty(item.id, 1); };
-            stepper.appendChild(minus);
-            stepper.appendChild(qtyEl);
-            stepper.appendChild(plus);
+          if (hasOptions) {
+            var customize = el('button', 'customize-btn', 'Customize');
+            customize.onclick = function () { openItemOptions(item); };
+            card.appendChild(customize);
           } else {
-            var add = el('button', 'add', 'Add');
-            add.onclick = function () { changeQty(item.id, 1); };
-            stepper.appendChild(add);
+            var stepper = el('div', 'stepper');
+            if (qty > 0) {
+              var minus = el('button', null, '−');
+              minus.onclick = function () { changeQty(item.id, -1); };
+              var qtyEl = el('span', 'qty', String(qty));
+              var plus = el('button', null, '+');
+              plus.onclick = function () { changeQty(item.id, 1); };
+              stepper.appendChild(minus);
+              stepper.appendChild(qtyEl);
+              stepper.appendChild(plus);
+            } else {
+              var add = el('button', 'add', 'Add');
+              add.onclick = function () { changeQty(item.id, 1); };
+              stepper.appendChild(add);
+            }
+            card.appendChild(stepper);
           }
-          card.appendChild(stepper);
         }
         root.appendChild(card);
       });
@@ -544,10 +684,13 @@ public static class CustomerOrderPage
 
   // Every tap immediately calls the server (the cart lives session-side, not just in
   // this tab — see GuestSessionController.AddCartItem) and re-syncs from its response,
-  // rather than trusting local arithmetic.
-  function changeQty(menuItemId, delta) {
+  // rather than trusting local arithmetic. variantId/modifierOptionIds identify WHICH
+  // line to upsert — the backend treats (menuItem, variant, exact option set) as the
+  // line's identity (see OrderBuildingService.AddOrUpdateCartItemAsync), so an existing
+  // line's qty change must resend the exact same combo, not just the menuItemId.
+  function changeLineQty(menuItemId, variantId, modifierOptionIds, nextQty) {
     clearError();
-    var next = Math.max(0, (state.cart[menuItemId] || 0) + delta);
+    var next = Math.max(0, nextQty);
     var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
     if (!state.order && phoneDigits.length !== 10) {
       showError('Enter a valid 10-digit mobile number before adding items.');
@@ -562,6 +705,8 @@ public static class CustomerOrderPage
         menuItemId: menuItemId,
         qty: next,
         modifier: null,
+        variantId: variantId || null,
+        modifierOptionIds: (modifierOptionIds && modifierOptionIds.length) ? modifierOptionIds : null,
         guestName: document.getElementById('guest-name').value || null,
         guestPhone: phoneDigits || null,
       }),
@@ -579,19 +724,115 @@ public static class CustomerOrderPage
     });
   }
 
-  function cartCount() {
-    var count = 0;
-    Object.keys(state.cart).forEach(function (id) { count += state.cart[id]; });
-    return count;
+  function changeQty(menuItemId, delta) {
+    changeLineQty(menuItemId, null, [], (state.cart[menuItemId] || 0) + delta);
   }
 
-  function cartSubtotal() {
-    var sum = 0;
-    Object.keys(state.cart).forEach(function (id) {
-      var item = state.menu.find(function (m) { return m.id === Number(id); });
-      if (item) sum += item.price * state.cart[id];
+  // ---------- Item options picker (Half/Full variant + toppings) ----------
+  var optState = { item: null, variantId: null, selectedOptionIds: [] };
+
+  function optSelectedOptions() {
+    if (!optState.item) return [];
+    var all = [];
+    optState.item.modifiers.forEach(function (m) { all = all.concat(m.options); });
+    return all.filter(function (o) { return optState.selectedOptionIds.indexOf(o.id) !== -1; });
+  }
+
+  function renderItemOptions() {
+    var item = optState.item;
+    document.getElementById('opt-item-name').textContent = item.name;
+    var body = document.getElementById('opt-body');
+    body.innerHTML = '';
+
+    if (item.variants.length > 0) {
+      body.appendChild(el('div', 'opt-group-title', 'Size'));
+      item.variants.forEach(function (v) {
+        var active = v.id === optState.variantId;
+        var row = el('div', 'opt-row');
+        var radio = el('span', 'opt-radio' + (active ? ' active' : ''));
+        row.appendChild(radio);
+        row.appendChild(el('span', 'opt-label', v.name));
+        row.appendChild(el('span', 'opt-price', money(v.price)));
+        row.onclick = function () { optState.variantId = v.id; renderItemOptions(); };
+        body.appendChild(row);
+      });
+    }
+
+    item.modifiers.forEach(function (m) {
+      body.appendChild(el('div', 'opt-group-title', m.name + (m.isRequired ? ' · Required' : '')));
+      var isRadio = m.type === 'Radio';
+      m.options.forEach(function (o) {
+        var active = optState.selectedOptionIds.indexOf(o.id) !== -1;
+        var row = el('div', 'opt-row');
+        var mark = el('span', (isRadio ? 'opt-radio' : 'opt-check') + (active ? ' active' : ''));
+        if (!isRadio && active) mark.textContent = '✓';
+        row.appendChild(mark);
+        row.appendChild(el('span', 'opt-label', o.name));
+        row.appendChild(el('span', 'opt-price', o.price === 0 ? 'Free' : ('+' + money(o.price))));
+        row.onclick = function () {
+          if (isRadio) {
+            var siblingIds = m.options.map(function (x) { return x.id; });
+            optState.selectedOptionIds = optState.selectedOptionIds.filter(function (id) { return siblingIds.indexOf(id) === -1; }).concat([o.id]);
+          } else if (active) {
+            optState.selectedOptionIds = optState.selectedOptionIds.filter(function (id) { return id !== o.id; });
+          } else {
+            optState.selectedOptionIds = optState.selectedOptionIds.concat([o.id]);
+          }
+          renderItemOptions();
+        };
+        body.appendChild(row);
+      });
     });
-    return sum;
+
+    var variant = item.variants.find(function (v) { return v.id === optState.variantId; });
+    var unitPrice = (variant ? variant.price : item.price) + optSelectedOptions().reduce(function (s, o) { return s + o.price; }, 0);
+    document.getElementById('opt-add-btn').textContent = 'Add to Order — ' + money(unitPrice);
+  }
+
+  function openItemOptions(item) {
+    optState.item = item;
+    optState.variantId = (item.variants.find(function (v) { return v.isDefault; }) || item.variants[0] || {}).id || null;
+    optState.selectedOptionIds = [];
+    renderItemOptions();
+    document.getElementById('opt-overlay').classList.add('show');
+  }
+
+  function closeItemOptions() {
+    document.getElementById('opt-overlay').classList.remove('show');
+    optState.item = null;
+  }
+
+  function confirmItemOptions() {
+    if (!optState.item) return;
+    var item = optState.item;
+    var sortedIds = optState.selectedOptionIds.slice().sort(function (a, b) { return a - b; });
+    var existing = linesForItem(item.id).find(function (line) {
+      var lineIds = (line.selectedModifiers || []).map(function (m) { return m.modifierOptionId; }).sort(function (a, b) { return a - b; });
+      return line.variantId === optState.variantId && lineIds.length === sortedIds.length && lineIds.every(function (id, i) { return id === sortedIds[i]; });
+    });
+    var nextQty = (existing ? existing.qty : 0) + 1;
+    changeLineQty(item.id, optState.variantId, sortedIds, nextQty);
+    closeItemOptions();
+  }
+
+  document.getElementById('opt-add-btn').onclick = confirmItemOptions;
+  document.getElementById('opt-overlay').onclick = function (e) { if (e.target.id === 'opt-overlay') closeItemOptions(); };
+
+  function cartCount() {
+    return unfiredLines().reduce(function (sum, i) { return sum + i.qty; }, 0);
+  }
+
+  function unfiredLines() {
+    if (!state.order) return [];
+    return (state.order.items || []).filter(function (i) { return i.fireBatch === 0 && !i.voided; });
+  }
+
+  // Sums each line's already-correct effective price (base or variant, plus every
+  // selected topping) — reading straight from the server's OrderItem.Price rather than
+  // recomputing from state.menu's base price, which would silently ignore variant/topping
+  // deltas (the bug this whole feature exists to fix).
+  function cartSubtotal() {
+    return unfiredLines().reduce(function (sum, i) { return sum + i.price * i.qty; }, 0);
   }
 
   function renderCartBar() {
@@ -617,6 +858,7 @@ public static class CustomerOrderPage
     fetchJson(sessionBase + '/order', { method: 'POST' }).then(function (s) {
       document.getElementById('processing-overlay').classList.remove('show');
       state.order = s.order;
+      if (s.order && s.order.pendingStaffConfirmation) { showWaitingScreen(); return; }
       showPlacedScreen(s);
     }).catch(function (err) {
       document.getElementById('processing-overlay').classList.remove('show');
@@ -645,6 +887,7 @@ public static class CustomerOrderPage
       if (result.case === 'BILL_LOCKED') { showBillScreen(result.state); return; }
       syncCartFromOrder();
       if (state.order) document.getElementById('guest-card').style.display = 'none';
+      if (state.order && state.order.pendingStaffConfirmation) { showWaitingScreen(); return; }
       if (state.order && state.order.currentFireBatch > 0) { showPlacedScreen(result.state); return; }
       showMenuScreen();
     }).catch(function () {
@@ -658,6 +901,7 @@ public static class CustomerOrderPage
       state.order = s.order;
       syncCartFromOrder();
       if (state.order) document.getElementById('guest-card').style.display = 'none';
+      if (state.order && state.order.pendingStaffConfirmation) { showWaitingScreen(); return; }
       if (state.order && state.order.currentFireBatch > 0) { showPlacedScreen(s); return; }
       showMenuScreen();
     }).catch(function (err) {

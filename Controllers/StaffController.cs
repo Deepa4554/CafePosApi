@@ -199,6 +199,77 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return NoContent();
     }
 
+    // ---------- Screen access ----------
+
+    /// <summary>Current screen-visibility override for one staff member's login. Automatic
+    /// (the default) means "keep following the AppRole default" — see permissions.ts.
+    /// 404s when this staff member has no app login (nothing to configure) so the Staff
+    /// Access screen can tell "no login yet" apart from "Automatic, nothing customized".</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpGet("{id:int}/screen-access")]
+    public async Task<ActionResult<StaffScreenAccessDto>> GetScreenAccess(int id)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        var user = await db.Users.FindAsync(staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        return StaffScreenAccessDto.From(staff.Id, user);
+    }
+
+    /// <summary>
+    /// Sets which screens this staff member's login can see. Custom mode's AllowedScreens
+    /// is validated against ScreenCatalog on every write — an unknown key, or a key above
+    /// the tenant's current plan, is rejected outright rather than silently dropped, so an
+    /// Owner gets an explicit error instead of a picker that quietly doesn't do what it
+    /// showed. Switching back to Automatic clears any stored list, so a later plan
+    /// downgrade can never leave a stale Plus-only key lying around. The staff member's own
+    /// device picks this up within seconds via its /auth/me poll — see useLiveAccessSync.
+    /// </summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPatch("{id:int}/screen-access")]
+    public async Task<ActionResult<StaffScreenAccessDto>> UpdateScreenAccess(int id, UpdateStaffScreenAccessRequest req)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        var user = await db.Users.FindAsync(staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+        if (user.Role == AppRole.Owner) throw new ApiValidationException("An Owner login always has full access and can't be restricted.");
+
+        if (req.AccessMode == StaffAccessMode.Custom)
+        {
+            var sub = await db.Subscriptions.FirstOrDefaultAsync();
+            var tenantPlan = (sub?.Plan ?? SubscriptionTier.FreeTrial).ToCategory();
+            var requested = (req.AllowedScreens ?? []).Distinct().ToList();
+
+            var unknown = requested.Where(k => !ScreenCatalog.IsValidKey(k)).ToList();
+            if (unknown.Count > 0) throw new ApiValidationException($"Unknown screen(s): {string.Join(", ", unknown)}.");
+
+            var abovePlan = requested.Where(k => !ScreenCatalog.IsAssignableAt(k, tenantPlan)).ToList();
+            if (abovePlan.Count > 0) throw new ApiValidationException($"These screens need a higher plan than this cafe currently has: {string.Join(", ", abovePlan)}.");
+
+            user.AllowedScreens = requested;
+        }
+        else
+        {
+            user.AllowedScreens = null;
+        }
+        user.AccessMode = req.AccessMode;
+        await db.SaveChangesAsync();
+
+        var actor = await CurrentUserAsync();
+        var summary = req.AccessMode == StaffAccessMode.Custom
+            ? $"{actor.Name} set custom screen access for {staff.Name} ({(req.AllowedScreens ?? []).Count} screen(s))."
+            : $"{actor.Name} reset {staff.Name}'s screen access to Automatic (role default).";
+        await audit.LogAsync(AuditAction.PermissionChange, AuditResource.Staff, staff.Id.ToString(), summary, AuditSeverity.Medium, actor.Id, actor.Name);
+
+        return StaffScreenAccessDto.From(staff.Id, user);
+    }
+
     // ---------- Shifts (Team Schedule / Edit Shift screens) ----------
 
     /// <summary>Every shift across every staff member on a given day — powers the Team

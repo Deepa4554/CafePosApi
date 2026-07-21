@@ -27,8 +27,44 @@ public class AuthController(
     IPasswordHasher<AppUser> hasher,
     IAuditService audit,
     IEmailService email,
+    IWebHostEnvironment env,
     ILogger<AuthController> logger) : ControllerBase
 {
+    private const string RefreshCookieName = "refreshToken";
+
+    /// <summary>
+    /// Mirrors the refresh token into an httpOnly cookie on every response that issues
+    /// one (login/register/refresh) — mobile ignores it entirely (still uses the token
+    /// from the JSON body, persisted in MMKV), but the web build never touches the raw
+    /// refresh token at all: it's invisible to JS, so an XSS bug on the web page can't
+    /// exfiltrate it the way it could with localStorage. SameSite=None is required
+    /// because the deployed web frontend and this API live on different origins
+    /// (cafeposapi.onrender.com vs wherever the SPA is hosted) — that forces Secure=true
+    /// too, which breaks plain-http localhost dev, hence the environment split.
+    /// </summary>
+    private void SetRefreshTokenCookie(string refreshToken)
+    {
+        Response.Cookies.Append(RefreshCookieName, refreshToken, new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = !env.IsDevelopment(),
+            SameSite = env.IsDevelopment() ? SameSiteMode.Lax : SameSiteMode.None,
+            Expires = DateTimeOffset.UtcNow.AddDays(jwtOptions.Value.RefreshTokenDays),
+            Path = "/api/auth",
+        });
+    }
+
+    private void ClearRefreshTokenCookie()
+    {
+        Response.Cookies.Delete(RefreshCookieName, new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = !env.IsDevelopment(),
+            SameSite = env.IsDevelopment() ? SameSiteMode.Lax : SameSiteMode.None,
+            Path = "/api/auth",
+        });
+    }
+
     /// <summary>
     /// Step 1 of cafe signup: emails a 6-digit code to prove the caller controls this
     /// address before /register-cafe will create an account with it. Reused on resend —
@@ -149,11 +185,11 @@ public class AuthController(
 
         // This endpoint always attaches the new account to the default tenant (below) —
         // that's only safe for the app's own demo/role-switcher accounts (fixed emails
-        // like "owner@cafepos.local", matching AuthRepository.demoEmailFor). Without this
+        // like "owner@prabandhos.local", matching AuthRepository.demoEmailFor). Without this
         // check, anyone could self-register with role=Owner against a real cafe's tenant.
         // Real cafes must sign up via /register-cafe, which always creates a fresh,
         // isolated tenant instead of attaching to an existing one.
-        var expectedDemoEmail = $"{req.Role.ToString().ToLowerInvariant()}@cafepos.local";
+        var expectedDemoEmail = $"{req.Role.ToString().ToLowerInvariant()}@prabandhos.local";
         if (!normalizedEmail.Equals(expectedDemoEmail, StringComparison.Ordinal))
             throw new ApiValidationException("Self-registration is only available for demo accounts. Use /auth/register-cafe to create a new cafe.");
 
@@ -176,6 +212,7 @@ public class AuthController(
         await db.SaveChangesAsync(); // assigns user.Id before IssueTokensAsync references it
         var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
+        SetRefreshTokenCookie(refreshToken);
 
         return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
     }
@@ -236,6 +273,7 @@ public class AuthController(
         await db.SaveChangesAsync(); // assigns user.Id before IssueTokensAsync references it
         var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
+        SetRefreshTokenCookie(refreshToken);
 
         return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
     }
@@ -275,6 +313,7 @@ public class AuthController(
 
         var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
+        SetRefreshTokenCookie(refreshToken);
         await audit.LogAsync(AuditAction.Login, AuditResource.Auth, user.Id.ToString(), $"{user.Name} signed in.", AuditSeverity.Low, user.Id, user.Name, user.TenantId);
 
         return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
@@ -290,9 +329,16 @@ public class AuthController(
     /// </summary>
     [AllowAnonymous]
     [HttpPost("refresh")]
-    public async Task<ActionResult<AuthResponse>> Refresh(RefreshRequest req)
+    public async Task<ActionResult<AuthResponse>> Refresh([FromBody] RefreshRequest? req)
     {
-        var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == req.RefreshToken);
+        // Web never has the raw token to put in a body — it rides in the httpOnly
+        // cookie instead, invisible to the JS that's making this call. Mobile still
+        // posts its MMKV-stored token in the body, so that path stays untouched.
+        var presentedToken = Request.Cookies[RefreshCookieName] ?? req?.RefreshToken;
+        if (string.IsNullOrWhiteSpace(presentedToken))
+            throw new UnauthorizedAccessException("Refresh token is invalid or expired.");
+
+        var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == presentedToken);
         if (entry is null || entry.RevokedAt is not null || entry.ExpiresAt < DateTime.UtcNow)
             throw new UnauthorizedAccessException("Refresh token is invalid or expired.");
 
@@ -303,6 +349,7 @@ public class AuthController(
         entry.RevokedAt = DateTime.UtcNow;
         var newRefreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
+        SetRefreshTokenCookie(newRefreshToken);
 
         return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), newRefreshToken));
     }
@@ -318,11 +365,13 @@ public class AuthController(
     public async Task<IActionResult> Logout([FromBody] LogoutRequest? req)
     {
         var user = await CurrentUserAsync();
-        if (!string.IsNullOrWhiteSpace(req?.RefreshToken))
+        var presentedToken = Request.Cookies[RefreshCookieName] ?? req?.RefreshToken;
+        if (!string.IsNullOrWhiteSpace(presentedToken))
         {
-            var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == req!.RefreshToken && t.UserId == user.Id);
+            var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == presentedToken && t.UserId == user.Id);
             if (entry is not null) entry.RevokedAt = DateTime.UtcNow;
         }
+        ClearRefreshTokenCookie();
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Logout, AuditResource.Auth, user.Id.ToString(), $"{user.Name} signed out.", AuditSeverity.Low, user.Id, user.Name);
         return NoContent();

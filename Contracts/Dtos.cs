@@ -4,12 +4,10 @@ namespace CafePOS.Api.Contracts;
 
 // ---------- Orders ----------
 
-/// <summary>ModifierPriceAdjustment is the sum of whatever ModifierOption prices the client
-/// selected (e.g. "Extra Cheese +₹20") — added on top of the menu item's own price for just
-/// this line. The selection itself isn't tracked structurally server-side (no ModifierOption
-/// FK on OrderItem); Modifier is the free-text label for what was picked, same as it already
-/// was for plain text notes.</summary>
-public record CreateOrderItemDto(int MenuItemId, int Qty, string? Modifier, decimal? ModifierPriceAdjustment = null);
+/// <summary>VariantId picks a Half/Full/... price instead of the item's base MenuItem.Price;
+/// ModifierOptionIds are the selected toppings/add-ons, each adding its own price delta.
+/// Both are validated (and priced) server-side — see OrderBuildingService.ResolveLinePricingAsync.</summary>
+public record CreateOrderItemDto(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null);
 
 public record CreateOrderRequest(
     string OrderType, // DINE_IN / TAKEAWAY / DELIVERY
@@ -32,7 +30,7 @@ public record CancelOrderRequest(string? Reason);
 
 // ---------- Order lifecycle (add item / fire / billing-time discounts / payment) ----------
 
-public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, decimal? ModifierPriceAdjustment = null);
+public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null);
 
 /// <summary>Manager-only markdown applied at the billing stage (Served). Supply exactly
 /// one of Pct (percentage of subtotal) or Amount (flat).</summary>
@@ -66,8 +64,14 @@ public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, Li
 /// <summary>Status is the derived overall stage; the New/Read/Preparing/Ready/Served Qty
 /// fields are the real per-unit distribution (partial-quantity production) — they sum to
 /// Qty. KDS renders per-stage counts and picks the card's column from the lowest non-empty.</summary>
+public record SelectedModifierDto(int ModifierOptionId, string Name, decimal Price)
+{
+    public static SelectedModifierDto From(OrderItemModifier m) => new(m.ModifierOptionId, m.Name, m.Price);
+}
+
 public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
-    int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty, bool Voided, DateTime? VoidedAt);
+    int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty, bool Voided, DateTime? VoidedAt,
+    int? VariantId, string? VariantName, List<SelectedModifierDto> SelectedModifiers, string StationName);
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
@@ -110,6 +114,7 @@ public record OrderDto(
     decimal GiftCardAmountApplied,
     string? PaymentMethod,
     int CurrentFireBatch,
+    bool PendingStaffConfirmation,
     List<FireBatchDto> FireBatches)
 {
     public static OrderDto From(Order o) => new(
@@ -123,7 +128,8 @@ public record OrderDto(
         o.GuestPhone,
         o.CustomerId,
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
-            i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt)).ToList(),
+            i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt,
+            i.VariantId, i.VariantName, i.SelectedModifiers.Select(SelectedModifierDto.From).ToList(), i.StationName)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
@@ -147,6 +153,7 @@ public record OrderDto(
         o.GiftCardAmountApplied,
         o.PaymentMethod,
         o.CurrentFireBatch,
+        o.PendingStaffConfirmation,
         o.FireBatches.OrderBy(b => b.BatchNumber)
             .Select(b => new FireBatchDto(b.BatchNumber, b.Status.ToString().ToUpperInvariant(), b.FiredAt, $"#{1000 + b.Id}"))
             .ToList());
@@ -170,7 +177,8 @@ public record BulkAdvanceAllocation(int OrderId, int ItemId, int Qty);
 /// rule OrdersController.CreatePublic already enforces) the very first time a cart item is
 /// added for a session, since that's what creates the underlying Order/Customer record;
 /// every later call ignores them.</summary>
-public record AddCartItemRequest(int MenuItemId, int Qty, string? Modifier, string? GuestName = null, string? GuestPhone = null);
+public record AddCartItemRequest(int MenuItemId, int Qty, string? Modifier, string? GuestName = null, string? GuestPhone = null,
+    int? VariantId = null, List<int>? ModifierOptionIds = null);
 
 /// <summary>Everything the guest page needs to render: the session's own status, the
 /// cart (unfired items — FireBatch == 0 on the underlying order, see OrderBuildingService)
@@ -204,7 +212,7 @@ public record CreateMenuItemRequest(
     ProductType? ProductType = null,
     int? LinkedInventoryItemId = null,
     string? ShortCode = null,
-    string? KitchenStation = null,
+    int? StationId = null,
     string? ItemType = null,
     string? VegNonVegType = null);
 
@@ -220,11 +228,22 @@ public record UpdateMenuItemRequest(
     ProductType? ProductType = null,
     int? LinkedInventoryItemId = null,
     string? ShortCode = null,
-    string? KitchenStation = null,
+    int? StationId = null,
     string? ItemType = null,
     string? VegNonVegType = null);
 
 public record BulkImportResultDto(int CreatedCount, int SkippedCount);
+
+// ---------- Kitchen Stations ----------
+
+public record StationDto(int Id, string Name, string Icon, int SortOrder, bool Active)
+{
+    public static StationDto From(Station s) => new(s.Id, s.Name, s.Icon, s.SortOrder, s.Active);
+}
+
+public record CreateStationRequest(string Name, string? Icon = null);
+
+public record UpdateStationRequest(string? Name, string? Icon, int? SortOrder, bool? Active);
 
 public record MenuItemImageDto(int Id, string DataUri, int SortOrder)
 {
@@ -250,11 +269,11 @@ public record CreateInventoryItemRequest(string Name, string Category, double Ma
 /// — replaces the frontend's old hardcoded current/max &lt;= 0.25 ratio guess.</summary>
 public record InventoryItemDto(
     int Id, string Name, string Category, string Icon, double Current, double Max, string Unit,
-    double DailyUsage, DateTime? LastRestockAt, decimal UnitCost, double MinStock, double ReorderLevel, bool LowStock, int? BranchId)
+    double DailyUsage, DateTime? LastRestockAt, decimal UnitCost, double MinStock, double ReorderLevel, bool LowStock, int? BranchId, bool IsActive)
 {
     public static InventoryItemDto From(InventoryItem i) => new(
         i.Id, i.Name, i.Category, i.Icon, i.Current, i.Max, i.Unit, i.DailyUsage, i.LastRestockAt,
-        i.UnitCost, i.MinStock, i.ReorderLevel, i.Current <= i.ReorderLevel, i.BranchId);
+        i.UnitCost, i.MinStock, i.ReorderLevel, i.Current <= i.ReorderLevel, i.BranchId, i.IsActive);
 }
 
 public record RestockRequest(double Quantity, decimal? UnitCost, DateOnly? ExpiryDate = null);
@@ -349,12 +368,19 @@ public record UpdateSettingsRequest(
     string? Phone = null,
     string? Address = null,
     string? StoreHoursJson = null,
+    bool? RequireStaffOrderConfirmation = null,
     string? KdsStageMode = null,
     bool? DineInEnabled = null,
     bool? TakeawayEnabled = null,
     bool? DeliveryEnabled = null,
     bool? QsrEnabled = null,
-    bool? CashEnabled = null);
+    bool? CashEnabled = null,
+    bool? ReceiptShowAddress = null,
+    bool? ReceiptShowWaiterName = null,
+    bool? ReceiptShowGuestPhone = null,
+    bool? ReceiptShowItemNotes = null,
+    bool? ReceiptShowFooter = null,
+    string? GstNumber = null);
 
 // ---------- Order Note Suggestions ----------
 
@@ -367,13 +393,13 @@ public record UpsertOrderNoteSuggestionRequest(string Text);
 
 // ---------- Menu Features ----------
 
-public record CreateVariantRequest(string Name, decimal Price);
+public record CreateVariantRequest(string Name, decimal Price, bool IsDefault = false);
 
-public record UpdateVariantRequest(string? Name, decimal? Price, bool? IsAvailable = null);
+public record UpdateVariantRequest(string? Name, decimal? Price, bool? IsAvailable = null, bool? IsDefault = null);
 
-public record VariantDto(int Id, int MenuItemId, string Name, decimal Price, int SortOrder)
+public record VariantDto(int Id, int MenuItemId, string Name, decimal Price, int SortOrder, bool IsAvailable, bool IsDefault)
 {
-    public static VariantDto From(Variant v) => new(v.Id, v.MenuItemId, v.Name, v.Price, v.SortOrder);
+    public static VariantDto From(Variant v) => new(v.Id, v.MenuItemId, v.Name, v.Price, v.SortOrder, v.IsAvailable, v.IsDefault);
 }
 
 // ---------- Modifiers (Spice, Add-ons, etc.) ----------

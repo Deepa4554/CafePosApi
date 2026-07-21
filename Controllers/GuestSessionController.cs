@@ -42,7 +42,7 @@ public class GuestSessionController(
 
     private async Task<Order?> LoadOrderAsync(int? orderId) =>
         orderId is int oid
-            ? await db.Orders.IgnoreQueryFilters().Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == oid)
+            ? await db.Orders.IgnoreQueryFilters().Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == oid)
             : null;
 
     /// <summary>Entry point — implements the doc's 5-CASE decision tree (Section 3). No
@@ -148,7 +148,7 @@ public class GuestSessionController(
                 throw new ApiValidationException("A valid 10-digit mobile number is required.");
 
             var order = await orderBuilder.BuildOrderAsync(db, "DINE_IN", table.Code, req.GuestName,
-                items: [new CreateOrderItemDto(req.MenuItemId, req.Qty, req.Modifier)],
+                items: [new CreateOrderItemDto(req.MenuItemId, req.Qty, req.Modifier, req.VariantId, req.ModifierOptionIds)],
                 discountPct: 0, user: null, explicitTenantId: session.TenantId, guestPhone: normalizedPhone);
             session.OrderId = order.Id;
             await db.SaveChangesAsync();
@@ -158,14 +158,19 @@ public class GuestSessionController(
         var existingOrder = await LoadOrderAsync(session.OrderId) ?? throw new ApiConflictException("Order not found.");
         if (existingOrder.Paid) throw new ApiConflictException("This order has already been paid.");
 
-        await orderBuilder.AddOrUpdateCartItemAsync(db, existingOrder, req.MenuItemId, req.Qty, req.Modifier, session.TenantId);
+        await orderBuilder.AddOrUpdateCartItemAsync(db, existingOrder, req.MenuItemId, req.Qty, req.Modifier, session.TenantId, req.VariantId, req.ModifierOptionIds);
         await db.SaveChangesAsync();
         return GuestSessionStateDto.From(session, table.Code, existingOrder);
     }
 
     /// <summary>Fires everything currently unfired in the cart — first call creates the KOT,
     /// later calls fire newly-added items as a fresh batch on the same order (doc Section 6
-    /// step 5, "repeat orders").</summary>
+    /// step 5, "repeat orders"). If CafeSettings.RequireStaffOrderConfirmation is on AND this
+    /// is the session's very first submission (CurrentFireBatch still 0), it doesn't fire at
+    /// all — it flags the order PendingStaffConfirmation and waits for a staff member to hit
+    /// Confirm (OrdersController.ConfirmGuestOrder) instead. Every later call on an
+    /// already-confirmed session (CurrentFireBatch > 0) fires immediately, same as before —
+    /// only the very first table-trust check is gated, not every re-order.</summary>
     [ValidateGuestSession(isWrite: true)]
     [HttpPost("order")]
     public async Task<ActionResult<GuestSessionStateDto>> PlaceOrder()
@@ -177,10 +182,23 @@ public class GuestSessionController(
         var order = await LoadOrderAsync(session.OrderId) ?? throw new ApiConflictException("Order not found.");
         if (order.Paid) throw new ApiConflictException("This order has already been paid.");
 
+        var hasUnfiredItems = order.Items.Any(i => i.FireBatch == 0 && !i.Voided);
+        if (!hasUnfiredItems && !order.PendingStaffConfirmation)
+            throw new ApiValidationException("No new items to fire — add something to your cart first.");
+
         try
         {
-            if (!await orderBuilder.FireUnfiredItemsAsync(db, order, session.TenantId))
+            var settings = await db.Settings.IgnoreQueryFilters().FirstAsync(s => s.TenantId == session.TenantId);
+            var needsConfirmation = settings.RequireStaffOrderConfirmation && order.CurrentFireBatch == 0;
+
+            if (needsConfirmation)
+            {
+                orderBuilder.MarkPendingConfirmation(db, order, session.TenantId);
+            }
+            else if (!await orderBuilder.FireUnfiredItemsAsync(db, order, session.TenantId))
+            {
                 throw new ApiValidationException("No new items to fire — add something to your cart first.");
+            }
             await db.SaveChangesAsync();
         }
         catch (DbUpdateException)

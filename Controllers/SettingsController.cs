@@ -23,6 +23,20 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
     {
         var settings = await db.Settings.FirstAsync();
         settings.TenantSlug = (await db.Tenants.FindAsync(settings.TenantId))?.Slug;
+
+        // Self-heal: HasCompletedOnboarding only ever gets set by the last step of the
+        // onboarding wizard (OnboardingCrewScreen.finish -> POST complete-onboarding). If
+        // that step never ran (e.g. crew creation threw partway through and the request
+        // was never reached), the flag is permanently stuck false and every login for this
+        // tenant gets routed back into onboarding — even though the cafe is already in
+        // real use. Treat any tenant with actual menu/staff/order data as onboarded.
+        if (!settings.HasCompletedOnboarding &&
+            (await db.MenuItems.AnyAsync() || await db.Staff.AnyAsync() || await db.Orders.AnyAsync()))
+        {
+            settings.HasCompletedOnboarding = true;
+            await db.SaveChangesAsync();
+        }
+
         return settings;
     }
 
@@ -51,6 +65,7 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.TerminalPasscodeRequired is not null) settings.TerminalPasscodeRequired = req.TerminalPasscodeRequired.Value;
         if (req.InventoryAlertsEnabled is not null) settings.InventoryAlertsEnabled = req.InventoryAlertsEnabled.Value;
         if (req.ShiftReportsEnabled is not null) settings.ShiftReportsEnabled = req.ShiftReportsEnabled.Value;
+        if (req.RequireStaffOrderConfirmation is not null) settings.RequireStaffOrderConfirmation = req.RequireStaffOrderConfirmation.Value;
         if (req.Phone is not null) settings.Phone = req.Phone.Trim();
         if (req.Address is not null) settings.Address = req.Address.Trim();
         if (req.StoreHoursJson is not null) settings.StoreHoursJson = req.StoreHoursJson;
@@ -67,6 +82,13 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.CashEnabled is not null) settings.CashEnabled = req.CashEnabled.Value;
         if (!(settings.DineInEnabled || settings.TakeawayEnabled || settings.DeliveryEnabled || settings.QsrEnabled || settings.CashEnabled))
             throw new ApiValidationException("At least one order type must stay enabled.");
+
+        if (req.ReceiptShowAddress is not null) settings.ReceiptShowAddress = req.ReceiptShowAddress.Value;
+        if (req.ReceiptShowWaiterName is not null) settings.ReceiptShowWaiterName = req.ReceiptShowWaiterName.Value;
+        if (req.ReceiptShowGuestPhone is not null) settings.ReceiptShowGuestPhone = req.ReceiptShowGuestPhone.Value;
+        if (req.ReceiptShowItemNotes is not null) settings.ReceiptShowItemNotes = req.ReceiptShowItemNotes.Value;
+        if (req.ReceiptShowFooter is not null) settings.ReceiptShowFooter = req.ReceiptShowFooter.Value;
+        if (req.GstNumber is not null) settings.GstNumber = req.GstNumber.Trim();
 
         await db.SaveChangesAsync();
         taxRateCache.Invalidate(settings.TenantId);

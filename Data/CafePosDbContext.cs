@@ -1,12 +1,14 @@
 using System.Reflection;
+using System.Text.Json;
 using CafePOS.Api.Domain;
 using CafePOS.Api.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CafePOS.Api.Data;
 
-public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant) : DbContext(options)
+public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime) : DbContext(options)
 {
     private readonly ITenantContext _tenant = tenant;
 
@@ -36,6 +38,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
 
     // Core catalog / ordering
     public DbSet<MenuItem> MenuItems => Set<MenuItem>();
+    public DbSet<Station> Stations => Set<Station>();
     public DbSet<MenuItemImage> MenuItemImages => Set<MenuItemImage>();
     public DbSet<Variant> Variants => Set<Variant>();
     public DbSet<Modifier> Modifiers => Set<Modifier>();
@@ -43,6 +46,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<CafeTable> Tables => Set<CafeTable>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
+    public DbSet<OrderItemModifier> OrderItemModifiers => Set<OrderItemModifier>();
     public DbSet<OrderFireBatch> OrderFireBatches => Set<OrderFireBatch>();
     public DbSet<InventoryItem> InventoryItems => Set<InventoryItem>();
     public DbSet<Vendor> Vendors => Set<Vendor>();
@@ -109,6 +113,12 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasMany(o => o.FireBatches)
             .WithOne()
             .HasForeignKey(b => b.OrderId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<OrderItem>()
+            .HasMany(i => i.SelectedModifiers)
+            .WithOne()
+            .HasForeignKey(m => m.OrderItemId)
             .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<OrderFireBatch>()
@@ -209,6 +219,19 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<StockTake>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<GuestSession>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<GuestSession>().Property(s => s.ClosedReason).HasConversion<string>();
+        modelBuilder.Entity<AppUser>().Property(u => u.AccessMode).HasConversion<string>();
+
+        // AllowedScreens is a short list of catalog keys (e.g. ["POS","KDS"]) — stored as
+        // a JSON array rather than a join table since it's only ever read/written whole,
+        // never queried by individual key, same reasoning as PhotoUrl's inline data URI.
+        modelBuilder.Entity<AppUser>().Property(u => u.AllowedScreens)
+            .HasConversion(
+                v => v == null ? null : JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
+                v => v == null ? null : JsonSerializer.Deserialize<List<string>>(v, (JsonSerializerOptions?)null))
+            .Metadata.SetValueComparer(new ValueComparer<List<string>?>(
+                (a, b) => (a ?? new()).SequenceEqual(b ?? new()),
+                v => v == null ? 0 : v.Aggregate(0, (h, s) => HashCode.Combine(h, s.GetHashCode())),
+                v => v == null ? null : v.ToList()));
 
         // Codes only need to be unique within a cafe — two different tenants can
         // both have a table "T1" or a coupon "WELCOME10" without colliding.
@@ -263,6 +286,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // bumps its UsageCount/LastUsedAt instead of creating a duplicate suggestion.
         modelBuilder.Entity<OrderNoteSuggestion>().HasIndex(s => new { s.TenantId, s.Text }).IsUnique();
 
+        // One row per distinct station name per tenant — same "no silent typo duplicates"
+        // guarantee the free-text KitchenStation field never had.
+        modelBuilder.Entity<Station>().HasIndex(s => new { s.TenantId, s.Name }).IsUnique();
+
         // FIFO consumption walks batches ordered by (InventoryItemId, ExpiryDate, ReceivedAt)
         // for one ingredient at a time — this compound index backs that query directly.
         modelBuilder.Entity<InventoryBatch>().HasIndex(b => new { b.InventoryItemId, b.ExpiryDate, b.ReceivedAt });
@@ -315,9 +342,34 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         return base.SaveChanges(acceptAllChangesOnSuccess);
     }
 
-    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    // The entity types Orders/KDS/Tables screens actually poll for — see useOrders.ts /
+    // useTables.ts on the client. Anything else changing (menu, inventory, staff, ...) keeps
+    // its existing on-demand-refetch behaviour; only these are latency-sensitive enough to
+    // warrant a push.
+    private static readonly HashSet<Type> RealtimeEntityTypes =
+        [typeof(Order), typeof(OrderItem), typeof(OrderItemModifier), typeof(OrderFireBatch), typeof(CafeTable)];
+
+    /// <summary>Reads TenantIds off every added/modified/deleted Order/Table-family entity
+    /// BEFORE SaveChanges runs — ChangeTracker entries flip to Unchanged (and Added/Deleted
+    /// entries get detached) once SaveChanges succeeds, so this has to be captured up front,
+    /// not after.</summary>
+    private HashSet<int> CollectRealtimeAffectedTenantIds() =>
+        ChangeTracker.Entries()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted
+                && RealtimeEntityTypes.Contains(e.Entity.GetType()))
+            .Select(e => ((ITenantScoped)e.Entity).TenantId)
+            .Where(id => id != 0)
+            .ToHashSet();
+
+    public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
     {
         StampTenantIds();
-        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        var affectedTenantIds = CollectRealtimeAffectedTenantIds();
+        var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        // Fire-and-forget: the save already succeeded, a slow/failed push must never make the
+        // caller's request slower or fail because of it (see RealtimeNotifier).
+        if (affectedTenantIds.Count > 0)
+            _ = realtime.NotifyOrdersChangedAsync(affectedTenantIds);
+        return result;
     }
 }

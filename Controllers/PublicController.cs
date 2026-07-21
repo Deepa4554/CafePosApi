@@ -35,7 +35,7 @@ public class PublicController(CafePosDbContext db, QrTokenService qrTokens, Rece
         var orderId = receiptTokens.TryDecode(token);
         if (orderId is null) return NotFound();
 
-        var order = await db.Orders.IgnoreQueryFilters().Include(o => o.Items)
+        var order = await db.Orders.IgnoreQueryFilters().Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
             .FirstOrDefaultAsync(o => o.Id == orderId.Value);
         if (order is null) return NotFound();
 

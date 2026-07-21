@@ -27,7 +27,20 @@ public interface IOrderBuildingService
     /// OrdersController.AddItem/RemoveItem: stock is debited on add, never credited back on
     /// removal/decrease — an existing, deliberately-unchanged behaviour). Recomputes
     /// order.Subtotal/Tax/Total. Does not save — the caller saves.</summary>
-    Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId);
+    Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId,
+        int? variantId = null, List<int>? modifierOptionIds = null);
+
+    /// <summary>Prices one order line: the selected Variant's price (or the item's own base
+    /// price if none), plus every selected ModifierOption's price delta — both validated as
+    /// actually belonging to this menu item. Also snapshots the item's kitchen station name
+    /// (see OrderItem.StationName) — the caller must have loaded menuItem with
+    /// .Include(m => m.Station) for this to resolve to anything but the "Kitchen" fallback.
+    /// Throws ApiValidationException on an unknown/unavailable variant or an option that
+    /// belongs to a different item. Shared by BuildOrderAsync, AddOrUpdateCartItemAsync, and
+    /// OrdersController.AddItem so the three order-item-creation paths can never compute this
+    /// differently.</summary>
+    Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName)> ResolveLinePricingAsync(
+        CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId);
 
     /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
     /// batch's own kitchen-ticket row, notifies the kitchen about just those items, and
@@ -36,6 +49,15 @@ public interface IOrderBuildingService
     /// creation). Returns false if there was nothing new to fire. Recomputes Order.Status
     /// but does not save — the caller saves.</summary>
     Task<bool> FireUnfiredItemsAsync(CafePosDbContext db, Order order, int? explicitTenantId);
+
+    /// <summary>Staff-Confirm Mode: flags the order as awaiting a staff member's OK instead of
+    /// firing straight to the kitchen (see Order.PendingStaffConfirmation) and notifies the
+    /// floor (not kitchen — see NotificationCategory.OrderPendingConfirmation). Items stay
+    /// unfired (FireBatch == 0) exactly as they were before Place Order was tapped; the actual
+    /// fire happens later via FireUnfiredItemsAsync once OrdersController.ConfirmGuestOrder
+    /// runs. No-ops (returns without adding a second notification) if already pending. Does
+    /// not save — the caller saves.</summary>
+    void MarkPendingConfirmation(CafePosDbContext db, Order order, int? explicitTenantId);
 
     void RecomputeBatchStatus(CafePosDbContext db, Order order, int batchNumber);
 
@@ -89,7 +111,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
 
         var menuIds = items.Select(i => i.MenuItemId).ToList();
-        var menu = await TenantScoped(db.MenuItems, explicitTenantId).Where(m => menuIds.Contains(m.Id)).ToDictionaryAsync(m => m.Id);
+        var menu = await TenantScoped(db.MenuItems, explicitTenantId).Include(m => m.Station)
+            .Where(m => menuIds.Contains(m.Id)).ToDictionaryAsync(m => m.Id);
 
         var orderItems = new List<OrderItem>();
         foreach (var line in items)
@@ -101,13 +124,18 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (line.Qty <= 0)
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
+            var (linePrice, variantName, selections, stationName) = await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId);
             orderItems.Add(new OrderItem
             {
                 MenuItemId = menuItem.Id,
                 Name = menuItem.Name,
                 Qty = line.Qty,
-                Price = menuItem.Price + (line.ModifierPriceAdjustment ?? 0),
+                Price = linePrice,
                 Modifier = line.Modifier,
+                VariantId = line.VariantId,
+                VariantName = variantName,
+                SelectedModifiers = selections,
+                StationName = stationName,
             });
         }
 
@@ -247,14 +275,22 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         return result[0];
     }
 
-    public async Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId)
+    public async Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId,
+        int? variantId = null, List<int>? modifierOptionIds = null)
     {
         if (qty < 0) throw new ApiValidationException("Quantity cannot be negative.");
 
-        var menuItem = await TenantScoped(db.MenuItems, explicitTenantId).FirstOrDefaultAsync(m => m.Id == menuItemId);
+        var menuItem = await TenantScoped(db.MenuItems, explicitTenantId).Include(m => m.Station).FirstOrDefaultAsync(m => m.Id == menuItemId);
         if (menuItem is null) throw new ApiValidationException("Menu item not found.");
 
-        var existing = order.Items.FirstOrDefault(i => i.FireBatch == 0 && i.MenuItemId == menuItemId && i.Modifier == modifier);
+        // A distinct cart line per (menu item, variant, exact set of add-ons, free-text note) —
+        // "Half + Extra Cheese" and "Full, no cheese" must never collapse into the same line.
+        var normalizedOptionIds = (modifierOptionIds ?? []).OrderBy(x => x).ToList();
+        bool SameLine(OrderItem i) =>
+            i.FireBatch == 0 && i.MenuItemId == menuItemId && i.Modifier == modifier && i.VariantId == variantId &&
+            i.SelectedModifiers.Select(m => m.ModifierOptionId).OrderBy(x => x).SequenceEqual(normalizedOptionIds);
+
+        var existing = order.Items.FirstOrDefault(SameLine);
 
         if (qty == 0)
         {
@@ -277,14 +313,19 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
         else
         {
+            var (linePrice, variantName, selections, stationName) = await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId);
             existing = new OrderItem
             {
                 OrderId = order.Id,
                 MenuItemId = menuItem.Id,
                 Name = menuItem.Name,
                 Qty = qty,
-                Price = menuItem.Price,
+                Price = linePrice,
                 Modifier = modifier,
+                VariantId = variantId,
+                VariantName = variantName,
+                SelectedModifiers = selections,
+                StationName = stationName,
                 FireBatch = 0,
             };
             order.Items.Add(existing);
@@ -297,6 +338,49 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // guest cart's next fire/place-order call, which is the single deduction point
         // (see FireUnfiredItemsAsync).
         return existing;
+    }
+
+    public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName)> ResolveLinePricingAsync(
+        CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId)
+    {
+        var price = menuItem.Price;
+        string? variantName = null;
+        if (variantId is int vid)
+        {
+            var variant = await TenantScoped(db.Variants, explicitTenantId).FirstOrDefaultAsync(v => v.Id == vid);
+            if (variant is null || variant.MenuItemId != menuItem.Id)
+                throw new ApiValidationException("Selected variant not found for this item.");
+            if (!variant.IsAvailable)
+                throw new ApiValidationException($"'{variant.Name}' is currently unavailable.");
+            price = variant.Price;
+            variantName = variant.Name;
+        }
+
+        var selections = new List<OrderItemModifier>();
+        if (modifierOptionIds is { Count: > 0 })
+        {
+            var distinctIds = modifierOptionIds.Distinct().ToList();
+            var options = await TenantScoped(db.ModifierOptions, explicitTenantId)
+                .Where(o => distinctIds.Contains(o.Id))
+                .ToListAsync();
+            if (options.Count != distinctIds.Count)
+                throw new ApiValidationException("One or more selected add-ons were not found.");
+
+            var modifierIds = options.Select(o => o.ModifierId).Distinct().ToList();
+            var ownedModifierIds = await TenantScoped(db.Modifiers, explicitTenantId)
+                .Where(m => m.MenuItemId == menuItem.Id && modifierIds.Contains(m.Id))
+                .Select(m => m.Id).ToListAsync();
+            if (options.Any(o => !ownedModifierIds.Contains(o.ModifierId)))
+                throw new ApiValidationException("One or more selected add-ons don't belong to this item.");
+
+            foreach (var option in options)
+            {
+                price += option.Price;
+                selections.Add(new OrderItemModifier { ModifierOptionId = option.Id, Name = option.Name, Price = option.Price });
+            }
+        }
+
+        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen");
     }
 
     public async Task<bool> FireUnfiredItemsAsync(CafePosDbContext db, Order order, int? explicitTenantId)
@@ -331,6 +415,23 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         await ConsumeInventoryAsync(db, menu, unfired, order.Id, explicitTenantId);
 
         return true;
+    }
+
+    public void MarkPendingConfirmation(CafePosDbContext db, Order order, int? explicitTenantId)
+    {
+        if (order.PendingStaffConfirmation) return; // already flagged — avoid a duplicate ping
+        order.PendingStaffConfirmation = true;
+
+        var notification = new AppNotification
+        {
+            Title = "New order awaiting confirmation",
+            Body = $"{order.Title} — confirm to send this to the kitchen.",
+            Category = NotificationCategory.OrderPendingConfirmation,
+            Channel = NotificationChannel.InApp,
+            ActionUrl = $"/orders/{order.Id}",
+        };
+        if (explicitTenantId is int tid) notification.TenantId = tid;
+        db.Notifications.Add(notification);
     }
 
     public void RecomputeBatchStatus(CafePosDbContext db, Order order, int batchNumber)

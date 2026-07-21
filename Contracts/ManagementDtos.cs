@@ -57,6 +57,14 @@ public record UpdateStaffStatusRequest(StaffStatus Status);
 public record UpdateStaffRequest(string? Name, string? Role, string? Email, string? Phone, decimal? HourlyRate, int? BranchId, string? PhotoUrl);
 public record ResetStaffPasswordRequest(string NewPassword);
 
+// ---------- Staff screen access ----------
+public record StaffScreenAccessDto(int StaffId, string AccessMode, List<string> AllowedScreens)
+{
+    public static StaffScreenAccessDto From(int staffId, AppUser user) =>
+        new(staffId, user.AccessMode.ToString(), user.AllowedScreens ?? []);
+}
+public record UpdateStaffScreenAccessRequest(StaffAccessMode AccessMode, List<string>? AllowedScreens);
+
 public record ShiftDto(int Id, int StaffId, DateTime StartsAt, DateTime EndsAt, string? Notes)
 {
     public static ShiftDto From(Shift s) => new(s.Id, s.StaffId, s.StartsAt, s.EndsAt, s.Notes);

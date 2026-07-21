@@ -13,14 +13,42 @@ namespace CafePOS.Api.Controllers;
 public class MenuController(CafePosDbContext db, IImageStorageService imageStorage) : ControllerBase
 {
     /// <summary>Public — powers the customer-facing QR Menu as well as the internal POS grid.
-    /// Modifiers (+ their Options) are eager-loaded so POS can offer topping/add-on
-    /// selection straight from this one list, without an extra round trip per item.</summary>
+    /// Eager-loads Variants/Modifiers (with Options) — this is the one endpoint the POS grid
+    /// and customer QR menu both use to render every item's ordering options in a single
+    /// round trip, instead of an extra fetch per item once tapped.</summary>
     [AllowAnonymous]
     [HttpGet]
     public async Task<IEnumerable<MenuItem>> List() =>
         await db.MenuItems
+            .Include(m => m.Variants.Where(v => v.IsAvailable).OrderBy(v => v.SortOrder))
             .Include(m => m.Modifiers.OrderBy(mo => mo.SortOrder)).ThenInclude(mo => mo.Options.OrderBy(o => o.SortOrder))
+            .Include(m => m.Station)
             .OrderBy(m => m.Category).ThenBy(m => m.Name).ToListAsync();
+
+    /// <summary>Resolves the (tracked) station a Create/Update/BulkCreate request should use:
+    /// the requested StationId if it's valid for this tenant, otherwise the tenant's first
+    /// (lowest SortOrder) active station — creating a default "Kitchen" station on first use
+    /// so a tenant that's never touched Kitchen Stations still gets a valid, non-orphaned
+    /// item. Returns the tracked entity (not just its id) so assigning it to
+    /// MenuItem.Station keeps the in-memory nav property (and StationName projection) in
+    /// sync immediately, without needing a reload.</summary>
+    private async Task<Station> ResolveStationAsync(int? requestedStationId)
+    {
+        if (requestedStationId is int sid)
+        {
+            var requested = await db.Stations.FirstOrDefaultAsync(s => s.Id == sid);
+            if (requested is null) throw new ApiValidationException("Selected kitchen station not found.");
+            return requested;
+        }
+
+        var defaultStation = await db.Stations.OrderBy(s => s.SortOrder).FirstOrDefaultAsync(s => s.Active);
+        if (defaultStation is not null) return defaultStation;
+
+        var created = new Station { Name = "Kitchen" };
+        db.Stations.Add(created);
+        await db.SaveChangesAsync();
+        return created;
+    }
 
     private const int BestSellerCount = 3;
 
@@ -107,7 +135,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             ProductType = req.ProductType ?? ProductType.Prepared,
             LinkedInventoryItemId = req.ProductType == ProductType.Independent ? req.LinkedInventoryItemId : null,
             ShortCode = string.IsNullOrWhiteSpace(req.ShortCode) ? null : req.ShortCode.ToUpper(),
-            KitchenStation = req.KitchenStation ?? "KITCHEN",
+            Station = await ResolveStationAsync(req.StationId),
         };
         if (Enum.TryParse<ItemType>(req.ItemType ?? "Recipe", ignoreCase: true, out var itemType))
             item.ItemType = itemType;
@@ -133,6 +161,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             throw new ApiValidationException("Cannot import more than 500 items at once.");
 
         var valid = items.Where(req => !string.IsNullOrWhiteSpace(req.Name) && req.Price > 0).ToList();
+        var defaultStation = await ResolveStationAsync(null);
         var created = new List<MenuItem>();
         foreach (var req in valid)
         {
@@ -145,6 +174,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
                 Subtitle = req.Subtitle ?? "",
                 Image = await imageStorage.ResolveAsync("menu-items", req.Image) ?? "",
                 Description = req.Description,
+                Station = req.StationId is int sid ? await ResolveStationAsync(sid) : defaultStation,
             });
         }
 
@@ -157,7 +187,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
     [HttpPatch("{id:int}")]
     public async Task<ActionResult<MenuItem>> Update(int id, UpdateMenuItemRequest req)
     {
-        var item = await db.MenuItems.FindAsync(id);
+        var item = await db.MenuItems.Include(m => m.Station).FirstOrDefaultAsync(m => m.Id == id);
         if (item is null) return NotFound();
 
         if (req.Name is not null)
@@ -195,7 +225,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             }
             item.ShortCode = string.IsNullOrWhiteSpace(req.ShortCode) ? null : req.ShortCode.ToUpper();
         }
-        if (req.KitchenStation is not null) item.KitchenStation = req.KitchenStation;
+        if (req.StationId is not null) item.Station = await ResolveStationAsync(req.StationId);
         if (!string.IsNullOrWhiteSpace(req.ItemType) && Enum.TryParse<ItemType>(req.ItemType, ignoreCase: true, out var itemType))
             item.ItemType = itemType;
         if (!string.IsNullOrWhiteSpace(req.VegNonVegType) && Enum.TryParse<VegNonVegType>(req.VegNonVegType, ignoreCase: true, out var vegType))
@@ -296,12 +326,19 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         var item = await db.MenuItems.FindAsync(menuItemId);
         if (item is null) return NotFound();
 
+        // Only one variant can be "the" default (pre-selected in the ordering picker) —
+        // marking a new one clears it off every existing sibling.
+        if (req.IsDefault)
+            foreach (var sibling in await db.Variants.Where(v => v.MenuItemId == menuItemId && v.IsDefault).ToListAsync())
+                sibling.IsDefault = false;
+
         var variant = new Variant
         {
             MenuItemId = menuItemId,
             Name = req.Name.Trim(),
             Price = req.Price,
             IsAvailable = true,
+            IsDefault = req.IsDefault,
             SortOrder = await db.Variants.CountAsync(v => v.MenuItemId == menuItemId)
         };
 
@@ -334,6 +371,16 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         if (req.Name is not null) variant.Name = req.Name.Trim();
         if (req.Price is not null && req.Price >= 0) variant.Price = req.Price.Value;
         if (req.IsAvailable is not null) variant.IsAvailable = req.IsAvailable.Value;
+        if (req.IsDefault is true)
+        {
+            foreach (var sibling in await db.Variants.Where(v => v.MenuItemId == menuItemId && v.Id != id && v.IsDefault).ToListAsync())
+                sibling.IsDefault = false;
+            variant.IsDefault = true;
+        }
+        else if (req.IsDefault is false)
+        {
+            variant.IsDefault = false;
+        }
 
         await db.SaveChangesAsync();
         return VariantDto.From(variant);

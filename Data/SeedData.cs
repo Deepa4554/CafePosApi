@@ -100,6 +100,7 @@ public static class SeedData
         }
 
         BackfillMenuItemMedia(db);
+        BackfillMenuItemStations(db);
         BackfillInventoryCost(db);
         BackfillUserTenantIds(db);
         BackfillPlatformAdmin(db);
@@ -176,6 +177,28 @@ public static class SeedData
             item.Description = m.Description;
             item.Popular = m.Popular;
         }
+    }
+
+    /// <summary>Ensures every MenuItem has a real Station — freshly-seeded items above never
+    /// set one (StationId defaults to 0, no matching row). On a real Postgres deployment this
+    /// is a one-time gap the AddKitchenStations migration's backfill SQL already closed, but
+    /// the InMemory dev provider (see Program.cs) uses EnsureCreated instead of Migrate, so
+    /// that SQL never runs there — this covers both paths by creating a single default
+    /// "Kitchen" station on first use and pointing any StationId==0 item at it.</summary>
+    private static void BackfillMenuItemStations(CafePosDbContext db)
+    {
+        var orphaned = db.MenuItems.Local.Union(db.MenuItems).Where(m => m.StationId == 0).ToList();
+        if (orphaned.Count == 0) return;
+
+        var kitchen = db.Stations.Local.FirstOrDefault(s => s.Name == "Kitchen")
+            ?? db.Stations.FirstOrDefault(s => s.Name == "Kitchen");
+        if (kitchen is null)
+        {
+            kitchen = new Station { Name = "Kitchen" };
+            db.Stations.Add(kitchen);
+        }
+        foreach (var item in orphaned)
+            item.Station = kitchen;
     }
 
     private static void BackfillInventoryCost(CafePosDbContext db)

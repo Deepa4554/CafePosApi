@@ -37,15 +37,19 @@ public class OrdersController(
         [FromQuery] bool kdsReady = false,
         // Token Dashboard: "?orderType=QSR&activeOnly=true" is how it asks for just today's
         // counter orders, same active-order rule as every other order type.
-        [FromQuery] string? orderType = null)
+        [FromQuery] string? orderType = null,
+        // Staff-Confirm Mode: the floor polls this on a short interval to pop up "Table X —
+        // confirm order?" the moment a guest submits one — see OrdersController.ConfirmGuestOrder.
+        [FromQuery] bool? pendingConfirmation = null)
     {
-        var query = db.Orders.Include(o => o.Items).Include(o => o.FireBatches).AsQueryable();
+        var query = db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
         // an order stays active (visible on KDS, counted as in-progress) until it's
         // BOTH paid AND served. Paying early must not make it vanish from the
         // kitchen's ticket list while the food still hasn't gone out.
         if (activeOnly) query = query.Where(o => !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
         if (kdsReady) query = query.Where(o => o.Items.Any(i => i.FireBatch > 0));
+        if (pendingConfirmation is bool pc) query = query.Where(o => o.PendingStaffConfirmation == pc);
         if (orderType is not null) query = query.Where(o => o.OrderType == orderType);
         // No branch selected -> see everything (single-location cafes, and cafes that
         // haven't set up branches yet, are unaffected). A branch selected -> only that
@@ -62,7 +66,7 @@ public class OrdersController(
     [HttpGet("{id:int}")]
     public async Task<ActionResult<OrderDto>> Get(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         return order is null ? NotFound() : OrderDto.From(order);
     }
 
@@ -239,7 +243,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/items/{itemId:int}/advance-units")]
     public async Task<ActionResult<OrderDto>> AdvanceUnitsEndpoint(int id, int itemId, AdvanceUnitsRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         var item = order.Items.FirstOrDefault(i => i.Id == itemId);
@@ -263,7 +267,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/advance/{batchNumber:int}")]
     public async Task<ActionResult<OrderDto>> Advance(int id, int batchNumber)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
@@ -292,6 +296,7 @@ public class OrdersController(
         item.ServedQty = item.Qty;
         item.ReadQty = 0;
         item.PreparingQty = 0;
+        item.ReadyQty = 0;
         RecomputeItemStatus(item);
     }
 
@@ -300,7 +305,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/items/{itemId:int}/serve")]
     public async Task<ActionResult<OrderDto>> ServeItem(int id, int itemId)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         var item = order.Items.FirstOrDefault(i => i.Id == itemId);
@@ -320,7 +325,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/serve-all")]
     public async Task<ActionResult<OrderDto>> ServeAll(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
 
@@ -356,7 +361,7 @@ public class OrdersController(
             // Manual allocation — exact lines + quantities the chef picked.
             foreach (var alloc in req.Allocations)
             {
-                var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == alloc.OrderId);
+                var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == alloc.OrderId);
                 var item = order?.Items.FirstOrDefault(i => i.Id == alloc.ItemId);
                 if (order is null || item is null || order.Paid) continue;
                 AdvanceUnits(item, fromStage, alloc.Qty);
@@ -371,7 +376,7 @@ public class OrdersController(
             var remaining = req.Qty ?? 0;
             if (remaining <= 0) throw new ApiValidationException("Enter a quantity or pick specific KOTs.");
             var candidates = await db.Orders
-                .Include(o => o.Items).Include(o => o.FireBatches)
+                .Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches)
                 .Where(o => !o.Paid && o.Items.Any(i => i.MenuItemId == req.MenuItemId && i.FireBatch > 0))
                 .ToListAsync();
             // Oldest fire batch first (FIFO), then order id for a stable tie-break.
@@ -395,7 +400,7 @@ public class OrdersController(
 
         await db.SaveChangesAsync();
         // Return just the affected orders so the client can patch its cache.
-        var affected = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches)
+        var affected = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches)
             .Where(o => touchedOrderIds.Contains(o.Id)).ToListAsync();
         return affected.Select(OrderDto.From).ToList();
     }
@@ -408,7 +413,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/status")]
     public async Task<ActionResult<OrderDto>> SetStatus(int id, SetStatusRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
 
         if (!Enum.TryParse<OrderStatus>(req.Status, ignoreCase: true, out var status))
@@ -474,7 +479,7 @@ public class OrdersController(
     [HttpPost("{id:int}/fire")]
     public async Task<ActionResult<OrderDto>> Fire(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         try
@@ -501,23 +506,28 @@ public class OrdersController(
     [HttpPost("{id:int}/items")]
     public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
         if (req.Qty <= 0) throw new ApiValidationException("Quantity must be a positive number.");
 
-        var menuItem = await db.MenuItems.FirstOrDefaultAsync(m => m.Id == req.MenuItemId);
+        var menuItem = await db.MenuItems.Include(m => m.Station).FirstOrDefaultAsync(m => m.Id == req.MenuItemId);
         if (menuItem is null) throw new ApiValidationException("Menu item not found.");
         if (!menuItem.Available) throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
 
+        var (linePrice, variantName, selections, stationName) = await orderBuilder.ResolveLinePricingAsync(db, menuItem, req.VariantId, req.ModifierOptionIds, explicitTenantId: null);
         var newItem = new OrderItem
         {
             OrderId = order.Id,
             MenuItemId = menuItem.Id,
             Name = menuItem.Name,
             Qty = req.Qty,
-            Price = menuItem.Price + (req.ModifierPriceAdjustment ?? 0),
+            Price = linePrice,
             Modifier = req.Modifier,
+            VariantId = req.VariantId,
+            VariantName = variantName,
+            SelectedModifiers = selections,
+            StationName = stationName,
             FireBatch = 0,
         };
         order.Items.Add(newItem);
@@ -539,7 +549,7 @@ public class OrdersController(
     [HttpDelete("{id:int}/items/{itemId:int}")]
     public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId, [FromQuery] string? reason = null)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
 
@@ -568,6 +578,30 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
+    /// <summary>Staff-Confirm Mode: the floor's "yes, this table is real" gate on a guest QR
+    /// order's first submission — actually fires it to the kitchen (see
+    /// IOrderBuildingService.FireUnfiredItemsAsync) now that a staff member has looked at it.
+    /// Any authenticated staff can confirm (same bar as Cancel on a still-unfired order) —
+    /// there's no per-waiter assignment, whoever's free on the floor handles it. Rejecting a
+    /// pending order is just the existing Cancel endpoint; no separate reject action needed.</summary>
+    [HttpPost("{id:int}/confirm")]
+    public async Task<ActionResult<OrderDto>> ConfirmGuestOrder(int id)
+    {
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (!order.PendingStaffConfirmation) throw new ApiConflictException("This order isn't awaiting confirmation.");
+        if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
+
+        order.PendingStaffConfirmation = false;
+        if (!await orderBuilder.FireUnfiredItemsAsync(db, order, null))
+            throw new ApiValidationException("Nothing to confirm — the cart is empty.");
+
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+            $"Order {order.Id} confirmed by staff — sent to kitchen.", AuditSeverity.Low);
+        return OrderDto.From(order);
+    }
+
     /// <summary>Cancels the whole order — voids every not-yet-served line via the same
     /// before-cook-reverses/after-cook-doesn't rule as RemoveItem (see VoidItemAsync).
     /// Already-served items are left untouched (food that's out can't be un-served); staff
@@ -577,7 +611,7 @@ public class OrdersController(
     [HttpPost("{id:int}/cancel")]
     public async Task<ActionResult<OrderDto>> Cancel(int id, CancelOrderRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot cancel a paid order — use Refund instead.");
         if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
@@ -591,6 +625,7 @@ public class OrdersController(
         order.Cancelled = true;
         order.CancelledAt = DateTime.UtcNow;
         order.CancelReason = req.Reason;
+        order.PendingStaffConfirmation = false; // rejecting a still-pending guest order clears the gate too
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         foreach (var batch in order.FireBatches)
@@ -614,7 +649,7 @@ public class OrdersController(
     [HttpPost("{id:int}/batches/{batchNumber:int}/cancel")]
     public async Task<ActionResult<OrderDto>> CancelBatch(int id, int batchNumber, CancelOrderRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot cancel a KOT on a paid order — use Refund instead.");
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
@@ -698,7 +733,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-discount")]
     public async Task<ActionResult<OrderDto>> ApplyBillDiscount(int id, BillDiscountRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot discount a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("A bill discount can only be applied once the order has been served.");
@@ -720,7 +755,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-coupon")]
     public async Task<ActionResult<OrderDto>> ApplyBillCoupon(int id, BillCouponRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a coupon to a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("Coupons are applied at billing time, once the order has been served.");
@@ -751,7 +786,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-giftcard")]
     public async Task<ActionResult<OrderDto>> ApplyBillGiftCard(int id, BillGiftCardRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a gift card to a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("Gift cards are applied at billing time, once the order has been served.");
@@ -794,7 +829,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/pay")]
     public async Task<ActionResult<OrderDto>> Pay(int id, PayRequest? req = null)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         if (order.Status != OrderStatus.Served) throw new ApiValidationException("Order must be served before it can be marked paid.");
@@ -826,7 +861,7 @@ public class OrdersController(
     [HttpPost("{id:int}/refund")]
     public async Task<ActionResult<OrderDto>> Refund(int id, RefundOrderRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (!order.Paid) throw new ApiValidationException("Only paid orders can be refunded.");
         if (order.Refunded) throw new ApiConflictException("Order has already been refunded.");

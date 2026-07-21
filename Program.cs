@@ -145,6 +145,19 @@ builder.Services
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
             ClockSkew = TimeSpan.FromSeconds(30),
         };
+        // Browsers can't attach an Authorization header to a WebSocket handshake — SignalR's
+        // JS client sends the token as an "access_token" query param instead, only for hub
+        // requests (every other endpoint keeps using the real header).
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(accessToken) && context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                    context.Token = accessToken;
+                return Task.CompletedTask;
+            },
+        };
     });
 
 // Policies mirror src/core/auth/permissions.ts in the RN app exactly.
@@ -164,6 +177,13 @@ builder.Services.AddAuthorizationBuilder()
     .AddPolicy(Policies.RequirePremium, p => p.RequireAuthenticatedUser().AddRequirements(new RequirePlanRequirement(PlanCategory.Premium)));
 
 builder.Services.AddScoped<IAuthorizationHandler, RequirePlanHandler>();
+
+// ---------- Real-time (SignalR) ----------
+// Replaces the 5-8s polling Orders/KDS/Tables used before (see useOrders.ts/useTables.ts) —
+// CafePosDbContext pushes a tenant-scoped "ordersChanged" event on every relevant save
+// (see CafePosDbContext.SaveChangesAsync), no controller has to remember to notify.
+builder.Services.AddSignalR();
+builder.Services.AddSingleton<IRealtimeNotifier, RealtimeNotifier>();
 
 // ---------- CORS ----------
 // The RN app runs on the Metro/webpack dev servers during development. Also allows
@@ -186,14 +206,21 @@ builder.Services.AddCors(options =>
         policy
             .SetIsOriginAllowed(origin => lanOriginPattern.IsMatch(origin))
             .AllowAnyHeader()
-            .AllowAnyMethod();
+            .AllowAnyMethod()
+            // Needed so the browser actually attaches the httpOnly refresh-token
+            // cookie (see AuthController's SetRefreshTokenCookie) on cross-port
+            // requests to the dev API. AllowCredentials can't combine with a
+            // wildcard origin, but this policy already pins to an explicit
+            // origin allowlist via SetIsOriginAllowed, so it's compatible.
+            .AllowCredentials();
     });
     options.AddPolicy(ProdCorsPolicy, policy =>
     {
         policy
             .WithOrigins(allowedProdOrigins)
             .AllowAnyHeader()
-            .AllowAnyMethod();
+            .AllowAnyMethod()
+            .AllowCredentials();
     });
 });
 
@@ -284,6 +311,7 @@ app.UseMiddleware<SubscriptionExpiryMiddleware>();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHub<OrdersHub>("/hubs/orders");
 app.MapHealthChecks("/health").AllowAnonymous();
 
 app.Run();

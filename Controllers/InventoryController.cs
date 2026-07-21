@@ -15,9 +15,10 @@ namespace CafePOS.Api.Controllers;
 public class InventoryController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]
-    public async Task<IEnumerable<InventoryItemDto>> List([FromQuery] int? branchId = null)
+    public async Task<IEnumerable<InventoryItemDto>> List([FromQuery] int? branchId = null, [FromQuery] bool includeInactive = false)
     {
         var query = db.InventoryItems.AsQueryable();
+        if (!includeInactive) query = query.Where(i => i.IsActive);
         // Same convention as OrdersController.List: no branch selected shows
         // everything, a branch selected shows only that branch's stock (items
         // added before branch-scoping existed have BranchId null and drop out).
@@ -27,7 +28,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
     [HttpGet("low-stock")]
     public async Task<IEnumerable<InventoryItemDto>> LowStock() =>
-        (await db.InventoryItems.Where(i => i.Current <= i.ReorderLevel).OrderBy(i => i.Name).ToListAsync())
+        (await db.InventoryItems.Where(i => i.IsActive && i.Current <= i.ReorderLevel).OrderBy(i => i.Name).ToListAsync())
             .Select(InventoryItemDto.From);
 
     [Authorize(Policy = Policies.OwnerOrManager)]
@@ -190,6 +191,11 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
             b.ExpiryDate, b.ReceivedAt, daysUntilExpiry, daysUntilExpiry is < 0);
     }
 
+    /// <summary>Deactivate rather than delete — a hard delete would leave any Recipe still
+    /// pointing at this ingredient silently deducting nothing (no MissingRecipeAlert either,
+    /// since the recipe itself still "exists") and orphan this item's own ledger/batch
+    /// history. List()/LowStock() hide it by default; existing recipes, transactions, and
+    /// batches keep resolving it by id exactly as before.</summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)
@@ -197,9 +203,23 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
         var item = await db.InventoryItems.FindAsync(id);
         if (item is null) return NotFound();
 
-        db.InventoryItems.Remove(item);
+        item.IsActive = false;
         await db.SaveChangesAsync();
         return NoContent();
+    }
+
+    /// <summary>Undoes Delete — the deactivated item goes back to showing up in List()/
+    /// LowStock() and can be restocked/sold against normally again.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("{id:int}/reactivate")]
+    public async Task<ActionResult<InventoryItemDto>> Reactivate(int id)
+    {
+        var item = await db.InventoryItems.FindAsync(id);
+        if (item is null) return NotFound();
+
+        item.IsActive = true;
+        await db.SaveChangesAsync();
+        return InventoryItemDto.From(item);
     }
 
     private async Task<List<InventoryTransactionDto>> ToDtos(List<InventoryTransaction> txns)

@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260720192705_AddReceiptBuilderSettings")]
+    partial class AddReceiptBuilderSettings
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1128,6 +1131,10 @@ namespace CafePOS.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("KitchenStation")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.Property<int?>("LinkedInventoryItemId")
                         .HasColumnType("integer");
 
@@ -1148,9 +1155,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<string>("ShortCode")
                         .HasColumnType("text");
 
-                    b.Property<int>("StationId")
-                        .HasColumnType("integer");
-
                     b.Property<string>("Subtitle")
                         .IsRequired()
                         .HasColumnType("text");
@@ -1164,8 +1168,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("text");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("StationId");
 
                     b.HasIndex("TenantId");
 
@@ -1530,10 +1532,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<int>("ServedQty")
                         .HasColumnType("integer");
-
-                    b.Property<string>("StationName")
-                        .IsRequired()
-                        .HasColumnType("text");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -2057,43 +2055,6 @@ namespace CafePOS.Api.Migrations
                     b.ToTable("Tasks");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.Station", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<bool>("Active")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Icon")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<int>("SortOrder")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.HasIndex("TenantId", "Name")
-                        .IsUnique();
-
-                    b.ToTable("Stations");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.StockTake", b =>
                 {
                     b.Property<int>("Id")
@@ -2479,17 +2440,6 @@ namespace CafePOS.Api.Migrations
                         .OnDelete(DeleteBehavior.SetNull);
 
                     b.Navigation("Batch");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.MenuItem", b =>
-                {
-                    b.HasOne("CafePOS.Api.Domain.Station", "Station")
-                        .WithMany()
-                        .HasForeignKey("StationId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Station");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Modifier", b =>

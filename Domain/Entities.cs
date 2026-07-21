@@ -37,12 +37,36 @@ public class MenuItem : ITenantScoped
     /// item sells directly from.</summary>
     public int? LinkedInventoryItemId { get; set; }
     public string? ShortCode { get; set; } // e.g., "CAPP" for Cappuccino, max 5 chars, unique per tenant
-    public string KitchenStation { get; set; } = "KITCHEN"; // e.g., "KITCHEN", "BAKERY", "GRILL"
+    /// <summary>Which kitchen station preps this item — e.g. Main Kitchen, Bar, Dessert.
+    /// Drives KDS station filtering and per-station KOT print routing. FK to Station
+    /// (a managed per-tenant list, see StationsController), not free text.</summary>
+    public int StationId { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Station? Station { get; set; }
+    /// <summary>Convenience read-only projection of Station.Name for API responses — flat
+    /// like every other MenuItem field, instead of a nested object. Only resolves past the
+    /// "Kitchen" fallback when the caller loaded this item with .Include(m => m.Station).</summary>
+    [NotMapped]
+    public string StationName => Station?.Name ?? "Kitchen";
     public ItemType ItemType { get; set; } = ItemType.Recipe;
     public VegNonVegType? VegNonVegType { get; set; } // null if not applicable
 
     public List<Variant> Variants { get; set; } = [];
     public List<Modifier> Modifiers { get; set; } = [];
+}
+
+/// <summary>A kitchen prep station (e.g. "Main Kitchen", "Bar", "Dessert") — a managed,
+/// per-tenant list so MenuItem.StationId can't drift into typo'd duplicates the way a
+/// free-text field would. Deactivate (Active=false) rather than delete once referenced
+/// by a MenuItem, same convention as InventoryItem.IsActive.</summary>
+public class Station : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Name { get; set; }
+    public string Icon { get; set; } = "chef-hat";
+    public int SortOrder { get; set; } = 0;
+    public bool Active { get; set; } = true;
 }
 
 /// <summary>Extra photos for a menu item beyond its single cover Image (e.g. plating shot,
@@ -198,6 +222,12 @@ public class Order : ITenantScoped
     /// the kitchen (see OrdersController.Fire). An item's FireBatch == this value means it
     /// was part of the most recent fire round (drives the "NEW" badge on KDS).</summary>
     public int CurrentFireBatch { get; set; }
+    /// <summary>Set when a guest QR order's very first fire is submitted while
+    /// CafeSettings.RequireStaffOrderConfirmation is on — items sit unfired (FireBatch == 0,
+    /// invisible on KDS, same as before Place Order was ever tapped) until a staff member
+    /// hits Confirm (OrdersController.ConfirmGuestOrder), which fires them for real. Never
+    /// set for staff-created POS orders — only the guest self-order path checks this.</summary>
+    public bool PendingStaffConfirmation { get; set; }
     public bool Paid { get; set; }
     public bool Refunded { get; set; }
     public decimal? RefundedAmount { get; set; }
@@ -242,8 +272,26 @@ public class OrderItem : ITenantScoped
     public int MenuItemId { get; set; }
     public required string Name { get; set; }
     public int Qty { get; set; }
+    /// <summary>Effective per-unit price at the moment this line was added — already includes
+    /// the selected Variant's price (instead of MenuItem.Price) and every SelectedModifiers
+    /// delta, so every existing Subtotal/Tax/Total computation (Sum of Price*Qty) needs no
+    /// changes. See OrderBuildingService.ResolveLinePricingAsync, the one place that computes it.</summary>
     public decimal Price { get; set; }
     public string? Modifier { get; set; }
+    /// <summary>Which Variant (Half/Full/...) was picked, if any — null means the item's own
+    /// base MenuItem.Price was used. VariantName is a snapshot (survives the variant being
+    /// renamed/deleted later), same convention as Name snapshotting MenuItem.Name.</summary>
+    public int? VariantId { get; set; }
+    public string? VariantName { get; set; }
+    /// <summary>Which kitchen station this line was prepped at, snapshotted from
+    /// MenuItem.Station.Name at the moment the line was created — same snapshot convention
+    /// as Name/VariantName, so a later station rename doesn't retroactively change an
+    /// already-fired/printed KOT. Drives KDS station filtering and per-station KOT print
+    /// routing (see OrderBuildingService.ResolveLinePricingAsync).</summary>
+    public string StationName { get; set; } = "Kitchen";
+    /// <summary>Toppings/add-ons picked for this line — each row snapshots the ModifierOption's
+    /// name/price at order time (same reasoning as VariantName/Price above).</summary>
+    public List<OrderItemModifier> SelectedModifiers { get; set; } = [];
     /// <summary>Which "fire round" this item was sent to the kitchen in. 0 = not yet fired
     /// (still freely editable/removable, invisible on KDS). >0 = the Order.CurrentFireBatch
     /// value at the moment it was fired — matches an OrderFireBatch.BatchNumber.</summary>
@@ -274,6 +322,20 @@ public class OrderItem : ITenantScoped
     /// <summary>Units still at New (not yet acknowledged) — derived, not stored.</summary>
     [NotMapped]
     public int NewQty => Qty - (ReadQty + PreparingQty + ReadyQty + ServedQty);
+}
+
+/// <summary>One selected topping/add-on on an order line — snapshot of a ModifierOption at
+/// order time (see OrderItem.SelectedModifiers). ModifierOptionId is a loose reference (not
+/// a navigation) so the option can later be edited/deleted from the catalog without touching
+/// order history, same convention as RecipeItem.InventoryItemId.</summary>
+public class OrderItemModifier : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int OrderItemId { get; set; }
+    public int ModifierOptionId { get; set; }
+    public required string Name { get; set; }
+    public decimal Price { get; set; }
 }
 
 /// <summary>A single fire round (KOT) — see Order.FireBatches. Created when
@@ -316,6 +378,12 @@ public class InventoryItem : ITenantScoped
     public double MinStock { get; set; }
     /// <summary>Threshold that triggers a low-stock alert: Current &lt;= ReorderLevel.</summary>
     public double ReorderLevel { get; set; }
+    /// <summary>Deactivated (IsActive=false) rather than deleted once referenced by a Recipe,
+    /// InventoryTransaction, or InventoryBatch — hard-deleting would leave those pointing at a
+    /// dead FK (a recipe silently stops deducting that ingredient with no alert, and the
+    /// item's own ledger history becomes unreachable). Same convention as Vendor/Reward.
+    /// List()/LowStock() hide it by default via includeInactive.</summary>
+    public bool IsActive { get; set; } = true;
 }
 
 public class CafeSettings : ITenantScoped
@@ -331,8 +399,8 @@ public class CafeSettings : ITenantScoped
     public string Region { get; set; } = "Asia/Kolkata";
 
     // Receipt Customization / Branding
-    public string BusinessName { get; set; } = "CafePOS";
-    public string ReceiptHeader { get; set; } = "Welcome to CafePOS\n123 Coffee Street";
+    public string BusinessName { get; set; } = "PrabandhOS";
+    public string ReceiptHeader { get; set; } = "Welcome to PrabandhOS\n123 Coffee Street";
     public string ReceiptFooter { get; set; } = "Thank you for your visit!";
     public string? LogoUrl { get; set; }
 
@@ -355,6 +423,14 @@ public class CafeSettings : ITenantScoped
     public bool InventoryAlertsEnabled { get; set; } = true;
     public bool ShiftReportsEnabled { get; set; } = true;
 
+    // QR Ordering
+    /// <summary>When on, a guest QR session's first fire (Place Order) doesn't reach the
+    /// kitchen until a staff member confirms it (see Order.PendingStaffConfirmation) — stops
+    /// prank/misdialed-table orders from hitting KDS. Later re-orders on an already-confirmed
+    /// session skip this and fire immediately. Defaults on: the safer choice for a cafe that
+    /// hasn't consciously decided it wants instant-fire self-ordering.</summary>
+    public bool RequireStaffOrderConfirmation { get; set; } = true;
+
     public bool HasCompletedOnboarding { get; set; }
 
     /// <summary>"TWO_STAGE" (New → Ready, Preparing skipped) or "THREE_STAGE" (New →
@@ -372,6 +448,19 @@ public class CafeSettings : ITenantScoped
     public bool DeliveryEnabled { get; set; } = true;
     public bool QsrEnabled { get; set; } = true;
     public bool CashEnabled { get; set; } = true;
+
+    // Receipt Builder — which optional sections print on the customer bill (see
+    // receiptFormat.ts buildReceiptLines, the one shared line-model every print
+    // transport/screen renders from). Business name, items, and totals always print —
+    // there's no real receipt without them, so those aren't toggleable.
+    public bool ReceiptShowAddress { get; set; } = true;
+    public bool ReceiptShowWaiterName { get; set; } = true;
+    public bool ReceiptShowGuestPhone { get; set; } = true;
+    public bool ReceiptShowItemNotes { get; set; } = true;
+    public bool ReceiptShowFooter { get; set; } = true;
+    /// <summary>GST/tax registration number line — blank means the cafe hasn't set one,
+    /// same as ReceiptShowGstNumber being off either way (no number to show).</summary>
+    public string? GstNumber { get; set; }
 
     /// <summary>
     /// The owning Tenant's Slug, populated by SettingsController (not a real column —

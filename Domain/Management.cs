@@ -22,7 +22,10 @@ public class StaffTask : ITenantScoped
 // ---------- Notifications ----------
 
 public enum NotificationChannel { Push, Email, Sms, WhatsApp, InApp }
-public enum NotificationCategory { Order, OrderPlaced, Inventory, Billing, Staff, System, Marketing, AiInsight }
+// OrderPendingConfirmation is deliberately its own category (not OrderPlaced) — kitchen
+// roles (Chef/KitchenStaff) are filtered to only NotificationCategory.OrderPlaced
+// (NotificationsController.List), and they can't act on a confirmation prompt anyway.
+public enum NotificationCategory { Order, OrderPlaced, OrderPendingConfirmation, Inventory, Billing, Staff, System, Marketing, AiInsight }
 public enum DeliveryStatus { Pending, Sent, Delivered, Failed, Retrying }
 
 public class AppNotification : ITenantScoped

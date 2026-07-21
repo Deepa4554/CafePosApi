@@ -12,6 +12,16 @@ public enum AppRole
     Accountant,
 }
 
+/// <summary>Automatic = follow the role-based default (see permissions.ts's
+/// FLOOR_STAFF_HIDDEN_ROUTES / canAccessRoute — the same rule every login used before
+/// per-staff screen access existed). Custom = ignore the role default entirely and use
+/// only AppUser.AllowedScreens as the exact set of visible screens for this login.</summary>
+public enum StaffAccessMode
+{
+    Automatic,
+    Custom,
+}
+
 public class AppUser
 {
     public int Id { get; set; }
@@ -40,6 +50,19 @@ public class AppUser
     public string? ProfilePhoto { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Per-login screen-visibility override, set by an Owner/Manager from the
+    /// Staff Access screen. Owner logins ignore this entirely (always full access) — see
+    /// canAccessRoute/ScreenCatalog. Defaults to Automatic so every existing login keeps
+    /// today's role-based behavior until an Owner explicitly opts a staff member into
+    /// Custom mode.</summary>
+    public StaffAccessMode AccessMode { get; set; } = StaffAccessMode.Automatic;
+
+    /// <summary>Explicit allow-list of ScreenCatalog keys, only consulted when
+    /// AccessMode is Custom. Null/empty in Automatic mode. Validated against
+    /// ScreenCatalog (unknown keys, and keys above the tenant's current plan, are
+    /// rejected) on every write — see StaffController.UpdateScreenAccess.</summary>
+    public List<string>? AllowedScreens { get; set; }
 }
 
 /// <summary>

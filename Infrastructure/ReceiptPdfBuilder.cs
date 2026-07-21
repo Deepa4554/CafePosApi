@@ -47,11 +47,14 @@ public static class ReceiptPdfBuilder
 
                     foreach (var item in order.Items)
                     {
+                        var variantSuffix = item.VariantName is null ? "" : $" ({item.VariantName})";
                         col.Item().Row(row =>
                         {
-                            row.RelativeItem(3).Text($"{item.Qty}x {item.Name}{(string.IsNullOrWhiteSpace(item.Modifier) ? "" : $" ({item.Modifier})")}");
+                            row.RelativeItem(3).Text($"{item.Qty}x {item.Name}{variantSuffix}{(string.IsNullOrWhiteSpace(item.Modifier) ? "" : $" — {item.Modifier}")}");
                             row.RelativeItem(1).AlignRight().Text($"{item.Price * item.Qty:0.00}");
                         });
+                        foreach (var mod in item.SelectedModifiers)
+                            col.Item().PaddingLeft(12).Text($"+ {mod.Name}").FontSize(8).FontColor(Colors.Grey.Darken1);
                     }
 
                     col.Item().PaddingTop(6).LineHorizontal(0.5f);
