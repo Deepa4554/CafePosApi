@@ -78,13 +78,7 @@ namespace CafePOS.Api.Migrations
                 SET "StationId" = s."Id"
                 FROM "Stations" s
                 WHERE s."TenantId" = m."TenantId"
-                  AND s."Name" = LOWER(TRIM(BOTH FROM COALESCE(NULLIF(TRIM(BOTH FROM m."KitchenStation"), ''), 'Kitchen')))
-                  AND s."Name" = (
-                      SELECT MIN(TRIM(BOTH FROM COALESCE(NULLIF(TRIM(BOTH FROM mi."KitchenStation"), ''), 'Kitchen')))
-                      FROM "MenuItems" mi
-                      WHERE mi."TenantId" = m."TenantId"
-                        AND LOWER(TRIM(BOTH FROM COALESCE(NULLIF(TRIM(BOTH FROM mi."KitchenStation"), ''), 'Kitchen'))) = LOWER(TRIM(BOTH FROM COALESCE(NULLIF(TRIM(BOTH FROM m."KitchenStation"), ''), 'Kitchen')))
-                  );
+                  AND LOWER(s."Name") = LOWER(TRIM(BOTH FROM COALESCE(NULLIF(TRIM(BOTH FROM m."KitchenStation"), ''), 'Kitchen')));
                 """);
 
             migrationBuilder.DropColumn(
@@ -96,7 +90,6 @@ namespace CafePOS.Api.Migrations
                 table: "MenuItems",
                 type: "integer",
                 nullable: false,
-                defaultValue: 0,
                 oldClrType: typeof(int),
                 oldType: "integer",
                 oldNullable: true);
