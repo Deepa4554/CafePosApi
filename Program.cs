@@ -198,7 +198,12 @@ var lanOriginPattern = new System.Text.RegularExpressions.Regex(
 // Real deployed frontend origin(s) — set via appsettings.Production.json /
 // env var "AllowedOrigins__0" etc. once the frontend has a real domain. Empty
 // by default so production doesn't silently fall back to the dev LAN policy.
-var allowedProdOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? [];
+// "*" is stripped out if it ever ends up in there: combined with the
+// AllowCredentials() below it's not just insecure, CorsOptions.AddPolicy
+// throws at startup and takes the whole host down.
+var allowedProdOrigins = (builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? [])
+    .Where(o => o != "*")
+    .ToArray();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(DevCorsPolicy, policy =>
