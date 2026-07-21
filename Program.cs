@@ -198,9 +198,10 @@ var lanOriginPattern = new System.Text.RegularExpressions.Regex(
 // Real deployed frontend origin(s) — set via appsettings.Production.json /
 // env var "AllowedOrigins__0" etc. once the frontend has a real domain. Empty
 // by default so production doesn't silently fall back to the dev LAN policy.
-// "*" is stripped out if it ever ends up in there: combined with the
-// AllowCredentials() below it's not just insecure, CorsOptions.AddPolicy
-// throws at startup and takes the whole host down.
+// "*" is stripped out if it ever ends up in there: combined with credentials
+// it's not just insecure, browsers refuse it outright (Access-Control-Allow-Origin: *
+// can't be paired with Access-Control-Allow-Credentials: true), and
+// CorsOptions.AddPolicy throws at startup rather than let it through.
 var allowedProdOrigins = (builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? [])
     .Where(o => o != "*")
     .ToArray();
@@ -222,12 +223,23 @@ builder.Services.AddCors(options =>
     options.GetPolicy(DevCorsPolicy)!.SupportsCredentials = true;
     options.AddPolicy(ProdCorsPolicy, policy =>
     {
-        policy
-            .WithOrigins(allowedProdOrigins)
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
+        if (allowedProdOrigins.Length > 0)
+        {
+            policy.WithOrigins(allowedProdOrigins);
+        }
+        else
+        {
+            // No real frontend domain configured yet — fall back to the same
+            // localhost/LAN pattern used for DevCorsPolicy so a local frontend
+            // can still reach this deployed API with credentials while testing.
+            // Once AllowedOrigins is set to a real domain, that takes over above.
+            policy.SetIsOriginAllowed(origin => lanOriginPattern.IsMatch(origin));
+        }
+        policy.AllowAnyHeader().AllowAnyMethod();
     });
+    // See the DevCorsPolicy comment above — same reason AllowCredentials() can't
+    // be chained in the builder when the fallback SetIsOriginAllowed branch runs.
+    options.GetPolicy(ProdCorsPolicy)!.SupportsCredentials = true;
 });
 
 // ---------- Rate limiting ----------
