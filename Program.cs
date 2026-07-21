@@ -206,14 +206,15 @@ builder.Services.AddCors(options =>
         policy
             .SetIsOriginAllowed(origin => lanOriginPattern.IsMatch(origin))
             .AllowAnyHeader()
-            .AllowAnyMethod()
-            // Needed so the browser actually attaches the httpOnly refresh-token
-            // cookie (see AuthController's SetRefreshTokenCookie) on cross-port
-            // requests to the dev API. AllowCredentials can't combine with a
-            // wildcard origin, but this policy already pins to an explicit
-            // origin allowlist via SetIsOriginAllowed, so it's compatible.
-            .AllowCredentials();
+            .AllowAnyMethod();
     });
+    // Needed so the browser actually attaches the httpOnly refresh-token cookie
+    // (see AuthController's SetRefreshTokenCookie) on cross-port requests to the
+    // dev API. Can't chain .AllowCredentials() inside the builder above — combined
+    // with SetIsOriginAllowed, CorsOptions.AddPolicy's wildcard-origin check throws
+    // at startup even though the predicate already pins to an explicit allowlist.
+    // Setting it on the registered policy afterward skips that check.
+    options.GetPolicy(DevCorsPolicy)!.SupportsCredentials = true;
     options.AddPolicy(ProdCorsPolicy, policy =>
     {
         policy
