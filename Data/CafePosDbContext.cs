@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CafePOS.Api.Data;
 
-public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime) : DbContext(options)
+public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime, IPushNotificationSender pushSender) : DbContext(options)
 {
     private readonly ITenantContext _tenant = tenant;
 
@@ -39,6 +39,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     // Core catalog / ordering
     public DbSet<MenuItem> MenuItems => Set<MenuItem>();
     public DbSet<Station> Stations => Set<Station>();
+    public DbSet<MenuCategory> MenuCategories => Set<MenuCategory>();
     public DbSet<MenuItemImage> MenuItemImages => Set<MenuItemImage>();
     public DbSet<Variant> Variants => Set<Variant>();
     public DbSet<Modifier> Modifiers => Set<Modifier>();
@@ -48,6 +49,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderItemModifier> OrderItemModifiers => Set<OrderItemModifier>();
     public DbSet<OrderFireBatch> OrderFireBatches => Set<OrderFireBatch>();
+    public DbSet<OrderPayment> OrderPayments => Set<OrderPayment>();
     public DbSet<InventoryItem> InventoryItems => Set<InventoryItem>();
     public DbSet<Vendor> Vendors => Set<Vendor>();
     public DbSet<CafeSettings> Settings => Set<CafeSettings>();
@@ -60,6 +62,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<AppUser> Users => Set<AppUser>();
     public DbSet<RefreshTokenEntry> RefreshTokens => Set<RefreshTokenEntry>();
     public DbSet<EmailOtp> EmailOtps => Set<EmailOtp>();
+    public DbSet<DeviceToken> DeviceTokens => Set<DeviceToken>();
 
     // CRM
     public DbSet<Customer> Customers => Set<Customer>();
@@ -83,6 +86,11 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Integration> Integrations => Set<Integration>();
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
     public DbSet<SupportTicketMessage> SupportTicketMessages => Set<SupportTicketMessage>();
+    public DbSet<AttendanceLog> AttendanceLogs => Set<AttendanceLog>();
+    public DbSet<AttendanceRecord> AttendanceRecords => Set<AttendanceRecord>();
+    public DbSet<StaffLoan> StaffLoans => Set<StaffLoan>();
+    public DbSet<PayrollRun> PayrollRuns => Set<PayrollRun>();
+    public DbSet<PayrollLine> PayrollLines => Set<PayrollLine>();
 
     // Recipe-based inventory
     public DbSet<Recipe> Recipes => Set<Recipe>();
@@ -113,6 +121,12 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasMany(o => o.FireBatches)
             .WithOne()
             .HasForeignKey(b => b.OrderId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Order>()
+            .HasMany(o => o.Payments)
+            .WithOne()
+            .HasForeignKey(p => p.OrderId)
             .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<OrderItem>()
@@ -190,6 +204,14 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasForeignKey(l => l.StockTakeId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        // The one real navigation+cascade in the whole Payroll feature — a PayrollLine
+        // has no existence outside its parent run, same reasoning as Order.Items.
+        modelBuilder.Entity<PayrollRun>()
+            .HasMany(r => r.Lines)
+            .WithOne()
+            .HasForeignKey(l => l.PayrollRunId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         // Store enums as readable strings rather than opaque ints.
         modelBuilder.Entity<Order>().Property(o => o.Status).HasConversion<string>();
         modelBuilder.Entity<OrderFireBatch>().Property(b => b.Status).HasConversion<string>();
@@ -220,6 +242,25 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<GuestSession>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<GuestSession>().Property(s => s.ClosedReason).HasConversion<string>();
         modelBuilder.Entity<AppUser>().Property(u => u.AccessMode).HasConversion<string>();
+        modelBuilder.Entity<StaffMember>().Property(s => s.SalaryType).HasConversion<string>();
+        modelBuilder.Entity<AttendanceLog>().Property(a => a.Type).HasConversion<string>();
+        modelBuilder.Entity<AttendanceLog>().Property(a => a.Source).HasConversion<string>();
+        modelBuilder.Entity<AttendanceRecord>().Property(a => a.Status).HasConversion<string>();
+        modelBuilder.Entity<StaffLoan>().Property(l => l.Type).HasConversion<string>();
+        modelBuilder.Entity<StaffLoan>().Property(l => l.Status).HasConversion<string>();
+        modelBuilder.Entity<PayrollRun>().Property(r => r.Status).HasConversion<string>();
+        modelBuilder.Entity<PayrollLine>().Property(l => l.SalaryType).HasConversion<string>();
+
+        // AllowanceLine list — same reasoning as AppUser.AllowedScreens just below: a
+        // short list only ever read/written whole, never queried by individual entry.
+        modelBuilder.Entity<PayrollLine>().Property(l => l.Allowances)
+            .HasConversion(
+                v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
+                v => JsonSerializer.Deserialize<List<AllowanceLine>>(v, (JsonSerializerOptions?)null) ?? new())
+            .Metadata.SetValueComparer(new ValueComparer<List<AllowanceLine>>(
+                (a, b) => (a ?? new()).SequenceEqual(b ?? new()),
+                v => v.Aggregate(0, (h, s) => HashCode.Combine(h, s.GetHashCode())),
+                v => v.ToList()));
 
         // AllowedScreens is a short list of catalog keys (e.g. ["POS","KDS"]) — stored as
         // a JSON array rather than a join table since it's only ever read/written whole,
@@ -289,10 +330,22 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // One row per distinct station name per tenant — same "no silent typo duplicates"
         // guarantee the free-text KitchenStation field never had.
         modelBuilder.Entity<Station>().HasIndex(s => new { s.TenantId, s.Name }).IsUnique();
+        modelBuilder.Entity<MenuCategory>().HasIndex(c => new { c.TenantId, c.Name }).IsUnique();
 
         // FIFO consumption walks batches ordered by (InventoryItemId, ExpiryDate, ReceivedAt)
         // for one ingredient at a time — this compound index backs that query directly.
         modelBuilder.Entity<InventoryBatch>().HasIndex(b => new { b.InventoryItemId, b.ExpiryDate, b.ReceivedAt });
+
+        modelBuilder.Entity<DeviceToken>().HasIndex(t => t.Token).IsUnique();
+
+        // One derived attendance row per staff per day.
+        modelBuilder.Entity<AttendanceRecord>().HasIndex(a => new { a.TenantId, a.StaffId, a.Date }).IsUnique();
+        modelBuilder.Entity<AttendanceLog>().HasIndex(a => new { a.TenantId, a.StaffId, a.Timestamp });
+        modelBuilder.Entity<StaffLoan>().HasIndex(l => new { l.TenantId, l.StaffId, l.Status });
+        // One payroll run per exact period per tenant — regenerating for the same
+        // dates must go through Delete-then-recreate, never silently duplicate.
+        modelBuilder.Entity<PayrollRun>().HasIndex(r => new { r.TenantId, r.PeriodStart, r.PeriodEnd }).IsUnique();
+        modelBuilder.Entity<PayrollLine>().HasIndex(l => new { l.PayrollRunId, l.StaffId });
 
         ApplyTenantIsolation(modelBuilder);
     }
@@ -361,15 +414,73 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .Where(id => id != 0)
             .ToHashSet();
 
+    /// <summary>Same "read before SaveChanges, act after" shape as
+    /// CollectRealtimeAffectedTenantIds — an Added AppNotification's entry flips to Unchanged
+    /// once the save succeeds, but the entity object itself (Title/Body/TenantId/...) is still
+    /// fully populated, so no separate DTO capture is needed.</summary>
+    private List<AppNotification> CollectNewNotifications() =>
+        ChangeTracker.Entries<AppNotification>().Where(e => e.State == EntityState.Added).Select(e => e.Entity).ToList();
+
+    /// <summary>Cafe Settings → Notification Preferences toggle for each category a
+    /// notification-producing flow actually creates (see OrderBuildingService's three
+    /// AppNotification sites, InventoryBatchService's low-stock check, and
+    /// AttendanceController.PunchOut's shift report). System/Billing/Marketing/AiInsight
+    /// have no producer anywhere yet, so they're deliberately not in this map — nothing to
+    /// gate, and a toggle for them would control nothing (the exact bug this fixes).</summary>
+    private static readonly Dictionary<NotificationCategory, Func<CafeSettings, bool>> NotificationGates = new()
+    {
+        [NotificationCategory.OrderPlaced] = s => s.OrderPlacedAlertsEnabled,
+        [NotificationCategory.OrderPendingConfirmation] = s => s.OrderPendingConfirmationAlertsEnabled,
+        [NotificationCategory.Order] = s => s.OrderReadyAlertsEnabled,
+        [NotificationCategory.Inventory] = s => s.InventoryAlertsEnabled,
+        [NotificationCategory.Staff] = s => s.ShiftReportsEnabled,
+    };
+
+    /// <summary>Runs BEFORE the actual save so a gated-off notification is detached and
+    /// never persisted at all (not saved, not pushed) — not just filtered out of the push,
+    /// which would still leave a dead row cluttering the in-app Notification Center. Reads
+    /// TenantId off each entry the same "before SaveChanges" way CollectRealtimeAffectedTenantIds
+    /// does, since StampTenantIds above already populated it.</summary>
+    private async Task SuppressDisabledNotificationsAsync(CancellationToken ct)
+    {
+        var gated = ChangeTracker.Entries<AppNotification>()
+            .Where(e => e.State == EntityState.Added && NotificationGates.ContainsKey(e.Entity.Category))
+            .ToList();
+        if (gated.Count == 0) return;
+
+        var tenantIds = gated.Select(e => e.Entity.TenantId).Distinct().ToList();
+        var settingsByTenant = await Settings.IgnoreQueryFilters()
+            .Where(s => tenantIds.Contains(s.TenantId))
+            .ToDictionaryAsync(s => s.TenantId, ct);
+
+        foreach (var entry in gated)
+        {
+            if (settingsByTenant.TryGetValue(entry.Entity.TenantId, out var settings) && !NotificationGates[entry.Entity.Category](settings))
+                entry.State = EntityState.Detached;
+        }
+    }
+
     public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
     {
         StampTenantIds();
         var affectedTenantIds = CollectRealtimeAffectedTenantIds();
+        await SuppressDisabledNotificationsAsync(cancellationToken);
+        var newNotifications = CollectNewNotifications();
         var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
         // Fire-and-forget: the save already succeeded, a slow/failed push must never make the
         // caller's request slower or fail because of it (see RealtimeNotifier).
         if (affectedTenantIds.Count > 0)
             _ = realtime.NotifyOrdersChangedAsync(affectedTenantIds);
+        // Every AppNotification create path (OrderBuildingService's order-placed/pending-
+        // confirmation/ready-to-serve, plus NotificationsController's manual POST) gets a push
+        // for free from this single hook — no call site has to remember to fire one itself.
+        // IPushNotificationSender opens its own DbContext scope (see its own comment), so this
+        // can't reuse `this` — it may already be disposed by the time the fire-and-forget task
+        // actually runs.
+        // CancellationToken.None, not the request's token: this keeps running after the
+        // request scope (and its RequestAborted token) is gone, same as the realtime notify above.
+        foreach (var n in newNotifications)
+            _ = pushSender.NotifyTenantAsync(n.TenantId, n.Category, n.Title, n.Body, n.ActionUrl, n.TargetUserId, CancellationToken.None);
         return result;
     }
 }

@@ -40,9 +40,15 @@ public record BillCouponRequest(string Code);
 
 public record BillGiftCardRequest(string Code);
 
+/// <summary>One tender in a split payment — e.g. part Cash, part Card.</summary>
+public record PaymentSplitRequest(string Method, decimal Amount);
+
 /// <summary>How the settled bill was paid — Cash / Card / UPI / Multiple. Optional; the
-/// legacy pay call with no body still works (payment method just stays unrecorded).</summary>
-public record PayRequest(string? PaymentMethod);
+/// legacy pay call with no body still works (payment method just stays unrecorded). Supply
+/// Splits instead of PaymentMethod to settle across more than one tender — amounts must sum
+/// to the order's Total (see OrdersController.Pay); PaymentMethod is ignored when Splits is
+/// given, and gets set to "Multiple" automatically once more than one tender is used.</summary>
+public record PayRequest(string? PaymentMethod, List<PaymentSplitRequest>? Splits = null);
 
 /// <summary>
 /// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData
@@ -80,6 +86,12 @@ public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal
 /// instead of by table, matching how a KOT chit works in a physical kitchen.</summary>
 public record FireBatchDto(int BatchNumber, string Status, DateTime FiredAt, string KotNumber);
 
+/// <summary>One settled tender — see Order.Payments.</summary>
+public record OrderPaymentDto(string Method, decimal Amount)
+{
+    public static OrderPaymentDto From(OrderPayment p) => new(p.Method, p.Amount);
+}
+
 public record OrderDto(
     int Id,
     string Number,
@@ -115,7 +127,8 @@ public record OrderDto(
     string? PaymentMethod,
     int CurrentFireBatch,
     bool PendingStaffConfirmation,
-    List<FireBatchDto> FireBatches)
+    List<FireBatchDto> FireBatches,
+    List<OrderPaymentDto> Payments)
 {
     public static OrderDto From(Order o) => new(
         o.Id,
@@ -156,7 +169,8 @@ public record OrderDto(
         o.PendingStaffConfirmation,
         o.FireBatches.OrderBy(b => b.BatchNumber)
             .Select(b => new FireBatchDto(b.BatchNumber, b.Status.ToString().ToUpperInvariant(), b.FiredAt, $"#{1000 + b.Id}"))
-            .ToList());
+            .ToList(),
+        o.Payments.Select(OrderPaymentDto.From).ToList());
 }
 
 public record SetStatusRequest(string Status);
@@ -244,6 +258,14 @@ public record StationDto(int Id, string Name, string Icon, int SortOrder, bool A
 public record CreateStationRequest(string Name, string? Icon = null);
 
 public record UpdateStationRequest(string? Name, string? Icon, int? SortOrder, bool? Active);
+
+// ---------- Menu Categories (default-station lookup) ----------
+
+public record CategoryDto(string Name, int? DefaultStationId, string? DefaultStationName, int ItemCount);
+
+public record SetCategoryDefaultStationRequest(int? StationId);
+
+public record ApplyCategoryStationRequest(int StationId);
 
 public record MenuItemImageDto(int Id, string DataUri, int SortOrder)
 {
@@ -380,7 +402,12 @@ public record UpdateSettingsRequest(
     bool? ReceiptShowGuestPhone = null,
     bool? ReceiptShowItemNotes = null,
     bool? ReceiptShowFooter = null,
-    string? GstNumber = null);
+    string? GstNumber = null,
+    bool? OrderPlacedAlertsEnabled = null,
+    bool? OrderPendingConfirmationAlertsEnabled = null,
+    bool? OrderReadyAlertsEnabled = null,
+    decimal? Latitude = null,
+    decimal? Longitude = null);
 
 // ---------- Order Note Suggestions ----------
 

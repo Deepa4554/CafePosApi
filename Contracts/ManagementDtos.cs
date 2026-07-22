@@ -21,6 +21,9 @@ public record NotificationDto(int Id, string Title, string Body, string Category
 }
 public record CreateNotificationRequest(string Title, string Body, NotificationCategory Category, NotificationChannel Channel = NotificationChannel.InApp, string? ActionUrl = null);
 
+public record RegisterDeviceTokenRequest(string Token, DevicePlatform Platform);
+public record UnregisterDeviceTokenRequest(string Token);
+
 // ---------- Approvals ----------
 public record ApprovalDto(int Id, string Type, int RequestedById, int AssignedToId, string Title, string Description, decimal? Amount, string Currency, string Status, int Level, DateTime CreatedAt, DateTime? ResolvedAt, string? Notes)
 {
@@ -38,9 +41,17 @@ public record AuditEntryDto(int Id, DateTime Timestamp, int? UserId, string User
 }
 
 // ---------- Staff ----------
-public record StaffDto(int Id, string Name, string Role, string? Email, string? Phone, string Status, DateTime JoinedAt, decimal? HourlyRate, int? BranchId, bool HasLogin, string? PhotoUrl)
+// Bank/Aadhaar/PAN are deliberately absent here — any authenticated role can call
+// GET /staff, so those live only behind StaffFinancialDetailsDto below.
+public record StaffDto(
+    int Id, string Name, string Role, string? Email, string? Phone, string Status, DateTime JoinedAt,
+    decimal? HourlyRate, int? BranchId, bool HasLogin, string? PhotoUrl,
+    string? Department, string? Designation, string SalaryType, decimal? BasicSalary)
 {
-    public static StaffDto From(StaffMember s) => new(s.Id, s.Name, s.Role, s.Email, s.Phone, s.Status.ToString().ToUpperInvariant(), s.JoinedAt, s.HourlyRate, s.BranchId, s.UserId is not null, s.PhotoUrl);
+    public static StaffDto From(StaffMember s) => new(
+        s.Id, s.Name, s.Role, s.Email, s.Phone, s.Status.ToString().ToUpperInvariant(), s.JoinedAt,
+        s.HourlyRate, s.BranchId, s.UserId is not null, s.PhotoUrl,
+        s.Department, s.Designation, s.SalaryType.ToString().ToUpperInvariant(), s.BasicSalary);
 }
 
 /// <summary>
@@ -49,13 +60,24 @@ public record StaffDto(int Id, string Name, string Role, string? Email, string? 
 /// three of Email/Password/LoginRole together to also provision a real login account
 /// for this tenant — Email becomes required in that case.
 /// </summary>
-public record CreateStaffRequest(string Name, string Role, string? Email, string? Phone, decimal? HourlyRate, int? BranchId, string? Password, AppRole? LoginRole);
+public record CreateStaffRequest(
+    string Name, string Role, string? Email, string? Phone, decimal? HourlyRate, int? BranchId, string? Password, AppRole? LoginRole,
+    string? Department = null, string? Designation = null, SalaryType SalaryType = SalaryType.Monthly, decimal? BasicSalary = null,
+    string? BankAccountNumber = null, string? BankIfsc = null, string? BankName = null, string? Aadhaar = null, string? Pan = null);
 public record UpdateStaffStatusRequest(StaffStatus Status);
 
 /// <summary>Partial update for the Staff Profile edit flow — only non-null fields are
 /// applied, matching MenuController.Update's pattern.</summary>
-public record UpdateStaffRequest(string? Name, string? Role, string? Email, string? Phone, decimal? HourlyRate, int? BranchId, string? PhotoUrl);
+public record UpdateStaffRequest(
+    string? Name, string? Role, string? Email, string? Phone, decimal? HourlyRate, int? BranchId, string? PhotoUrl,
+    string? Department = null, string? Designation = null, SalaryType? SalaryType = null, decimal? BasicSalary = null,
+    string? BankAccountNumber = null, string? BankIfsc = null, string? BankName = null, string? Aadhaar = null, string? Pan = null);
 public record ResetStaffPasswordRequest(string NewPassword);
+
+/// <summary>Masked by default (e.g. "XXXX XXXX 1234") — StaffController.GetFinancialDetails
+/// only returns unmasked values when called with ?reveal=true, which also writes an audit
+/// entry. Null fields mean "not set", not "masked".</summary>
+public record StaffFinancialDetailsDto(int StaffId, string? BankAccountNumber, string? BankIfsc, string? BankName, string? Aadhaar, string? Pan, bool Revealed);
 
 // ---------- Staff screen access ----------
 public record StaffScreenAccessDto(int StaffId, string AccessMode, List<string> AllowedScreens)
@@ -64,6 +86,13 @@ public record StaffScreenAccessDto(int StaffId, string AccessMode, List<string> 
         new(staffId, user.AccessMode.ToString(), user.AllowedScreens ?? []);
 }
 public record UpdateStaffScreenAccessRequest(StaffAccessMode AccessMode, List<string>? AllowedScreens);
+
+// ---------- Staff kitchen assignment (KDS station pinning) ----------
+public record StaffKitchenAssignmentDto(int StaffId, int? AssignedStationId)
+{
+    public static StaffKitchenAssignmentDto From(int staffId, AppUser user) => new(staffId, user.AssignedStationId);
+}
+public record UpdateStaffKitchenAssignmentRequest(int? AssignedStationId);
 
 public record ShiftDto(int Id, int StaffId, DateTime StartsAt, DateTime EndsAt, string? Notes)
 {
@@ -100,8 +129,6 @@ public record CafeExpenseDto(int Id, decimal Amount, string Category, string Pur
 public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt);
 public record CategoryTotalDto(string Category, decimal Total);
 public record CafeExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth, List<CategoryTotalDto> ByCategoryThisMonth, List<CafeExpenseDto> Recent);
-
-public record PayrollLineDto(int StaffId, string StaffName, decimal HourlyRate, double HoursWorked, decimal GrossPay);
 
 // ---------- Branches ----------
 public record BranchDto(int Id, string Name, string Address, bool IsActive)

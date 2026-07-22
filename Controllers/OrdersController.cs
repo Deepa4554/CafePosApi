@@ -42,7 +42,7 @@ public class OrdersController(
         // confirm order?" the moment a guest submits one — see OrdersController.ConfirmGuestOrder.
         [FromQuery] bool? pendingConfirmation = null)
     {
-        var query = db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).AsQueryable();
+        var query = db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
         // an order stays active (visible on KDS, counted as in-progress) until it's
         // BOTH paid AND served. Paying early must not make it vanish from the
@@ -66,7 +66,7 @@ public class OrdersController(
     [HttpGet("{id:int}")]
     public async Task<ActionResult<OrderDto>> Get(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         return order is null ? NotFound() : OrderDto.From(order);
     }
 
@@ -243,9 +243,10 @@ public class OrdersController(
     [HttpPatch("{id:int}/items/{itemId:int}/advance-units")]
     public async Task<ActionResult<OrderDto>> AdvanceUnitsEndpoint(int id, int itemId, AdvanceUnitsRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
-        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        // Serving progress is independent of payment — a QSR counter may collect payment
+        // well before anything's cooked/served (see OrdersController.Pay).
         var item = order.Items.FirstOrDefault(i => i.Id == itemId);
         if (item is null) return NotFound();
         if (item.FireBatch == 0) throw new ApiValidationException("Item hasn't been fired to the kitchen yet.");
@@ -267,9 +268,9 @@ public class OrdersController(
     [HttpPatch("{id:int}/advance/{batchNumber:int}")]
     public async Task<ActionResult<OrderDto>> Advance(int id, int batchNumber)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
-        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        // Serving progress is independent of payment — see AdvanceUnitsEndpoint above.
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
         if (batch is null) return NotFound();
 
@@ -305,9 +306,9 @@ public class OrdersController(
     [HttpPatch("{id:int}/items/{itemId:int}/serve")]
     public async Task<ActionResult<OrderDto>> ServeItem(int id, int itemId)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
-        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        // Serving progress is independent of payment — see AdvanceUnitsEndpoint above.
         var item = order.Items.FirstOrDefault(i => i.Id == itemId);
         if (item is null) return NotFound();
         if (item.FireBatch == 0) throw new ApiValidationException("Item hasn't been fired to the kitchen yet.");
@@ -325,9 +326,9 @@ public class OrdersController(
     [HttpPatch("{id:int}/serve-all")]
     public async Task<ActionResult<OrderDto>> ServeAll(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
-        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+        // Serving progress is independent of payment — see AdvanceUnitsEndpoint above.
 
         var touchedBatches = new HashSet<int>();
         foreach (var item in order.Items.Where(i => i.FireBatch != 0 && !i.Voided))
@@ -361,9 +362,9 @@ public class OrdersController(
             // Manual allocation — exact lines + quantities the chef picked.
             foreach (var alloc in req.Allocations)
             {
-                var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == alloc.OrderId);
+                var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == alloc.OrderId);
                 var item = order?.Items.FirstOrDefault(i => i.Id == alloc.ItemId);
-                if (order is null || item is null || order.Paid) continue;
+                if (order is null || item is null) continue;
                 AdvanceUnits(item, fromStage, alloc.Qty);
                 orderBuilder.RecomputeBatchStatus(db, order, item.FireBatch);
                 OrderBuildingService.RecomputeOrderStatus(order);
@@ -376,8 +377,8 @@ public class OrdersController(
             var remaining = req.Qty ?? 0;
             if (remaining <= 0) throw new ApiValidationException("Enter a quantity or pick specific KOTs.");
             var candidates = await db.Orders
-                .Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches)
-                .Where(o => !o.Paid && o.Items.Any(i => i.MenuItemId == req.MenuItemId && i.FireBatch > 0))
+                .Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments)
+                .Where(o => o.Items.Any(i => i.MenuItemId == req.MenuItemId && i.FireBatch > 0))
                 .ToListAsync();
             // Oldest fire batch first (FIFO), then order id for a stable tie-break.
             var lines = candidates
@@ -400,7 +401,7 @@ public class OrdersController(
 
         await db.SaveChangesAsync();
         // Return just the affected orders so the client can patch its cache.
-        var affected = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches)
+        var affected = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments)
             .Where(o => touchedOrderIds.Contains(o.Id)).ToListAsync();
         return affected.Select(OrderDto.From).ToList();
     }
@@ -413,7 +414,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/status")]
     public async Task<ActionResult<OrderDto>> SetStatus(int id, SetStatusRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
 
         if (!Enum.TryParse<OrderStatus>(req.Status, ignoreCase: true, out var status))
@@ -479,7 +480,7 @@ public class OrdersController(
     [HttpPost("{id:int}/fire")]
     public async Task<ActionResult<OrderDto>> Fire(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         try
@@ -506,7 +507,7 @@ public class OrdersController(
     [HttpPost("{id:int}/items")]
     public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
         if (req.Qty <= 0) throw new ApiValidationException("Quantity must be a positive number.");
@@ -549,7 +550,7 @@ public class OrdersController(
     [HttpDelete("{id:int}/items/{itemId:int}")]
     public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId, [FromQuery] string? reason = null)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
 
@@ -587,7 +588,7 @@ public class OrdersController(
     [HttpPost("{id:int}/confirm")]
     public async Task<ActionResult<OrderDto>> ConfirmGuestOrder(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (!order.PendingStaffConfirmation) throw new ApiConflictException("This order isn't awaiting confirmation.");
         if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
@@ -611,7 +612,7 @@ public class OrdersController(
     [HttpPost("{id:int}/cancel")]
     public async Task<ActionResult<OrderDto>> Cancel(int id, CancelOrderRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot cancel a paid order — use Refund instead.");
         if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
@@ -649,7 +650,7 @@ public class OrdersController(
     [HttpPost("{id:int}/batches/{batchNumber:int}/cancel")]
     public async Task<ActionResult<OrderDto>> CancelBatch(int id, int batchNumber, CancelOrderRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot cancel a KOT on a paid order — use Refund instead.");
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
@@ -728,12 +729,15 @@ public class OrdersController(
     }
 
     /// <summary>Manager-only markdown applied at the billing stage (order must be Served,
-    /// not yet Paid). Kept as its own field, separate from the order-time DiscountAmount.</summary>
+    /// not yet Paid). Kept as its own field, separate from the order-time DiscountAmount.
+    /// Above ApprovalThresholds.DiscountAmount, a Manager (not the Owner — see Refund's
+    /// comment for why) can't apply it directly: it goes to a pending ApprovalRequest and
+    /// only actually lands on the order once the Owner approves it.</summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPatch("{id:int}/bill-discount")]
     public async Task<ActionResult<OrderDto>> ApplyBillDiscount(int id, BillDiscountRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot discount a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("A bill discount can only be applied once the order has been served.");
@@ -741,6 +745,21 @@ public class OrdersController(
 
         var amount = req.Amount ?? Math.Round(order.Subtotal * (req.Pct ?? 0) / 100, 2);
         if (amount < 0) throw new ApiValidationException("Discount cannot be negative.");
+
+        if (!User.IsInRole(nameof(AppRole.Owner)) && amount > ApprovalThresholds.DiscountAmount)
+        {
+            db.Approvals.Add(new ApprovalRequest
+            {
+                Type = ApprovalType.Discount,
+                RequestedById = CurrentUserId() ?? 0,
+                Title = $"Bill discount — Order #{order.Id}",
+                Description = $"{amount:C} discount on order {order.Id} (subtotal {order.Subtotal:C}).",
+                Amount = amount,
+                LinkedEntityId = order.Id,
+            });
+            await db.SaveChangesAsync();
+            return Accepted(new { pendingApproval = true, message = $"Discount of {amount:C} needs Owner approval (above the {ApprovalThresholds.DiscountAmount:C} auto-approve limit) — sent to Approvals." });
+        }
 
         order.BillDiscountAmount = amount;
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
@@ -755,7 +774,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-coupon")]
     public async Task<ActionResult<OrderDto>> ApplyBillCoupon(int id, BillCouponRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a coupon to a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("Coupons are applied at billing time, once the order has been served.");
@@ -786,7 +805,7 @@ public class OrdersController(
     [HttpPatch("{id:int}/bill-giftcard")]
     public async Task<ActionResult<OrderDto>> ApplyBillGiftCard(int id, BillGiftCardRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a gift card to a paid order.");
         if (order.Status != OrderStatus.Served) throw new ApiConflictException("Gift cards are applied at billing time, once the order has been served.");
@@ -821,21 +840,50 @@ public class OrdersController(
         User.IsInRole(nameof(AppRole.Owner)) || User.IsInRole(nameof(AppRole.Manager));
 
     /// <summary>
-    /// Marks the bill paid. Requires the order to be Served first — payment can never happen
-    /// before the customer has been served (a core rule of the ordering→billing separation).
+    /// Marks the bill paid. Payment can happen at any point in the order's lifecycle —
+    /// before, during, or after serving (e.g. a QSR counter that collects payment up front
+    /// and serves/bills around it) — this is intentionally NOT gated on OrderStatus.
     /// Does NOT force Served on its own; a table frees up only once it's BOTH paid AND served
-    /// (see TablesController/PublicController's occupancy check).
+    /// (see TablesController/PublicController's occupancy check, and the activeOnly filter
+    /// in List() above).
     /// </summary>
+    private static readonly HashSet<string> ValidPaymentMethods =
+        new(StringComparer.OrdinalIgnoreCase) { "Cash", "Card", "UPI" };
+
     [HttpPatch("{id:int}/pay")]
     public async Task<ActionResult<OrderDto>> Pay(int id, PayRequest? req = null)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
+        if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
-        if (order.Status != OrderStatus.Served) throw new ApiValidationException("Order must be served before it can be marked paid.");
+
+        if (req?.Splits is { Count: > 0 } splits)
+        {
+            foreach (var split in splits)
+            {
+                if (!ValidPaymentMethods.Contains(split.Method))
+                    throw new ApiValidationException($"'{split.Method}' isn't a valid payment method.");
+                if (split.Amount <= 0)
+                    throw new ApiValidationException("Each split amount must be greater than zero.");
+            }
+            var splitTotal = splits.Sum(s => s.Amount);
+            if (Math.Abs(splitTotal - order.Total) > 0.01m)
+                throw new ApiValidationException($"Split amounts (₹{splitTotal:0.00}) must add up to the bill total (₹{order.Total:0.00}).");
+
+            order.PaymentMethod = splits.Count > 1 ? "Multiple" : splits[0].Method.Trim();
+            foreach (var split in splits)
+                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = split.Method.Trim(), Amount = split.Amount });
+        }
+        else
+        {
+            var method = string.IsNullOrWhiteSpace(req?.PaymentMethod) ? null : req.PaymentMethod.Trim();
+            order.PaymentMethod = method;
+            if (method is not null)
+                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = method, Amount = order.Total });
+        }
 
         order.Paid = true;
-        order.PaymentMethod = string.IsNullOrWhiteSpace(req?.PaymentMethod) ? null : req.PaymentMethod.Trim();
 
         // Guest-session settle hook (doc Section 5.1): the exact instant a table's bill
         // is settled, close its GuestSession too — this is what makes the old phone's
@@ -856,12 +904,15 @@ public class OrdersController(
 
     /// <summary>Full or partial refund — financially sensitive, so unlike most of this
     /// controller it's explicitly restricted rather than relying on the auth fallback
-    /// policy (any authenticated user) that everything else here uses.</summary>
+    /// policy (any authenticated user) that everything else here uses. Above
+    /// ApprovalThresholds.RefundAmount, a Manager (never the Owner — see below) can't
+    /// refund directly: this creates a pending ApprovalRequest instead and the actual
+    /// refund only happens once the Owner approves it (ApprovalsController.Approve).</summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("{id:int}/refund")]
     public async Task<ActionResult<OrderDto>> Refund(int id, RefundOrderRequest req)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (!order.Paid) throw new ApiValidationException("Only paid orders can be refunded.");
         if (order.Refunded) throw new ApiConflictException("Order has already been refunded.");
@@ -869,6 +920,23 @@ public class OrdersController(
         var amount = req.Amount ?? order.Total;
         if (amount <= 0 || amount > order.Total)
             throw new ApiValidationException("Refund amount must be between 0 and the order total.");
+
+        // Owner bypasses always — they ARE the approver. A Manager over threshold needs
+        // Owner sign-off instead of refunding straight away.
+        if (!User.IsInRole(nameof(AppRole.Owner)) && amount > ApprovalThresholds.RefundAmount)
+        {
+            db.Approvals.Add(new ApprovalRequest
+            {
+                Type = ApprovalType.Refund,
+                RequestedById = CurrentUserId() ?? 0,
+                Title = $"Refund — Order #{order.Id}",
+                Description = req.Reason ?? "No reason given.",
+                Amount = amount,
+                LinkedEntityId = order.Id,
+            });
+            await db.SaveChangesAsync();
+            return Accepted(new { pendingApproval = true, message = $"Refund of {amount:C} needs Owner approval (above the {ApprovalThresholds.RefundAmount:C} auto-approve limit) — sent to Approvals." });
+        }
 
         order.Refunded = true;
         order.RefundedAmount = amount;

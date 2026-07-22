@@ -25,7 +25,7 @@ public enum NotificationChannel { Push, Email, Sms, WhatsApp, InApp }
 // OrderPendingConfirmation is deliberately its own category (not OrderPlaced) — kitchen
 // roles (Chef/KitchenStaff) are filtered to only NotificationCategory.OrderPlaced
 // (NotificationsController.List), and they can't act on a confirmation prompt anyway.
-public enum NotificationCategory { Order, OrderPlaced, OrderPendingConfirmation, Inventory, Billing, Staff, System, Marketing, AiInsight }
+public enum NotificationCategory { Order, OrderPlaced, OrderPendingConfirmation, Inventory, Billing, Staff, System, Marketing, AiInsight, Task }
 public enum DeliveryStatus { Pending, Sent, Delivered, Failed, Retrying }
 
 public class AppNotification : ITenantScoped
@@ -42,6 +42,12 @@ public class AppNotification : ITenantScoped
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? ScheduledAt { get; set; }
     public string? ActionUrl { get; set; }
+    /// <summary>Null = tenant-wide (existing behavior: every non-kitchen user for most
+    /// categories, see FcmPushNotificationSender/NotificationsController.List). Set = this
+    /// notification is meant for exactly one AppUser (e.g. "task assigned to you") — it's
+    /// hidden from every other user's Notification Center and only that user's devices get
+    /// the push, regardless of category.</summary>
+    public int? TargetUserId { get; set; }
 }
 
 // ---------- Approvals ----------
@@ -66,6 +72,14 @@ public class ApprovalRequest : ITenantScoped
     public DateTime? ResolvedAt { get; set; }
     public int? ResolvedById { get; set; }
     public string? Notes { get; set; }
+    /// <summary>Id of the entity this approval acts ON, for types where one already exists
+    /// at request time — Order.Id for Refund/Discount, LeaveRequest.Id for Leave. Null for
+    /// Expense, which doesn't exist yet until approved (see PayloadJson).</summary>
+    public int? LinkedEntityId { get; set; }
+    /// <summary>Serialized CreateCafeExpenseRequest for Expense-type requests — nothing to
+    /// link to yet at request time, so the fields needed to actually create the CafeExpense
+    /// on approval are carried here instead. Unused by every other type.</summary>
+    public string? PayloadJson { get; set; }
 }
 
 // ---------- Audit Log ----------
@@ -82,7 +96,7 @@ public enum AuditAction
     ApprovalGranted, ApprovalDenied,
 }
 
-public enum AuditResource { Order, Customer, Staff, Inventory, Menu, Invoice, Subscription, Auth, Settings, Branch, Table }
+public enum AuditResource { Order, Customer, Staff, Inventory, Menu, Invoice, Subscription, Auth, Settings, Branch, Table, Attendance, Payroll, Loan }
 public enum AuditSeverity { Low, Medium, High, Critical }
 
 public class AuditLogEntry : ITenantScoped
@@ -131,6 +145,8 @@ public class ApiFailureLog
 
 public enum StaffStatus { Active, Suspended, OnLeave, Terminated }
 
+public enum SalaryType { Monthly, Daily, Hourly }
+
 public class StaffMember : ITenantScoped
 {
     public int Id { get; set; }
@@ -149,6 +165,23 @@ public class StaffMember : ITenantScoped
     /// image itself (for a picked photo) is stored inline as a base64 data URI, same
     /// pattern as AppUser.ProfilePhoto/Customer.ProfilePhotoUrl.</summary>
     public string? PhotoUrl { get; set; }
+
+    // ---------- HR / Payroll fields ----------
+    // Free text, matching Role's existing precedent — a lookup table buys nothing at
+    // single-cafe scale (no department budgets/hierarchy in scope).
+    public string? Department { get; set; }
+    public string? Designation { get; set; }
+    public SalaryType SalaryType { get; set; } = SalaryType.Monthly;
+    public decimal? BasicSalary { get; set; }
+    /// <summary>Bank/Aadhaar/PAN are deliberately excluded from StaffDto (any
+    /// authenticated role can list staff) — only readable via
+    /// StaffController.GetFinancialDetails, which masks by default and audit-logs a
+    /// full reveal.</summary>
+    public string? BankAccountNumber { get; set; }
+    public string? BankIfsc { get; set; }
+    public string? BankName { get; set; }
+    public string? Aadhaar { get; set; }
+    public string? Pan { get; set; }
 }
 
 public class Shift : ITenantScoped

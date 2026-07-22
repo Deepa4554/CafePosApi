@@ -69,6 +69,22 @@ public class Station : ITenantScoped
     public bool Active { get; set; } = true;
 }
 
+/// <summary>A per-tenant default station for a MenuItem.Category value — Category itself
+/// stays a free-text string on MenuItem (see below), this is just a lookup so a cafe can
+/// set "everything in Beverages defaults to the Bar station" once instead of tagging every
+/// item individually. Rows are created lazily (only once an Owner sets a default for that
+/// category name, see CategoriesController) — a category with items but no default set
+/// simply has no row here yet.</summary>
+public class MenuCategory : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Name { get; set; }
+    public int? DefaultStationId { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Station? DefaultStation { get; set; }
+}
+
 /// <summary>Extra photos for a menu item beyond its single cover Image (e.g. plating shot,
 /// ingredients close-up) — a separate table rather than a JSON array column so each photo
 /// (a multi-MB base64 data URI, same storage approach as every other image in this app)
@@ -262,6 +278,24 @@ public class Order : ITenantScoped
     /// Order.Status is a computed rollup of these (see OrdersController.RecomputeOrderStatus),
     /// not set directly, except by the legacy manual-override SetStatus endpoint.</summary>
     public List<OrderFireBatch> FireBatches { get; set; } = [];
+    /// <summary>One row per tender used to settle this bill — a single-method payment still
+    /// gets exactly one row here, a split payment gets one row per method. Order.PaymentMethod
+    /// stays a quick-glance summary ("Cash" or "Multiple"); this is the real breakdown, set
+    /// once at Pay time and never touched again (see OrdersController.Pay).</summary>
+    public List<OrderPayment> Payments { get; set; } = [];
+}
+
+/// <summary>A single tender applied toward settling a bill — see Order.Payments. Recorded
+/// once, at Pay time; never edited or added to afterward (a correction means a refund + a
+/// fresh Pay call, not mutating history).</summary>
+public class OrderPayment : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int OrderId { get; set; }
+    public required string Method { get; set; } // Cash / Card / UPI
+    public decimal Amount { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
 public class OrderItem : ITenantScoped
@@ -378,6 +412,11 @@ public class InventoryItem : ITenantScoped
     public double MinStock { get; set; }
     /// <summary>Threshold that triggers a low-stock alert: Current &lt;= ReorderLevel.</summary>
     public double ReorderLevel { get; set; }
+    /// <summary>Set once a low-stock AppNotification has fired for this item (Current
+    /// crossed at-or-below ReorderLevel) so repeat sales while it's still low don't spam a
+    /// new alert on every order — see InventoryBatchService.ConsumeFifoAsync/CreateBatch.
+    /// Cleared automatically once restocked back above ReorderLevel.</summary>
+    public bool LowStockNotified { get; set; }
     /// <summary>Deactivated (IsActive=false) rather than deleted once referenced by a Recipe,
     /// InventoryTransaction, or InventoryBatch — hard-deleting would leave those pointing at a
     /// dead FK (a recipe silently stops deducting that ingredient with no alert, and the
@@ -419,9 +458,19 @@ public class CafeSettings : ITenantScoped
     public bool TwoFactorEnabled { get; set; }
     public bool TerminalPasscodeRequired { get; set; } = true;
 
-    // Notification Preferences
+    // Notification Preferences — each gates one real AppNotification category end-to-end
+    // (see CafePosDbContext.SaveChangesAsync's NotificationGates): turning one off means
+    // that category's AppNotification is silently dropped before it's ever saved or pushed,
+    // not just hidden client-side.
     public bool InventoryAlertsEnabled { get; set; } = true;
     public bool ShiftReportsEnabled { get; set; } = true;
+    /// <summary>Kitchen "new order"/"items fired" alert — see OrderBuildingService.FireUnfiredItemsAsync.</summary>
+    public bool OrderPlacedAlertsEnabled { get; set; } = true;
+    /// <summary>Only fires anything while RequireStaffOrderConfirmation is also on — see
+    /// OrderBuildingService.MarkPendingConfirmation.</summary>
+    public bool OrderPendingConfirmationAlertsEnabled { get; set; } = true;
+    /// <summary>"Order ready to serve" alert — see OrderBuildingService.RecomputeBatchStatus.</summary>
+    public bool OrderReadyAlertsEnabled { get; set; } = true;
 
     // QR Ordering
     /// <summary>When on, a guest QR session's first fire (Place Order) doesn't reach the
@@ -461,6 +510,21 @@ public class CafeSettings : ITenantScoped
     /// <summary>GST/tax registration number line — blank means the cafe hasn't set one,
     /// same as ReceiptShowGstNumber being off either way (no number to show).</summary>
     public string? GstNumber { get; set; }
+
+    // Attendance tunables — used by AttendanceController to derive Late/HalfDay/
+    // Overtime status from raw punch times.
+    public int LateGraceMinutes { get; set; } = 10;
+    public int HalfDayThresholdHours { get; set; } = 4;
+    /// <summary>Used only when a day has no Shift scheduled, so overtime/half-day can
+    /// still be computed against something.</summary>
+    public int StandardShiftHours { get; set; } = 8;
+
+    /// <summary>The cafe's own registered coordinates, captured once by an Owner/Manager
+    /// tapping "Use Current Location" in Cafe Profile while standing on-site. Null until
+    /// set — AttendanceController skips the punch geofence check entirely when this is
+    /// null rather than blocking every punch before an Owner has configured it.</summary>
+    public decimal? Latitude { get; set; }
+    public decimal? Longitude { get; set; }
 
     /// <summary>
     /// The owning Tenant's Slug, populated by SettingsController (not a real column —

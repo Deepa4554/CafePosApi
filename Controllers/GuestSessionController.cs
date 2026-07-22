@@ -42,7 +42,7 @@ public class GuestSessionController(
 
     private async Task<Order?> LoadOrderAsync(int? orderId) =>
         orderId is int oid
-            ? await db.Orders.IgnoreQueryFilters().Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).FirstOrDefaultAsync(o => o.Id == oid)
+            ? await db.Orders.IgnoreQueryFilters().Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == oid)
             : null;
 
     /// <summary>Entry point — implements the doc's 5-CASE decision tree (Section 3). No

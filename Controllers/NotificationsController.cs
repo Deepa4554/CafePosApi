@@ -14,22 +14,37 @@ public class NotificationsController(CafePosDbContext db) : ControllerBase
     [HttpGet]
     public async Task<object> List([FromQuery] bool includeArchived = false)
     {
+        var currentUserId = CurrentUserId();
+
         var query = db.Notifications.AsQueryable();
         if (!includeArchived) query = query.Where(n => !n.IsArchived);
 
         var unreadQuery = db.Notifications.Where(n => !n.IsRead && !n.IsArchived);
 
+        // A targeted notification (TargetUserId set — e.g. "task assigned to you") is only
+        // ever this one user's business, regardless of category or kitchen-role filtering
+        // below; every OTHER notification keeps today's tenant-wide visibility.
+        query = query.Where(n => n.TargetUserId == null || n.TargetUserId == currentUserId);
+        unreadQuery = unreadQuery.Where(n => n.TargetUserId == null || n.TargetUserId == currentUserId);
+
         // Kitchen-facing roles only need to know a new order came in — not billing,
         // inventory, staff, or any other category meant for front-of-house/management.
         if (User.IsInRole(nameof(AppRole.Chef)) || User.IsInRole(nameof(AppRole.KitchenStaff)))
         {
-            query = query.Where(n => n.Category == NotificationCategory.OrderPlaced);
-            unreadQuery = unreadQuery.Where(n => n.Category == NotificationCategory.OrderPlaced);
+            query = query.Where(n => n.Category == NotificationCategory.OrderPlaced || n.TargetUserId == currentUserId);
+            unreadQuery = unreadQuery.Where(n => n.Category == NotificationCategory.OrderPlaced || n.TargetUserId == currentUserId);
         }
 
         var items = await query.OrderByDescending(n => n.CreatedAt).ToListAsync();
         var unreadCount = await unreadQuery.CountAsync();
         return new { items = items.Select(NotificationDto.From), unreadCount };
+    }
+
+    private int? CurrentUserId()
+    {
+        var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+            ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        return idClaim is not null && int.TryParse(idClaim, out var id) ? id : null;
     }
 
     [HttpPost]

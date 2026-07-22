@@ -18,7 +18,7 @@ namespace CafePOS.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/staff")]
-public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher, IImageStorageService imageStorage, IAuditService audit) : ControllerBase
+public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher, IImageStorageService imageStorage, IAuditService audit, IRealtimeNotifier realtime) : ControllerBase
 {
     [HttpGet]
     public async Task<IEnumerable<StaffDto>> List([FromQuery] int? branchId)
@@ -104,6 +104,15 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             Phone = req.Phone,
             HourlyRate = req.HourlyRate,
             BranchId = req.BranchId,
+            Department = req.Department,
+            Designation = req.Designation,
+            SalaryType = req.SalaryType,
+            BasicSalary = req.BasicSalary,
+            BankAccountNumber = req.BankAccountNumber,
+            BankIfsc = req.BankIfsc,
+            BankName = req.BankName,
+            Aadhaar = req.Aadhaar,
+            Pan = req.Pan,
         };
         db.Staff.Add(staff);
         await db.SaveChangesAsync();
@@ -138,10 +147,47 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             staff.BranchId = req.BranchId;
         }
         if (req.PhotoUrl is not null) staff.PhotoUrl = await imageStorage.ResolveAsync("staff", req.PhotoUrl);
+        if (req.Department is not null) staff.Department = req.Department.Trim();
+        if (req.Designation is not null) staff.Designation = req.Designation.Trim();
+        if (req.SalaryType is not null) staff.SalaryType = req.SalaryType.Value;
+        if (req.BasicSalary is not null) staff.BasicSalary = req.BasicSalary;
+        if (req.BankAccountNumber is not null) staff.BankAccountNumber = req.BankAccountNumber.Trim();
+        if (req.BankIfsc is not null) staff.BankIfsc = req.BankIfsc.Trim();
+        if (req.BankName is not null) staff.BankName = req.BankName.Trim();
+        if (req.Aadhaar is not null) staff.Aadhaar = req.Aadhaar.Trim();
+        if (req.Pan is not null) staff.Pan = req.Pan.Trim();
 
         await db.SaveChangesAsync();
         return StaffDto.From(staff);
     }
+
+    /// <summary>Masked by default (e.g. "XXXX XXXX 1234") — Aadhaar/PAN/bank details never
+    /// appear in StaffDto since GET /staff is reachable by any authenticated role.
+    /// ?reveal=true returns full values and writes an audit entry, since this is the one
+    /// place raw Aadhaar/PAN ever leaves the DB.</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpGet("{id:int}/financial-details")]
+    public async Task<ActionResult<StaffFinancialDetailsDto>> GetFinancialDetails(int id, [FromQuery] bool reveal = false)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+
+        if (!reveal)
+        {
+            return new StaffFinancialDetailsDto(
+                staff.Id, Mask(staff.BankAccountNumber), staff.BankIfsc, staff.BankName, Mask(staff.Aadhaar), Mask(staff.Pan), false);
+        }
+
+        var actor = await CurrentUserAsync();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Staff, staff.Id.ToString(),
+            $"{actor.Name} viewed {staff.Name}'s financial details.", AuditSeverity.High, actor.Id, actor.Name);
+
+        return new StaffFinancialDetailsDto(staff.Id, staff.BankAccountNumber, staff.BankIfsc, staff.BankName, staff.Aadhaar, staff.Pan, true);
+    }
+
+    private static string? Mask(string? value) =>
+        string.IsNullOrEmpty(value) ? value : value.Length <= 4 ? new string('X', value.Length) : new string('X', value.Length - 4) + value[^4..];
 
     /// <summary>
     /// Lets an Owner/Manager set a staff member's app-login password directly, no email/OTP
@@ -226,7 +272,9 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// Owner gets an explicit error instead of a picker that quietly doesn't do what it
     /// showed. Switching back to Automatic clears any stored list, so a later plan
     /// downgrade can never leave a stale Plus-only key lying around. The staff member's own
-    /// device picks this up within seconds via its /auth/me poll — see useLiveAccessSync.
+    /// device picks this up within moments via an accessChanged SignalR push — see
+    /// useLiveAccessSync and RealtimeNotifier.NotifyAccessChangedAsync — falling back to
+    /// useLiveAccessSync's own safety-net poll if that device's socket is down.
     /// </summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPatch("{id:int}/screen-access")]
@@ -260,6 +308,9 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         }
         user.AccessMode = req.AccessMode;
         await db.SaveChangesAsync();
+        // Fire-and-forget, same as CafePosDbContext's ordersChanged push — a dropped push
+        // just leaves useLiveAccessSync's safety-net poll to catch up.
+        _ = realtime.NotifyAccessChangedAsync(user.TenantId, user.Id);
 
         var actor = await CurrentUserAsync();
         var summary = req.AccessMode == StaffAccessMode.Custom
@@ -268,6 +319,65 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         await audit.LogAsync(AuditAction.PermissionChange, AuditResource.Staff, staff.Id.ToString(), summary, AuditSeverity.Medium, actor.Id, actor.Name);
 
         return StaffScreenAccessDto.From(staff.Id, user);
+    }
+
+    // ---------- Kitchen assignment (KDS station pinning) ----------
+
+    /// <summary>Which kitchen station (if any) this staff member's login is pinned to —
+    /// see AppUser.AssignedStationId. 404s when this staff member has no app login, same
+    /// convention as GetScreenAccess above.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpGet("{id:int}/kitchen-assignment")]
+    public async Task<ActionResult<StaffKitchenAssignmentDto>> GetKitchenAssignment(int id)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        var user = await db.Users.FindAsync(staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        return StaffKitchenAssignmentDto.From(staff.Id, user);
+    }
+
+    /// <summary>
+    /// Pins (or clears) which single kitchen station's KOTs this login's KDS shows —
+    /// so a Chef/KitchenStaff login always lands on their own kitchen the moment they
+    /// open the app, on any device, with no manual station-tab switching. An Owner login
+    /// can't be pinned (always sees every kitchen, same rule as screen access above).
+    /// Clearing it (null) falls back to that device's own remembered station (see
+    /// kdsDeviceSettings on the client) instead of a server-side pin. Picks up on the
+    /// staff member's device within moments via the same /auth/me poll that carries
+    /// AccessMode — see UserDto.From.
+    /// </summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPatch("{id:int}/kitchen-assignment")]
+    public async Task<ActionResult<StaffKitchenAssignmentDto>> UpdateKitchenAssignment(int id, UpdateStaffKitchenAssignmentRequest req)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        var user = await db.Users.FindAsync(staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+        if (user.Role == AppRole.Owner) throw new ApiValidationException("An Owner login always sees every kitchen and can't be pinned to one.");
+
+        if (req.AssignedStationId is int stationId)
+        {
+            var stationExists = await db.Stations.AnyAsync(s => s.Id == stationId && s.Active);
+            if (!stationExists) throw new ApiValidationException("That kitchen station doesn't exist or is no longer active.");
+        }
+
+        user.AssignedStationId = req.AssignedStationId;
+        await db.SaveChangesAsync();
+
+        var actor = await CurrentUserAsync();
+        var summary = req.AssignedStationId is null
+            ? $"{actor.Name} unpinned {staff.Name}'s KDS from any single kitchen."
+            : $"{actor.Name} pinned {staff.Name}'s KDS to station #{req.AssignedStationId}.";
+        await audit.LogAsync(AuditAction.PermissionChange, AuditResource.Staff, staff.Id.ToString(), summary, AuditSeverity.Medium, actor.Id, actor.Name);
+
+        return StaffKitchenAssignmentDto.From(staff.Id, user);
     }
 
     // ---------- Shifts (Team Schedule / Edit Shift screens) ----------
@@ -494,20 +604,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         }).ToList();
     }
 
-    [Authorize(Policy = Policies.RequirePlus)]
-    [Authorize(Policy = Policies.OwnerOrManager)]
-    [HttpGet("payroll")]
-    public async Task<IEnumerable<PayrollLineDto>> Payroll([FromQuery] DateTime periodStart, [FromQuery] DateTime periodEnd)
-    {
-        var staff = await db.Staff.Where(s => s.HourlyRate != null).ToListAsync();
-        var shifts = await db.Shifts.Where(s => s.StartsAt >= periodStart && s.EndsAt <= periodEnd).ToListAsync();
-
-        return staff.Select(s =>
-        {
-            var hours = shifts.Where(sh => sh.StaffId == s.Id).Sum(sh => (sh.EndsAt - sh.StartsAt).TotalHours);
-            return new PayrollLineDto(s.Id, s.Name, s.HourlyRate!.Value, hours, (decimal)hours * s.HourlyRate.Value);
-        });
-    }
+    // Payroll is now its own PayrollController — see PayrollRun/PayrollLine.
 
     // ---------- Leave requests ----------
 
@@ -544,9 +641,31 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             Reason = req.Reason?.Trim(),
         };
         db.LeaveRequests.Add(leave);
+        await db.SaveChangesAsync(); // assigns leave.Id before the mirror below references it
+
+        // Mirrored into the unified Approvals inbox (ApprovalsController) so an Owner/Manager
+        // sees leave requests alongside Refund/Discount/Expense approvals in one place.
+        // LeaveRequest.Status stays the one source of truth for "is this staff member
+        // actually on leave" — Approve/Reject here and via ApprovalsController.Approve/
+        // Reject (Type == Leave) each update both records, in either direction.
+        var actor = await CurrentUserAsync();
+        db.Approvals.Add(new ApprovalRequest
+        {
+            Type = ApprovalType.Leave,
+            RequestedById = actor.Id,
+            Title = $"{req.Type} leave — {staff.Name}",
+            Description = $"{req.StartDate:MMM d} to {req.EndDate:MMM d}" + (string.IsNullOrWhiteSpace(req.Reason) ? "" : $" — {req.Reason.Trim()}"),
+            LinkedEntityId = leave.Id,
+        });
         await db.SaveChangesAsync();
+
         return CreatedAtAction(nameof(ListLeaveRequests), LeaveRequestDto.From(leave));
     }
+
+    /// <summary>Finds this leave request's mirrored ApprovalRequest (see CreateLeaveRequest),
+    /// if one exists — old leave requests from before this mirroring existed won't have one.</summary>
+    private Task<ApprovalRequest?> LinkedApprovalAsync(int leaveId) =>
+        db.Approvals.FirstOrDefaultAsync(a => a.Type == ApprovalType.Leave && a.LinkedEntityId == leaveId);
 
     /// <summary>Approving immediately puts the staff member on leave (see LeaveRequest's
     /// doc comment for why this is manual rather than date-triggered).</summary>
@@ -568,6 +687,14 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         var staff = await db.Staff.FindAsync(leave.StaffId);
         if (staff is not null) staff.Status = StaffStatus.OnLeave;
 
+        var linkedApproval = await LinkedApprovalAsync(leave.Id);
+        if (linkedApproval is not null)
+        {
+            linkedApproval.Status = ApprovalStatus.Approved;
+            linkedApproval.ResolvedAt = DateTime.UtcNow;
+            linkedApproval.ResolvedById = reviewer.Id;
+        }
+
         await db.SaveChangesAsync();
         return LeaveRequestDto.From(leave);
     }
@@ -587,6 +714,15 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         leave.ReviewedByName = reviewer.Name;
         leave.ReviewedAt = DateTime.UtcNow;
         if (!string.IsNullOrWhiteSpace(req.Note)) leave.Reason = $"{leave.Reason} (Rejected: {req.Note.Trim()})".Trim();
+
+        var linkedApproval = await LinkedApprovalAsync(leave.Id);
+        if (linkedApproval is not null)
+        {
+            linkedApproval.Status = ApprovalStatus.Rejected;
+            linkedApproval.ResolvedAt = DateTime.UtcNow;
+            linkedApproval.ResolvedById = reviewer.Id;
+            linkedApproval.Notes = req.Note;
+        }
 
         await db.SaveChangesAsync();
         return LeaveRequestDto.From(leave);

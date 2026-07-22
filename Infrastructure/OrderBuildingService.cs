@@ -266,6 +266,28 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     /// insert a fresh counter row at 1, or bump the existing one, in one round-trip.</summary>
     private static async Task<int> NextTokenNumberAsync(CafePosDbContext db, int tenantId, DateOnly date)
     {
+        // The UPSERT below is Postgres-only syntax (ON CONFLICT ... RETURNING), which
+        // Database.SqlQuery rejects outright against a non-relational provider — e.g. the
+        // in-memory database this API falls back to for local dev when no connection string
+        // is configured (see Program.cs). Non-relational only ever runs single-process, so
+        // the race the UPSERT guards against can't happen there — a plain read-modify-write
+        // is safe.
+        if (!db.Database.IsRelational())
+        {
+            var counter = await db.TokenCounters.FirstOrDefaultAsync(c => c.TenantId == tenantId && c.Date == date);
+            if (counter is null)
+            {
+                counter = new TokenCounter { TenantId = tenantId, Date = date, LastNumber = 1 };
+                db.TokenCounters.Add(counter);
+            }
+            else
+            {
+                counter.LastNumber += 1;
+            }
+            await db.SaveChangesAsync();
+            return counter.LastNumber;
+        }
+
         var result = await db.Database.SqlQuery<int>(
             $@"INSERT INTO ""TokenCounters"" (""TenantId"", ""Date"", ""LastNumber"")
                VALUES ({tenantId}, {date}, 1)

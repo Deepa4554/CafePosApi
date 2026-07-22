@@ -22,12 +22,13 @@ public record RefreshRequest(string? RefreshToken);
 public record LogoutRequest(string? RefreshToken);
 public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 
-public record UserDto(int Id, string Email, string? Phone, string Name, string Role, string? ProfilePhoto, int TenantId, bool IsPlatformAdmin, string AccessMode, List<string>? AllowedScreens)
+public record UserDto(int Id, string Email, string? Phone, string Name, string Role, string? ProfilePhoto, int TenantId, bool IsPlatformAdmin, string AccessMode, List<string>? AllowedScreens, int? AssignedStationId)
 {
     // AuthController.Me is polled every few seconds by the app (see useLiveAccessSync)
-    // so a staff member's screens update within seconds of an Owner changing them —
-    // AccessMode/AllowedScreens must ride along on every /auth/me response for that to work.
-    public static UserDto From(AppUser u) => new(u.Id, u.Email, u.Phone, u.Name, u.Role.ToString(), u.ProfilePhoto, u.TenantId, u.IsPlatformAdmin, u.AccessMode.ToString(), u.AllowedScreens);
+    // so a staff member's screens (and, likewise, KDS kitchen assignment) update within
+    // seconds of an Owner changing them — every one of these fields must ride along on
+    // every /auth/me response for that to work.
+    public static UserDto From(AppUser u) => new(u.Id, u.Email, u.Phone, u.Name, u.Role.ToString(), u.ProfilePhoto, u.TenantId, u.IsPlatformAdmin, u.AccessMode.ToString(), u.AllowedScreens, u.AssignedStationId);
 }
 
 public record AuthResponse(string AccessToken, string RefreshToken, UserDto User);

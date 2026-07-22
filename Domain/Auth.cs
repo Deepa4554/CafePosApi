@@ -63,6 +63,15 @@ public class AppUser
     /// ScreenCatalog (unknown keys, and keys above the tenant's current plan, are
     /// rejected) on every write — see StaffController.UpdateScreenAccess.</summary>
     public List<string>? AllowedScreens { get; set; }
+
+    /// <summary>Which kitchen station's KOTs this login is pinned to — set by an
+    /// Owner/Manager from the Staff Profile screen (see StaffController's
+    /// kitchen-assignment endpoints), not by the staff member themselves. Null means
+    /// "no fixed kitchen" (KDS falls back to this device's own remembered station, or
+    /// shows all). Owner logins ignore this entirely — an Owner always sees every
+    /// kitchen — same convention as AccessMode above. Not modeled as an EF navigation
+    /// (no FK constraint), same lightweight pattern as MenuItem.LinkedInventoryItemId.</summary>
+    public int? AssignedStationId { get; set; }
 }
 
 /// <summary>
@@ -84,4 +93,27 @@ public class RefreshTokenEntry
     public DateTime ExpiresAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? RevokedAt { get; set; }
+}
+
+public enum DevicePlatform { Android, iOS, Web }
+
+/// <summary>
+/// One row per (device, account) pairing an FCM registration token to the AppUser it should
+/// wake up — same "per-device, not per-user" shape as RefreshTokenEntry above, since the same
+/// login can be signed in on more than one device at once. Looked up by IPushNotificationSender
+/// whenever a new AppNotification is saved (see CafePosDbContext.SaveChangesAsync) to fan a push
+/// out to every device that account is signed into. Token is the natural key: FCM can rotate a
+/// token to a new value for the same physical device/app-install, and the same token can never
+/// legitimately belong to two accounts at once, so re-registering an already-known token just
+/// repoints it at whichever user is now logged in on that device instead of inserting a duplicate.
+/// </summary>
+public class DeviceToken : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int UserId { get; set; }
+    public required string Token { get; set; }
+    public DevicePlatform Platform { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime LastSeenAt { get; set; } = DateTime.UtcNow;
 }

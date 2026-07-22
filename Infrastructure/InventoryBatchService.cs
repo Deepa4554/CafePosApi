@@ -28,6 +28,11 @@ public static class InventoryBatchService
     {
         if (amount <= 0) return;
 
+        // Captured before any mutation below, so the low-stock check at the bottom only
+        // fires on the crossing itself (above → at-or-below), not on every subsequent
+        // deduction while it stays low — that's what LowStockNotified is for.
+        var wasAboveReorder = ingredient.Current > ingredient.ReorderLevel;
+
         var batches = await db.InventoryBatches
             .Where(b => b.InventoryItemId == ingredient.Id && b.Quantity > 0)
             .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
@@ -89,6 +94,24 @@ public static class InventoryBatchService
             }
             WriteRow(batch, remaining);
         }
+
+        // Fires once per crossing, regardless of what kind of deduction caused it (sale,
+        // waste, adjustment) — an Owner cares that stock ran low, not why. Gated centrally
+        // by Settings.InventoryAlertsEnabled in CafePosDbContext.SaveChangesAsync, so this
+        // can create the row unconditionally.
+        if (wasAboveReorder && ingredient.Current <= ingredient.ReorderLevel && !ingredient.LowStockNotified)
+        {
+            ingredient.LowStockNotified = true;
+            db.Notifications.Add(new AppNotification
+            {
+                TenantId = ingredient.TenantId,
+                Title = "Low stock",
+                Body = $"{ingredient.Name} is down to {ingredient.Current:0.##}{ingredient.Unit} (reorder at {ingredient.ReorderLevel:0.##}{ingredient.Unit}).",
+                Category = NotificationCategory.Inventory,
+                Channel = NotificationChannel.InApp,
+                ActionUrl = "/inventory",
+            });
+        }
     }
 
     /// <summary>Creates a new batch (purchase, or a positive stock-take/manual-adjustment
@@ -112,6 +135,10 @@ public static class InventoryBatchService
 
         var previous = ingredient.Current;
         ingredient.Current += quantity;
+        // Restocked back above the reorder line — let the next crossing (if stock drops
+        // low again later) raise a fresh alert instead of staying silent forever.
+        if (ingredient.LowStockNotified && ingredient.Current > ingredient.ReorderLevel)
+            ingredient.LowStockNotified = false;
         db.InventoryTransactions.Add(new InventoryTransaction
         {
             TenantId = ingredient.TenantId,
@@ -153,6 +180,8 @@ public static class InventoryBatchService
         var previous = ingredient.Current;
         batch.Quantity += amountBack;
         ingredient.Current += amountBack;
+        if (ingredient.LowStockNotified && ingredient.Current > ingredient.ReorderLevel)
+            ingredient.LowStockNotified = false;
 
         db.InventoryTransactions.Add(new InventoryTransaction
         {

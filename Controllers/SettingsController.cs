@@ -65,6 +65,9 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.TerminalPasscodeRequired is not null) settings.TerminalPasscodeRequired = req.TerminalPasscodeRequired.Value;
         if (req.InventoryAlertsEnabled is not null) settings.InventoryAlertsEnabled = req.InventoryAlertsEnabled.Value;
         if (req.ShiftReportsEnabled is not null) settings.ShiftReportsEnabled = req.ShiftReportsEnabled.Value;
+        if (req.OrderPlacedAlertsEnabled is not null) settings.OrderPlacedAlertsEnabled = req.OrderPlacedAlertsEnabled.Value;
+        if (req.OrderPendingConfirmationAlertsEnabled is not null) settings.OrderPendingConfirmationAlertsEnabled = req.OrderPendingConfirmationAlertsEnabled.Value;
+        if (req.OrderReadyAlertsEnabled is not null) settings.OrderReadyAlertsEnabled = req.OrderReadyAlertsEnabled.Value;
         if (req.RequireStaffOrderConfirmation is not null) settings.RequireStaffOrderConfirmation = req.RequireStaffOrderConfirmation.Value;
         if (req.Phone is not null) settings.Phone = req.Phone.Trim();
         if (req.Address is not null) settings.Address = req.Address.Trim();
@@ -89,6 +92,8 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.ReceiptShowItemNotes is not null) settings.ReceiptShowItemNotes = req.ReceiptShowItemNotes.Value;
         if (req.ReceiptShowFooter is not null) settings.ReceiptShowFooter = req.ReceiptShowFooter.Value;
         if (req.GstNumber is not null) settings.GstNumber = req.GstNumber.Trim();
+        if (req.Latitude is not null) settings.Latitude = req.Latitude;
+        if (req.Longitude is not null) settings.Longitude = req.Longitude;
 
         await db.SaveChangesAsync();
         taxRateCache.Invalidate(settings.TenantId);

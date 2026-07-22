@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CafePOS.Api.Contracts;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
@@ -49,6 +50,25 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
         var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
             ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
         var recordedBy = await db.Users.FindAsync(int.Parse(idClaim!));
+
+        // Owner bypasses always — they ARE the approver. A Manager over threshold needs
+        // Owner sign-off instead of the expense landing on the books immediately. Nothing
+        // to link to yet (no CafeExpense row exists until approved), so the fields needed
+        // to create it are carried in PayloadJson instead — see ApprovalsController.Approve.
+        if (!User.IsInRole(nameof(AppRole.Owner)) && req.Amount > ApprovalThresholds.ExpenseAmount)
+        {
+            db.Approvals.Add(new ApprovalRequest
+            {
+                Type = ApprovalType.Expense,
+                RequestedById = recordedBy?.Id ?? 0,
+                Title = $"Expense — {req.Purpose}",
+                Description = $"{req.Category} · spent by {req.SpentBy}",
+                Amount = req.Amount,
+                PayloadJson = JsonSerializer.Serialize(req),
+            });
+            await db.SaveChangesAsync();
+            return Accepted(new { pendingApproval = true, message = $"Expense of {req.Amount:C} needs Owner approval (above the {ApprovalThresholds.ExpenseAmount:C} auto-approve limit) — sent to Approvals." });
+        }
 
         var expense = new CafeExpense
         {

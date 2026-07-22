@@ -6,6 +6,10 @@ appsettings.*.local.json
 # Data Protection keys — decrypt QR tokens; never commit.
 keys/
 
+# Firebase Admin SDK service-account key (see appsettings.json's Fcm:CredentialsPath) — grants
+# full push-send access to the Firebase project; never commit.
+firebase-service-account*.json
+
 # Build output
 bin/
 obj/

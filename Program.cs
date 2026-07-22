@@ -3,6 +3,8 @@ using System.Threading.RateLimiting;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
 using CafePOS.Api.Infrastructure;
+using FirebaseAdmin;
+using Google.Apis.Auth.OAuth2;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
@@ -125,6 +127,26 @@ builder.Services.AddHttpClient<IGeminiService, GeminiService>();
 // ---------- Image storage (Supabase Storage) ----------
 builder.Services.Configure<SupabaseStorageOptions>(builder.Configuration.GetSection("Supabase"));
 builder.Services.AddHttpClient<IImageStorageService, SupabaseImageStorageService>();
+
+// ---------- Push notifications (Firebase Cloud Messaging) ----------
+// Only initializes the Firebase Admin SDK if a real service-account key is configured; until
+// then FcmPushNotificationSender sees no FirebaseApp.DefaultInstance and no-ops on every send —
+// same "log and skip" fallback as SmtpEmailService when Email:GmailAddress/GmailAppPassword
+// aren't set. See appsettings.json's Fcm:CredentialsPath comment for how to obtain the key.
+builder.Services.Configure<FcmOptions>(builder.Configuration.GetSection("Fcm"));
+var fcmCredentialsPath = builder.Configuration["Fcm:CredentialsPath"];
+if (!string.IsNullOrWhiteSpace(fcmCredentialsPath) && File.Exists(fcmCredentialsPath) && FirebaseApp.DefaultInstance is null)
+{
+    // GoogleCredential.FromStream is flagged obsolete in favor of the newer CredentialFactory
+    // API, which (as of Google.Apis.Auth 1.73) has no stable documented equivalent yet for
+    // "load a service-account key from a local file" — this is still the Firebase Admin SDK's
+    // own documented approach, so the warning is suppressed rather than chasing a moving target.
+#pragma warning disable CS0618
+    using var fcmCredentialsStream = File.OpenRead(fcmCredentialsPath);
+    FirebaseApp.Create(new AppOptions { Credential = GoogleCredential.FromStream(fcmCredentialsStream) });
+#pragma warning restore CS0618
+}
+builder.Services.AddSingleton<IPushNotificationSender, FcmPushNotificationSender>();
 
 builder.Services
     .AddAuthentication(options =>

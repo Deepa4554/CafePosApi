@@ -47,8 +47,38 @@ public class TasksController(CafePosDbContext db) : ControllerBase
             TagsCsv = req.Tags is { Count: > 0 } ? string.Join(',', req.Tags) : null,
         };
         db.Tasks.Add(task);
+
+        // Pushed straight to the assignee's own device(s) only (AppNotification.TargetUserId)
+        // — not a tenant-wide broadcast like every other category — since this is only ever
+        // that one staff member's business. Silently skipped if the assignee has no app login
+        // to target (StaffMember.UserId null) or the id doesn't resolve to a real roster entry.
+        if (req.AssignedToId is int assignedToId)
+        {
+            var assignee = await db.Staff.FindAsync(assignedToId);
+            if (assignee?.UserId is int assigneeUserId)
+            {
+                var actor = await CurrentUserAsync();
+                db.Notifications.Add(new AppNotification
+                {
+                    Title = "New task assigned",
+                    Body = $"{actor?.Name ?? "Someone"} assigned you \"{task.Title}\" — {req.Priority} priority, due {req.DueDate:MMM d}.",
+                    Category = NotificationCategory.Task,
+                    Channel = NotificationChannel.InApp,
+                    ActionUrl = "/tasks",
+                    TargetUserId = assigneeUserId,
+                });
+            }
+        }
+
         await db.SaveChangesAsync();
         return CreatedAtAction(nameof(Get), new { id = task.Id }, TaskDto.From(task));
+    }
+
+    private async Task<AppUser?> CurrentUserAsync()
+    {
+        var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+            ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        return idClaim is not null && int.TryParse(idClaim, out var id) ? await db.Users.FindAsync(id) : null;
     }
 
     [HttpPatch("{id:int}/status")]

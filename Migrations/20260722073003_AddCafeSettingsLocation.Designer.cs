@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260722073003_AddCafeSettingsLocation")]
+    partial class AddCafeSettingsLocation
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -112,9 +115,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<DateTime?>("ScheduledAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int?>("TargetUserId")
-                        .HasColumnType("integer");
-
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
@@ -145,9 +145,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<string>("AllowedScreens")
                         .HasColumnType("text");
-
-                    b.Property<int?>("AssignedStationId")
-                        .HasColumnType("integer");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -219,13 +216,7 @@ namespace CafePOS.Api.Migrations
                     b.Property<int>("Level")
                         .HasColumnType("integer");
 
-                    b.Property<int?>("LinkedEntityId")
-                        .HasColumnType("integer");
-
                     b.Property<string>("Notes")
-                        .HasColumnType("text");
-
-                    b.Property<string>("PayloadJson")
                         .HasColumnType("text");
 
                     b.Property<int>("RequestedById")
