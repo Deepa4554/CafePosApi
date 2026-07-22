@@ -12,7 +12,7 @@ public class SearchController(CafePosDbContext db) : ControllerBase
 {
     private const int PerCategoryLimit = 5;
 
-    /// <summary>Aggregates across menu, tables, orders, customers, and inventory — powers GlobalSearchScreen.</summary>
+    /// <summary>Aggregates across menu, tables, orders, customers, and inventory — powers the header search dropdown.</summary>
     [HttpGet]
     public async Task<IEnumerable<SearchResultDto>> Search([FromQuery] string q)
     {

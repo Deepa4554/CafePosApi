@@ -212,7 +212,9 @@ builder.Services.AddSingleton<IRealtimeNotifier, RealtimeNotifier>();
 // any private-LAN origin on those same ports (192.168.x.x / 10.x.x.x / 172.16-31.x.x)
 // so a phone on the same Wi-Fi can open http://<lan-ip>:3000 and actually log in —
 // not just localhost, which only ever means "this machine" to whichever device is
-// asking.
+// asking. No cookies/credentials are involved (access + refresh tokens both travel
+// in the request/response body), so origins can just be allowed outright instead of
+// juggling AllowCredentials' wildcard restrictions.
 const string DevCorsPolicy = "DevCors";
 const string ProdCorsPolicy = "ProdCors";
 var lanOriginPattern = new System.Text.RegularExpressions.Regex(
@@ -220,13 +222,7 @@ var lanOriginPattern = new System.Text.RegularExpressions.Regex(
 // Real deployed frontend origin(s) — set via appsettings.Production.json /
 // env var "AllowedOrigins__0" etc. once the frontend has a real domain. Empty
 // by default so production doesn't silently fall back to the dev LAN policy.
-// "*" is stripped out if it ever ends up in there: combined with credentials
-// it's not just insecure, browsers refuse it outright (Access-Control-Allow-Origin: *
-// can't be paired with Access-Control-Allow-Credentials: true), and
-// CorsOptions.AddPolicy throws at startup rather than let it through.
-var allowedProdOrigins = (builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? [])
-    .Where(o => o != "*")
-    .ToArray();
+var allowedProdOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(DevCorsPolicy, policy =>
@@ -236,13 +232,6 @@ builder.Services.AddCors(options =>
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
-    // Needed so the browser actually attaches the httpOnly refresh-token cookie
-    // (see AuthController's SetRefreshTokenCookie) on cross-port requests to the
-    // dev API. Can't chain .AllowCredentials() inside the builder above — combined
-    // with SetIsOriginAllowed, CorsOptions.AddPolicy's wildcard-origin check throws
-    // at startup even though the predicate already pins to an explicit allowlist.
-    // Setting it on the registered policy afterward skips that check.
-    options.GetPolicy(DevCorsPolicy)!.SupportsCredentials = true;
     options.AddPolicy(ProdCorsPolicy, policy =>
     {
         if (allowedProdOrigins.Length > 0)
@@ -253,15 +242,12 @@ builder.Services.AddCors(options =>
         {
             // No real frontend domain configured yet — fall back to the same
             // localhost/LAN pattern used for DevCorsPolicy so a local frontend
-            // can still reach this deployed API with credentials while testing.
-            // Once AllowedOrigins is set to a real domain, that takes over above.
+            // can still reach this deployed API while testing. Once AllowedOrigins
+            // is set to a real domain, that takes over above.
             policy.SetIsOriginAllowed(origin => lanOriginPattern.IsMatch(origin));
         }
         policy.AllowAnyHeader().AllowAnyMethod();
     });
-    // See the DevCorsPolicy comment above — same reason AllowCredentials() can't
-    // be chained in the builder when the fallback SetIsOriginAllowed branch runs.
-    options.GetPolicy(ProdCorsPolicy)!.SupportsCredentials = true;
 });
 
 // ---------- Rate limiting ----------

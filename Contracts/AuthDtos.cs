@@ -12,10 +12,6 @@ public record RequestOtpRequest(string Email);
 public record ForgotPasswordRequest(string Email);
 public record ResetPasswordRequest(string Email, string Otp, string NewPassword);
 public record LoginRequest(string Email, string Password);
-// Nullable: the web client sends no body at all on refresh — its refresh token
-// lives only in the httpOnly cookie AuthController sets, never in JS-readable
-// storage, so there's nothing to put in a request body. Mobile still posts its
-// MMKV-stored token here.
 public record RefreshRequest(string? RefreshToken);
 // Only revokes this one device's session — omit to just no-op the revoke (still
 // clears local storage client-side either way).

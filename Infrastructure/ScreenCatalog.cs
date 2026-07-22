@@ -38,7 +38,6 @@ public static class ScreenCatalog
         ["ExpiringBatches"] = PlanCategory.Plus,
         ["Dashboard"] = PlanCategory.Normal,
         ["AIChat"] = PlanCategory.Plus,
-        ["Search"] = PlanCategory.Normal,
         ["Notifications"] = PlanCategory.Normal,
         ["Approvals"] = PlanCategory.Plus,
         ["Tasks"] = PlanCategory.Plus,
