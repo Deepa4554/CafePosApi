@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260723063221_AddOrderItemModifierQty")]
+    partial class AddOrderItemModifierQty
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1382,9 +1385,6 @@ namespace CafePOS.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<int?>("TaxGroupId")
-                        .HasColumnType("integer");
-
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
@@ -1769,15 +1769,6 @@ namespace CafePOS.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<decimal>("TaxAmount")
-                        .HasColumnType("numeric");
-
-                    b.Property<decimal?>("TaxRatePct")
-                        .HasColumnType("numeric");
-
-                    b.Property<decimal>("TaxableAmount")
-                        .HasColumnType("numeric");
-
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
@@ -1787,9 +1778,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("integer");
 
                     b.Property<string>("VariantName")
-                        .HasColumnType("text");
-
-                    b.Property<string>("VegNonVegType")
                         .HasColumnType("text");
 
                     b.Property<string>("VoidReason")
@@ -2837,36 +2825,6 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TicketId");
 
                     b.ToTable("SupportTicketMessages");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.TaxGroup", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<bool>("IsDefault")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<decimal>("RatePct")
-                        .HasColumnType("numeric");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.ToTable("TaxGroups");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Tenant", b =>

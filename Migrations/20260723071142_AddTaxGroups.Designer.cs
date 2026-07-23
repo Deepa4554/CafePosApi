@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260723071142_AddTaxGroups")]
+    partial class AddTaxGroups
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1787,9 +1790,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("integer");
 
                     b.Property<string>("VariantName")
-                        .HasColumnType("text");
-
-                    b.Property<string>("VegNonVegType")
                         .HasColumnType("text");
 
                     b.Property<string>("VoidReason")

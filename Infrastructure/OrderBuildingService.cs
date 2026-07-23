@@ -35,11 +35,13 @@ public interface IOrderBuildingService
     /// actually belonging to this menu item. Also snapshots the item's kitchen station name
     /// (see OrderItem.StationName) — the caller must have loaded menuItem with
     /// .Include(m => m.Station) for this to resolve to anything but the "Kitchen" fallback.
+    /// Also resolves the line's tax slab (item's TaxGroup → tenant default group → null,
+    /// meaning "bill at CafeSettings.TaxRatePct") for RecomputeTotals to snapshot.
     /// Throws ApiValidationException on an unknown/unavailable variant or an option that
     /// belongs to a different item. Shared by BuildOrderAsync, AddOrUpdateCartItemAsync, and
     /// OrdersController.AddItem so the three order-item-creation paths can never compute this
     /// differently.</summary>
-    Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName)> ResolveLinePricingAsync(
+    Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId);
 
     /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
@@ -124,7 +126,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (line.Qty <= 0)
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
-            var (linePrice, variantName, selections, stationName) = await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId);
+            var (linePrice, variantName, selections, stationName, lineTaxRatePct) = await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId);
             orderItems.Add(new OrderItem
             {
                 MenuItemId = menuItem.Id,
@@ -136,6 +138,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 VariantName = variantName,
                 SelectedModifiers = selections,
                 StationName = stationName,
+                VegNonVegType = menuItem.VegNonVegType,
+                TaxRatePct = lineTaxRatePct,
             });
         }
 
@@ -335,7 +339,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
         else
         {
-            var (linePrice, variantName, selections, stationName) = await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId);
+            var (linePrice, variantName, selections, stationName, taxRatePct) = await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId);
             existing = new OrderItem
             {
                 OrderId = order.Id,
@@ -348,6 +352,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 VariantName = variantName,
                 SelectedModifiers = selections,
                 StationName = stationName,
+                VegNonVegType = menuItem.VegNonVegType,
+                TaxRatePct = taxRatePct,
                 FireBatch = 0,
             };
             order.Items.Add(existing);
@@ -362,7 +368,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         return existing;
     }
 
-    public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName)> ResolveLinePricingAsync(
+    public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId)
     {
         var price = menuItem.Price;
@@ -378,31 +384,78 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             variantName = variant.Name;
         }
 
+        // Every modifier group on this item, needed for three separate checks below:
+        // option ownership, per-type selection limits, and required-group enforcement.
+        var groups = await TenantScoped(db.Modifiers, explicitTenantId)
+            .Where(m => m.MenuItemId == menuItem.Id)
+            .Select(m => new { m.Id, m.Name, m.Type, m.IsRequired })
+            .ToListAsync();
+
         var selections = new List<OrderItemModifier>();
+        var chosenGroupIds = new List<int>();
         if (modifierOptionIds is { Count: > 0 })
         {
-            var distinctIds = modifierOptionIds.Distinct().ToList();
+            // A REPEATED id means "N of this option" (2x Extra Cheese) — that's how a
+            // Quantity-type group is sent, without widening the wire contract from
+            // List<int> and breaking the QR ordering page.
+            var qtyByOptionId = modifierOptionIds.GroupBy(id => id).ToDictionary(g => g.Key, g => g.Count());
+            var distinctIds = qtyByOptionId.Keys.ToList();
             var options = await TenantScoped(db.ModifierOptions, explicitTenantId)
                 .Where(o => distinctIds.Contains(o.Id))
                 .ToListAsync();
             if (options.Count != distinctIds.Count)
                 throw new ApiValidationException("One or more selected add-ons were not found.");
 
-            var modifierIds = options.Select(o => o.ModifierId).Distinct().ToList();
-            var ownedModifierIds = await TenantScoped(db.Modifiers, explicitTenantId)
-                .Where(m => m.MenuItemId == menuItem.Id && modifierIds.Contains(m.Id))
-                .Select(m => m.Id).ToListAsync();
-            if (options.Any(o => !ownedModifierIds.Contains(o.ModifierId)))
+            var groupById = groups.ToDictionary(g => g.Id);
+            if (options.Any(o => !groupById.ContainsKey(o.ModifierId)))
                 throw new ApiValidationException("One or more selected add-ons don't belong to this item.");
+
+            // A Radio group is "pick exactly one" — the POS enforces it in the picker, but
+            // the QR page and any direct API caller reach this same path, so it's checked here too.
+            var overPickedRadio = options
+                .GroupBy(o => o.ModifierId)
+                .FirstOrDefault(g => groupById[g.Key].Type == "Radio" && g.Count() > 1);
+            if (overPickedRadio is not null)
+                throw new ApiValidationException($"Choose only one option for '{groupById[overPickedRadio.Key].Name}'.");
 
             foreach (var option in options)
             {
-                price += option.Price;
-                selections.Add(new OrderItemModifier { ModifierOptionId = option.Id, Name = option.Name, Price = option.Price });
+                // Only a Quantity group can take more than one of the same option; a stray
+                // duplicate on a Radio/MultiSelect group collapses to a single unit.
+                var qty = groupById[option.ModifierId].Type == "Quantity" ? qtyByOptionId[option.Id] : 1;
+                price += option.Price * qty;
+                selections.Add(new OrderItemModifier
+                {
+                    ModifierOptionId = option.Id,
+                    Name = option.Name,
+                    Price = option.Price,
+                    Qty = qty,
+                });
             }
+            chosenGroupIds = options.Select(o => o.ModifierId).Distinct().ToList();
         }
 
-        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen");
+        // Required groups must each contribute a selection. Deliberately outside the block
+        // above so an order that sends NO options at all is still rejected — until now
+        // Modifier.IsRequired was stored and shown in the UI but never actually enforced.
+        var missingRequired = groups
+            .Where(g => g.IsRequired && !chosenGroupIds.Contains(g.Id))
+            .Select(g => g.Name)
+            .ToList();
+        if (missingRequired.Count > 0)
+            throw new ApiValidationException($"{menuItem.Name}: please choose {string.Join(", ", missingRequired)}.");
+
+        // The item's own slab wins; otherwise the tenant's default group. Both come back in
+        // one query. Null means neither exists — RecomputeTotals then bills this line at
+        // CafeSettings.TaxRatePct, i.e. exactly the pre-tax-group behaviour.
+        var taxGroups = await TenantScoped(db.TaxGroups, explicitTenantId)
+            .Where(t => t.Id == menuItem.TaxGroupId || t.IsDefault)
+            .Select(t => new { t.Id, t.RatePct, t.IsDefault })
+            .ToListAsync();
+        var taxRatePct = taxGroups.FirstOrDefault(t => t.Id == menuItem.TaxGroupId)?.RatePct
+            ?? taxGroups.FirstOrDefault(t => t.IsDefault)?.RatePct;
+
+        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen", taxRatePct);
     }
 
     public async Task<bool> FireUnfiredItemsAsync(CafePosDbContext db, Order order, int? explicitTenantId)
@@ -491,12 +544,54 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             : (order.FireBatches.Count > 0 ? OrderStatus.Served : OrderStatus.New);
     }
 
-    public static void RecomputeTotals(Order o, decimal taxRatePct)
+    /// <summary>Recomputes tax and total from the order's live lines.
+    ///
+    /// Tax is charged PER LINE at that line's own snapshotted rate (OrderItem.TaxRatePct),
+    /// so one order can mix slabs — a 5% item and a 12% item bill correctly side by side.
+    /// `fallbackTaxRatePct` covers lines with no snapshot: rows placed before tax groups
+    /// existed, and items with neither their own group nor a tenant default. When no line
+    /// has a rate of its own this reduces to exactly the previous flat-rate arithmetic.
+    ///
+    /// Order-level discounts (item, bill, coupon, gift card) are split across lines in
+    /// proportion to each line's gross, because a discount on a mixed-slab bill has to
+    /// reduce the taxable value of each slab — putting it all against one slab would
+    /// understate or overstate the tax due on the other.</summary>
+    public static void RecomputeTotals(Order o, decimal fallbackTaxRatePct)
     {
+        // Per-line tax means this now reads o.Items, where the old flat-rate version only
+        // needed the o.Subtotal scalar. An order fetched without .Include(o => o.Items)
+        // would therefore recompute to a zero total — fail loudly instead of silently
+        // rewriting someone's bill. (All items voided is not this case: Subtotal is the
+        // sum of non-voided lines, so it's 0 too.)
+        if (o.Items.Count == 0 && o.Subtotal > 0)
+            throw new InvalidOperationException(
+                $"RecomputeTotals needs order {o.Id}'s Items loaded — fetch it with .Include(o => o.Items).");
+
         var totalDiscount = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied;
-        var taxable = Math.Max(0, o.Subtotal - totalDiscount);
-        o.Tax = Math.Round(taxable * taxRatePct / 100, 2);
-        o.Total = taxable + o.Tax;
+        var lines = o.Items.Where(i => !i.Voided).ToList();
+        var gross = lines.Sum(i => i.Price * i.Qty);
+        var discount = Math.Min(Math.Max(0, totalDiscount), gross);
+
+        decimal tax = 0;
+        // The last line absorbs the rounding remainder so the per-line taxable amounts
+        // always add back up to the order's taxable total, however the shares divide.
+        var allocated = 0m;
+        for (var idx = 0; idx < lines.Count; idx++)
+        {
+            var line = lines[idx];
+            var lineGross = line.Price * line.Qty;
+            var lineDiscount = idx == lines.Count - 1
+                ? discount - allocated
+                : (gross > 0 ? Math.Round(discount * (lineGross / gross), 2) : 0);
+            allocated += lineDiscount;
+
+            line.TaxableAmount = Math.Max(0, lineGross - lineDiscount);
+            line.TaxAmount = Math.Round(line.TaxableAmount * (line.TaxRatePct ?? fallbackTaxRatePct) / 100, 2);
+            tax += line.TaxAmount;
+        }
+
+        o.Tax = tax;
+        o.Total = Math.Max(0, gross - discount) + tax;
     }
 
     private async Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null)

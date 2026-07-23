@@ -40,6 +40,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<MenuItem> MenuItems => Set<MenuItem>();
     public DbSet<Station> Stations => Set<Station>();
     public DbSet<MenuCategory> MenuCategories => Set<MenuCategory>();
+    public DbSet<TaxGroup> TaxGroups => Set<TaxGroup>();
     public DbSet<MenuItemImage> MenuItemImages => Set<MenuItemImage>();
     public DbSet<Variant> Variants => Set<Variant>();
     public DbSet<Modifier> Modifiers => Set<Modifier>();
@@ -236,6 +237,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<MenuItem>().Property(m => m.ProductType).HasConversion<string>();
         modelBuilder.Entity<MenuItem>().Property(m => m.ItemType).HasConversion<string>();
         modelBuilder.Entity<MenuItem>().Property(m => m.VegNonVegType).HasConversion<string>();
+        modelBuilder.Entity<OrderItem>().Property(i => i.VegNonVegType).HasConversion<string>();
         modelBuilder.Entity<InventoryTransaction>().Property(t => t.Type).HasConversion<string>();
         modelBuilder.Entity<InventoryTransaction>().Property(t => t.WasteReasonCode).HasConversion<string>();
         modelBuilder.Entity<StockTake>().Property(s => s.Status).HasConversion<string>();

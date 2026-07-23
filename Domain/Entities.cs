@@ -50,6 +50,9 @@ public class MenuItem : ITenantScoped
     public string StationName => Station?.Name ?? "Kitchen";
     public ItemType ItemType { get; set; } = ItemType.Recipe;
     public VegNonVegType? VegNonVegType { get; set; } // null if not applicable
+    /// <summary>Which tax slab this item is billed at. Null falls back to the tenant's
+    /// default TaxGroup, then CafeSettings.TaxRatePct — see <see cref="TaxGroup"/>.</summary>
+    public int? TaxGroupId { get; set; }
 
     public List<Variant> Variants { get; set; } = [];
     public List<Modifier> Modifiers { get; set; } = [];
@@ -311,6 +314,19 @@ public class OrderItem : ITenantScoped
     /// delta, so every existing Subtotal/Tax/Total computation (Sum of Price*Qty) needs no
     /// changes. See OrderBuildingService.ResolveLinePricingAsync, the one place that computes it.</summary>
     public decimal Price { get; set; }
+    /// <summary>Tax slab this line is billed at, snapshotted from the item's TaxGroup when the
+    /// line was created (see <see cref="TaxGroup"/> for how it resolves). Null on lines placed
+    /// before tax groups existed, and on any line whose item had no group and no default —
+    /// RecomputeTotals bills those at CafeSettings.TaxRatePct, exactly as it always did.</summary>
+    public decimal? TaxRatePct { get; set; }
+    /// <summary>This line's share of the order's taxable value — gross (Price * Qty) minus its
+    /// proportional slice of every order-level discount. Stored rather than derived because the
+    /// bill has to show taxable value per rate, and the discount split can't be recovered from
+    /// the line alone. Written by RecomputeTotals.</summary>
+    public decimal TaxableAmount { get; set; }
+    /// <summary>Tax charged on this line = TaxableAmount * rate. Order.Tax is the sum of these.
+    /// Written by RecomputeTotals.</summary>
+    public decimal TaxAmount { get; set; }
     public string? Modifier { get; set; }
     /// <summary>Which Variant (Half/Full/...) was picked, if any — null means the item's own
     /// base MenuItem.Price was used. VariantName is a snapshot (survives the variant being
@@ -323,6 +339,12 @@ public class OrderItem : ITenantScoped
     /// already-fired/printed KOT. Drives KDS station filtering and per-station KOT print
     /// routing (see OrderBuildingService.ResolveLinePricingAsync).</summary>
     public string StationName { get; set; } = "Kitchen";
+    /// <summary>Veg/non-veg mark, snapshotted from MenuItem.VegNonVegType when the line was
+    /// created — same convention as Name/StationName above, so re-tagging an item later can
+    /// never change what an already-printed KOT said the kitchen was cooking. Null both for
+    /// untagged items and for lines placed before this column existed; every renderer treats
+    /// null as "no mark" rather than assuming veg.</summary>
+    public VegNonVegType? VegNonVegType { get; set; }
     /// <summary>Toppings/add-ons picked for this line — each row snapshots the ModifierOption's
     /// name/price at order time (same reasoning as VariantName/Price above).</summary>
     public List<OrderItemModifier> SelectedModifiers { get; set; } = [];
@@ -369,7 +391,13 @@ public class OrderItemModifier : ITenantScoped
     public int OrderItemId { get; set; }
     public int ModifierOptionId { get; set; }
     public required string Name { get; set; }
+    /// <summary>Snapshot of the option's price for ONE unit — the line contributes
+    /// Price * Qty, so this stays comparable across rows regardless of Qty.</summary>
     public decimal Price { get; set; }
+    /// <summary>How many of this option were picked (e.g. 2x Extra Cheese). Only a
+    /// "Quantity"-type Modifier group can exceed 1; Radio/MultiSelect groups are capped
+    /// at 1 by OrderBuildingService.ResolveLinePricingAsync.</summary>
+    public int Qty { get; set; } = 1;
 }
 
 /// <summary>A single fire round (KOT) — see Order.FireBatches. Created when
@@ -425,12 +453,33 @@ public class InventoryItem : ITenantScoped
     public bool IsActive { get; set; } = true;
 }
 
+/// <summary>A named tax rate (e.g. "GST 5%", "GST 12%") that menu items are assigned to,
+/// so a cafe can bill different slabs on one order instead of one flat rate for everything.
+///
+/// A line's rate resolves in this order: the item's own group → the group flagged
+/// <see cref="IsDefault"/> → <see cref="CafeSettings.TaxRatePct"/> (the pre-tax-group
+/// behaviour, kept so a cafe that never creates a group bills exactly as it did before).
+/// The resolved rate is SNAPSHOTTED onto OrderItem.TaxRatePct at order time — editing or
+/// deleting a group later never re-prices an already-placed bill.</summary>
+public class TaxGroup : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    /// <summary>Label as it appears on the bill's tax breakdown, e.g. "GST 5%".</summary>
+    public required string Name { get; set; }
+    public decimal RatePct { get; set; }
+    /// <summary>Applied to any menu item with no group of its own. At most one per tenant —
+    /// TaxGroupsController clears the flag on the others when a new default is set.</summary>
+    public bool IsDefault { get; set; }
+}
+
 public class CafeSettings : ITenantScoped
 {
     public int Id { get; set; }
     public int TenantId { get; set; }
 
-    // Tax & GST Configuration
+    /// <summary>Fallback rate for items with no TaxGroup and when no default group exists —
+    /// see <see cref="TaxGroup"/> for the full resolution order.</summary>
     public decimal TaxRatePct { get; set; } = 8;
 
     // Language & Region

@@ -1,3 +1,4 @@
+using CafePOS.Api.Contracts;
 using CafePOS.Api.Domain;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
@@ -72,11 +73,29 @@ public static class ReceiptPdfBuilder
                             row.RelativeItem().AlignRight().Text($"-{order.DiscountAmount:0.00}");
                         });
                     }
-                    col.Item().Row(row =>
+                    // One row per tax slab on the bill — a mixed 5%/12% order has to show the
+                    // taxable value and tax for each rate separately, not one combined figure.
+                    // Collapses to a single "Tax" row when everything is on one rate.
+                    var taxLines = OrderTaxLineDto.From(order, settings.TaxRatePct);
+                    if (taxLines.Count <= 1)
                     {
-                        row.RelativeItem().Text("Tax");
-                        row.RelativeItem().AlignRight().Text($"{order.Tax:0.00}");
-                    });
+                        col.Item().Row(row =>
+                        {
+                            row.RelativeItem().Text(taxLines.Count == 1 ? $"Tax ({taxLines[0].RatePct:0.##}%)" : "Tax");
+                            row.RelativeItem().AlignRight().Text($"{order.Tax:0.00}");
+                        });
+                    }
+                    else
+                    {
+                        foreach (var taxLine in taxLines)
+                        {
+                            col.Item().Row(row =>
+                            {
+                                row.RelativeItem().Text($"Tax {taxLine.RatePct:0.##}% (on {taxLine.TaxableAmount:0.00})");
+                                row.RelativeItem().AlignRight().Text($"{taxLine.TaxAmount:0.00}");
+                            });
+                        }
+                    }
 
                     col.Item().PaddingTop(4).LineHorizontal(0.5f);
 

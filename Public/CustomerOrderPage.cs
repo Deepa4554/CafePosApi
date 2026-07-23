@@ -152,6 +152,9 @@ public static class CustomerOrderPage
   .vnv .dot { width: 6px; height: 6px; border-radius: 50%; background: #0B8043; }
   .vnv.eggetarian .dot { background: #B26A00; }
   .vnv.nonveg .dot { width: 0; height: 0; border-radius: 0; background: transparent; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #B71C1C; }
+  .veg-only-row { display: flex; justify-content: flex-end; padding: 0 14px 6px; }
+  .veg-only-toggle { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--divider); border-radius: 8px; padding: 5px 10px; background: var(--card); font-size: 12px; font-weight: 700; color: var(--muted); }
+  .veg-only-toggle.active { border-color: #0B8043; background: #0B804318; color: #0B8043; }
   .item-lines { margin-top: 6px; }
   .item-line-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; }
   .item-line-row .line-label { flex: 1; color: var(--muted); }
@@ -181,11 +184,22 @@ public static class CustomerOrderPage
   .opt-radio.active, .opt-check.active { border-color: var(--accent); }
   .opt-radio.active::after { content: ''; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
   .opt-check.active { background: var(--accent); color: #fff; font-size: 12px; }
+  /* A required group with nothing picked — names what's blocking the disabled Add button. */
+  .opt-group-title.missing { color: var(--danger, #C0392B); }
+  /* Quantity-type groups: -/+ beside the label so one topping can be ordered several times. */
+  .opt-stepper { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+  .opt-stepper button {
+    width: 26px; height: 26px; border-radius: 13px; border: none;
+    background: var(--input-tint); color: var(--heading);
+    font-size: 15px; font-weight: 700; cursor: pointer; line-height: 1;
+  }
+  .opt-stepper .qty { min-width: 14px; text-align: center; font-weight: 700; font-size: 13px; }
   .opt-add-btn {
     width: 100%; background: var(--button); color: #fff; border: none;
     padding: 14px 0; border-radius: 14px; font-size: 14px; font-weight: 700;
     cursor: pointer; margin-top: 16px;
   }
+  .opt-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .stepper { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
   .stepper button {
     width: 30px; height: 30px; border-radius: 15px; border: none;
@@ -299,6 +313,12 @@ public static class CustomerOrderPage
       <div class="bs-strip" id="bestsellers-strip"></div>
     </div>
 
+    <div class="veg-only-row">
+      <button type="button" class="veg-only-toggle" id="veg-only-toggle">
+        <span class="vnv veg"><span class="dot"></span></span>
+        Veg Only
+      </button>
+    </div>
     <div id="menu-root"></div>
   </div>
 
@@ -374,6 +394,7 @@ public static class CustomerOrderPage
   var state = {
     table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {}, browseOnly: false,
     order: null, // last known OrderDto from the server (session-scoped), or null
+    vegOnly: false,
   };
   var pollTimer = null;
 
@@ -547,24 +568,49 @@ public static class CustomerOrderPage
     return badge;
   }
 
+  /** A server line's add-ons flattened back to the wire format: one id per UNIT, so a
+   * qty-2 selection round-trips as the same id twice (see CreateOrderItemDto). Every
+   * re-send and line-identity check must go through this — mapping straight to
+   * modifierOptionId would silently drop a "2x Extra Cheese" back down to 1x. */
+  function lineOptionIds(line) {
+    var ids = [];
+    (line.selectedModifiers || []).forEach(function (m) {
+      for (var i = 0; i < (m.qty || 1); i++) ids.push(m.modifierOptionId);
+    });
+    return ids;
+  }
+
   function lineDescriptor(line) {
     var parts = [];
     if (line.variantName) parts.push(line.variantName);
-    (line.selectedModifiers || []).forEach(function (m) { parts.push(m.name); });
+    (line.selectedModifiers || []).forEach(function (m) {
+      parts.push((m.qty || 1) > 1 ? (m.qty + 'x ' + m.name) : m.name);
+    });
     return parts.join(', ');
+  }
+
+  // Non-veg/eggetarian hidden, everything else (veg, jain, and untagged items — hiding
+  // an untagged item would be guessing it's non-veg rather than reading an actual tag)
+  // stays visible. Mirrors the POS ordering screen's own Veg Only filter.
+  function visibleMenu() {
+    if (!state.vegOnly) return state.menu;
+    return state.menu.filter(function (m) {
+      return !m.vegNonVegType || m.vegNonVegType === 'Veg' || m.vegNonVegType === 'Jain';
+    });
   }
 
   function renderMenu() {
     var root = document.getElementById('menu-root');
     root.innerHTML = '';
+    var menu = visibleMenu();
     var categories = [];
-    state.menu.forEach(function (item) {
+    menu.forEach(function (item) {
       if (categories.indexOf(item.category) === -1) categories.push(item.category);
     });
 
     categories.forEach(function (cat) {
       root.appendChild(el('div', 'cat-title', cat));
-      state.menu.filter(function (m) { return m.category === cat; }).forEach(function (item) {
+      menu.filter(function (m) { return m.category === cat; }).forEach(function (item) {
         var hasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
         var qty = state.cart[item.id] || 0;
         var card = el('div', 'item-card' + (item.available ? '' : ' unavailable'));
@@ -601,10 +647,10 @@ public static class CustomerOrderPage
               row.appendChild(el('span', 'line-label', line.qty + '× ' + (lineDescriptor(line) || 'Regular')));
               var stepper = el('div', 'stepper');
               var minus = el('button', null, '−');
-              minus.onclick = function () { changeLineQty(item.id, line.variantId, (line.selectedModifiers || []).map(function (m) { return m.modifierOptionId; }), line.qty - 1); };
+              minus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty - 1); };
               var qtyEl = el('span', 'qty', String(line.qty));
               var plus = el('button', null, '+');
-              plus.onclick = function () { changeLineQty(item.id, line.variantId, (line.selectedModifiers || []).map(function (m) { return m.modifierOptionId; }), line.qty + 1); };
+              plus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty + 1); };
               stepper.appendChild(minus);
               stepper.appendChild(qtyEl);
               stepper.appendChild(plus);
@@ -731,11 +777,29 @@ public static class CustomerOrderPage
   // ---------- Item options picker (Half/Full variant + toppings) ----------
   var optState = { item: null, variantId: null, selectedOptionIds: [] };
 
+  /** selectedOptionIds holds one entry per UNIT — a Quantity group repeats the same id —
+   * so this expands to one option object per unit and the price total counts each. */
   function optSelectedOptions() {
     if (!optState.item) return [];
     var all = [];
     optState.item.modifiers.forEach(function (m) { all = all.concat(m.options); });
-    return all.filter(function (o) { return optState.selectedOptionIds.indexOf(o.id) !== -1; });
+    return optState.selectedOptionIds.map(function (id) {
+      return all.find(function (o) { return o.id === id; });
+    }).filter(function (o) { return !!o; });
+  }
+
+  function optOptionQty(optionId) {
+    return optState.selectedOptionIds.filter(function (id) { return id === optionId; }).length;
+  }
+
+  /** Required groups with nothing picked. The backend rejects these outright
+   * (OrderBuildingService.ResolveLinePricingAsync), so the button blocks first and names
+   * what's missing rather than letting the customer hit a raw validation error. */
+  function optMissingRequired() {
+    if (!optState.item) return [];
+    return optState.item.modifiers.filter(function (m) {
+      return m.isRequired && !m.options.some(function (o) { return optState.selectedOptionIds.indexOf(o.id) !== -1; });
+    });
   }
 
   function renderItemOptions() {
@@ -758,21 +822,50 @@ public static class CustomerOrderPage
       });
     }
 
+    var missing = optMissingRequired();
     item.modifiers.forEach(function (m) {
-      body.appendChild(el('div', 'opt-group-title', m.name + (m.isRequired ? ' · Required' : '')));
+      var groupMissing = missing.indexOf(m) !== -1;
+      var title = el('div', 'opt-group-title' + (groupMissing ? ' missing' : ''), m.name + (m.isRequired ? ' · Required' : ''));
+      body.appendChild(title);
       var isRadio = m.type === 'Radio';
+      var isQuantity = m.type === 'Quantity';
       m.options.forEach(function (o) {
-        var active = optState.selectedOptionIds.indexOf(o.id) !== -1;
+        var qty = optOptionQty(o.id);
+        var active = qty > 0;
         var row = el('div', 'opt-row');
         var mark = el('span', (isRadio ? 'opt-radio' : 'opt-check') + (active ? ' active' : ''));
-        if (!isRadio && active) mark.textContent = '✓';
+        if (!isRadio && active) mark.textContent = isQuantity ? String(qty) : '✓';
         row.appendChild(mark);
         row.appendChild(el('span', 'opt-label', o.name));
+        // A Quantity group gets its own −/+ pair so the same topping can be ordered
+        // multiple times; tapping the row elsewhere just seeds the first unit.
+        if (isQuantity && active) {
+          var stepper = el('div', 'opt-stepper');
+          var dec = el('button', null, '−');
+          dec.onclick = function (e) {
+            e.stopPropagation();
+            var at = optState.selectedOptionIds.indexOf(o.id);
+            if (at !== -1) optState.selectedOptionIds.splice(at, 1);
+            renderItemOptions();
+          };
+          var inc = el('button', null, '+');
+          inc.onclick = function (e) {
+            e.stopPropagation();
+            optState.selectedOptionIds = optState.selectedOptionIds.concat([o.id]);
+            renderItemOptions();
+          };
+          stepper.appendChild(dec);
+          stepper.appendChild(el('span', 'qty', String(qty)));
+          stepper.appendChild(inc);
+          row.appendChild(stepper);
+        }
         row.appendChild(el('span', 'opt-price', o.price === 0 ? 'Free' : ('+' + money(o.price))));
         row.onclick = function () {
           if (isRadio) {
             var siblingIds = m.options.map(function (x) { return x.id; });
             optState.selectedOptionIds = optState.selectedOptionIds.filter(function (id) { return siblingIds.indexOf(id) === -1; }).concat([o.id]);
+          } else if (isQuantity) {
+            if (!active) optState.selectedOptionIds = optState.selectedOptionIds.concat([o.id]);
           } else if (active) {
             optState.selectedOptionIds = optState.selectedOptionIds.filter(function (id) { return id !== o.id; });
           } else {
@@ -786,7 +879,11 @@ public static class CustomerOrderPage
 
     var variant = item.variants.find(function (v) { return v.id === optState.variantId; });
     var unitPrice = (variant ? variant.price : item.price) + optSelectedOptions().reduce(function (s, o) { return s + o.price; }, 0);
-    document.getElementById('opt-add-btn').textContent = 'Add to Order — ' + money(unitPrice);
+    var addBtn = document.getElementById('opt-add-btn');
+    addBtn.textContent = missing.length > 0
+      ? ('Choose ' + missing.map(function (m) { return m.name; }).join(', '))
+      : ('Add to Order — ' + money(unitPrice));
+    addBtn.disabled = missing.length > 0;
   }
 
   function openItemOptions(item) {
@@ -804,10 +901,11 @@ public static class CustomerOrderPage
 
   function confirmItemOptions() {
     if (!optState.item) return;
+    if (optMissingRequired().length > 0) return;
     var item = optState.item;
     var sortedIds = optState.selectedOptionIds.slice().sort(function (a, b) { return a - b; });
     var existing = linesForItem(item.id).find(function (line) {
-      var lineIds = (line.selectedModifiers || []).map(function (m) { return m.modifierOptionId; }).sort(function (a, b) { return a - b; });
+      var lineIds = lineOptionIds(line).sort(function (a, b) { return a - b; });
       return line.variantId === optState.variantId && lineIds.length === sortedIds.length && lineIds.every(function (id, i) { return id === sortedIds[i]; });
     });
     var nextQty = (existing ? existing.qty : 0) + 1;
@@ -938,6 +1036,11 @@ public static class CustomerOrderPage
       document.getElementById('join-btn').onclick = joinSession;
       document.getElementById('add-more-btn').onclick = showMenuScreen;
       document.getElementById('request-bill-btn').onclick = requestBill;
+      document.getElementById('veg-only-toggle').onclick = function () {
+        state.vegOnly = !state.vegOnly;
+        document.getElementById('veg-only-toggle').classList.toggle('active', state.vegOnly);
+        renderMenu();
+      };
 
       if (state.browseOnly) {
         // No table = no session (see GuestSessionController.ResolveAsync) — browsing

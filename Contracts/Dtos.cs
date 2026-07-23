@@ -70,14 +70,34 @@ public record CreatePublicOrderRequest(string? GuestName, string? GuestPhone, Li
 /// <summary>Status is the derived overall stage; the New/Read/Preparing/Ready/Served Qty
 /// fields are the real per-unit distribution (partial-quantity production) — they sum to
 /// Qty. KDS renders per-stage counts and picks the card's column from the lowest non-empty.</summary>
-public record SelectedModifierDto(int ModifierOptionId, string Name, decimal Price)
+/// <summary>Price is the per-unit snapshot — this selection adds Price * Qty to its line.</summary>
+public record SelectedModifierDto(int ModifierOptionId, string Name, decimal Price, int Qty)
 {
-    public static SelectedModifierDto From(OrderItemModifier m) => new(m.ModifierOptionId, m.Name, m.Price);
+    public static SelectedModifierDto From(OrderItemModifier m) => new(m.ModifierOptionId, m.Name, m.Price, m.Qty);
 }
 
 public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
     int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty, bool Voided, DateTime? VoidedAt,
-    int? VariantId, string? VariantName, List<SelectedModifierDto> SelectedModifiers, string StationName);
+    int? VariantId, string? VariantName, List<SelectedModifierDto> SelectedModifiers, string StationName,
+    decimal? TaxRatePct, decimal TaxableAmount, decimal TaxAmount, string? VegNonVegType = null);
+
+/// <summary>One row of the bill's tax summary — the taxable value and tax charged at a single
+/// rate. A GST invoice has to break tax down per slab rather than print one combined figure,
+/// so an order mixing a 5% item with a 12% one shows two rows here.</summary>
+public record OrderTaxLineDto(decimal RatePct, decimal TaxableAmount, decimal TaxAmount)
+{
+    /// <summary>Groups an order's live lines by their effective rate. `fallbackRatePct` stands
+    /// in for lines with no snapshot (placed before tax groups, or an item with no group and no
+    /// tenant default) — the same rate RecomputeTotals billed them at.</summary>
+    public static List<OrderTaxLineDto> From(Order o, decimal fallbackRatePct) =>
+        o.Items
+            .Where(i => !i.Voided)
+            .GroupBy(i => i.TaxRatePct ?? fallbackRatePct)
+            .Where(g => g.Sum(i => i.TaxAmount) != 0 || g.Key != 0)
+            .OrderBy(g => g.Key)
+            .Select(g => new OrderTaxLineDto(g.Key, g.Sum(i => i.TaxableAmount), g.Sum(i => i.TaxAmount)))
+            .ToList();
+}
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
@@ -142,7 +162,8 @@ public record OrderDto(
         o.CustomerId,
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
             i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt,
-            i.VariantId, i.VariantName, i.SelectedModifiers.Select(SelectedModifierDto.From).ToList(), i.StationName)).ToList(),
+            i.VariantId, i.VariantName, i.SelectedModifiers.Select(SelectedModifierDto.From).ToList(), i.StationName,
+            i.TaxRatePct, i.TaxableAmount, i.TaxAmount, i.VegNonVegType?.ToString())).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
@@ -228,7 +249,8 @@ public record CreateMenuItemRequest(
     string? ShortCode = null,
     int? StationId = null,
     string? ItemType = null,
-    string? VegNonVegType = null);
+    string? VegNonVegType = null,
+    int? TaxGroupId = null);
 
 public record UpdateMenuItemRequest(
     string? Name,
@@ -244,9 +266,23 @@ public record UpdateMenuItemRequest(
     string? ShortCode = null,
     int? StationId = null,
     string? ItemType = null,
-    string? VegNonVegType = null);
+    string? VegNonVegType = null,
+    /// <summary>Which tax slab to bill this item at. Pass 0 to clear it back to the
+    /// tenant default (null on a PATCH means "leave unchanged", so it can't clear).</summary>
+    int? TaxGroupId = null);
 
 public record BulkImportResultDto(int CreatedCount, int SkippedCount);
+
+// ---------- Tax Groups ----------
+
+public record TaxGroupDto(int Id, string Name, decimal RatePct, bool IsDefault)
+{
+    public static TaxGroupDto From(TaxGroup t) => new(t.Id, t.Name, t.RatePct, t.IsDefault);
+}
+
+public record CreateTaxGroupRequest(string Name, decimal RatePct, bool IsDefault = false);
+
+public record UpdateTaxGroupRequest(string? Name, decimal? RatePct, bool? IsDefault);
 
 // ---------- Kitchen Stations ----------
 

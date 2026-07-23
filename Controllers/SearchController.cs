@@ -27,7 +27,10 @@ public class SearchController(CafePosDbContext db) : ControllerBase
         var term = q.Trim().ToLower();
         var results = new List<SearchResultDto>();
 
-        var menu = await db.MenuItems.Where(m => m.Name.ToLower().Contains(term)).Take(PerCategoryLimit).ToListAsync();
+        var menu = await db.MenuItems
+            .Where(m => m.Name.ToLower().Contains(term)
+                || (m.ShortCode != null && m.ShortCode.ToLower().Contains(term)))
+            .Take(PerCategoryLimit).ToListAsync();
         results.AddRange(menu.Select(m => new SearchResultDto("Menu", m.Id.ToString(), m.Name, $"{m.Category} · ₹{m.Price:F2}")));
 
         var tables = await db.Tables.Where(t => t.Code.ToLower().Contains(term) || t.Zone.ToLower().Contains(term)).Take(PerCategoryLimit).ToListAsync();

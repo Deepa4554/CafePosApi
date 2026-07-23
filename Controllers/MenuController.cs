@@ -141,6 +141,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             item.ItemType = itemType;
         if (!string.IsNullOrWhiteSpace(req.VegNonVegType) && Enum.TryParse<VegNonVegType>(req.VegNonVegType, ignoreCase: true, out var vegType))
             item.VegNonVegType = vegType;
+        item.TaxGroupId = await ValidatedTaxGroupIdAsync(req.TaxGroupId);
         db.MenuItems.Add(item);
         await db.SaveChangesAsync();
         return CreatedAtAction(nameof(List), new { id = item.Id }, item);
@@ -165,7 +166,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         var created = new List<MenuItem>();
         foreach (var req in valid)
         {
-            created.Add(new MenuItem
+            var item = new MenuItem
             {
                 Name = req.Name.Trim(),
                 Category = string.IsNullOrWhiteSpace(req.Category) ? "Food" : req.Category.Trim(),
@@ -175,7 +176,10 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
                 Image = await imageStorage.ResolveAsync("menu-items", req.Image) ?? "",
                 Description = req.Description,
                 Station = req.StationId is int sid ? await ResolveStationAsync(sid) : defaultStation,
-            });
+            };
+            if (!string.IsNullOrWhiteSpace(req.VegNonVegType) && Enum.TryParse<VegNonVegType>(req.VegNonVegType, ignoreCase: true, out var vegType))
+                item.VegNonVegType = vegType;
+            created.Add(item);
         }
 
         db.MenuItems.AddRange(created);
@@ -230,9 +234,24 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             item.ItemType = itemType;
         if (!string.IsNullOrWhiteSpace(req.VegNonVegType) && Enum.TryParse<VegNonVegType>(req.VegNonVegType, ignoreCase: true, out var vegType))
             item.VegNonVegType = vegType;
+        // 0 is the "clear it" sentinel — a null TaxGroupId on a PATCH means "leave unchanged"
+        // like every other field here, so it can't also mean "back to the tenant default".
+        if (req.TaxGroupId is not null)
+            item.TaxGroupId = req.TaxGroupId == 0 ? null : await ValidatedTaxGroupIdAsync(req.TaxGroupId);
 
         await db.SaveChangesAsync();
         return item;
+    }
+
+    /// <summary>Rejects a tax group id that doesn't belong to this tenant, so an item can't
+    /// end up pointing at a slab that will never resolve (and would silently bill at the
+    /// default instead). Null passes through as "no explicit group".</summary>
+    private async Task<int?> ValidatedTaxGroupIdAsync(int? taxGroupId)
+    {
+        if (taxGroupId is not int id || id == 0) return null;
+        var exists = await db.TaxGroups.AnyAsync(t => t.Id == id);
+        if (!exists) throw new ApiValidationException("Selected tax group not found.");
+        return id;
     }
 
     /// <summary>Instant availability flip — the "unavailable item" toggle in the app.</summary>

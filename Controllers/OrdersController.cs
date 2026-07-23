@@ -516,7 +516,7 @@ public class OrdersController(
         if (menuItem is null) throw new ApiValidationException("Menu item not found.");
         if (!menuItem.Available) throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
 
-        var (linePrice, variantName, selections, stationName) = await orderBuilder.ResolveLinePricingAsync(db, menuItem, req.VariantId, req.ModifierOptionIds, explicitTenantId: null);
+        var (linePrice, variantName, selections, stationName, taxRatePct) = await orderBuilder.ResolveLinePricingAsync(db, menuItem, req.VariantId, req.ModifierOptionIds, explicitTenantId: null);
         var newItem = new OrderItem
         {
             OrderId = order.Id,
@@ -529,6 +529,8 @@ public class OrdersController(
             VariantName = variantName,
             SelectedModifiers = selections,
             StationName = stationName,
+            VegNonVegType = menuItem.VegNonVegType,
+            TaxRatePct = taxRatePct,
             FireBatch = 0,
         };
         order.Items.Add(newItem);

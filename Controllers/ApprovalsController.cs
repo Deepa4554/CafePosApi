@@ -115,7 +115,10 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
             }
             case ApprovalType.Discount when request.LinkedEntityId is int discountOrderId:
             {
-                var order = await db.Orders.FindAsync(discountOrderId);
+                // Items must be loaded: RecomputeTotals charges tax per line at each line's
+                // own snapshotted rate, so an order fetched without them would recompute to
+                // a zero total. FindAsync alone doesn't populate the collection.
+                var order = await db.Orders.Include(o => o.Items).FirstOrDefaultAsync(o => o.Id == discountOrderId);
                 if (order is null || order.Paid) return; // paid/cancelled in the meantime — nothing to replay
                 order.BillDiscountAmount = request.Amount ?? 0;
                 OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());

@@ -318,6 +318,20 @@ using (var scope = app.Services.CreateScope())
         db.Database.Migrate();
 
     SeedData.Apply(db);
+
+    // Throwaway HR demo data for looking at the Attendance/Payroll/Payslip screens with
+    // something in them. Off unless DemoData names a cafe (by slug or by owner e-mail),
+    // and never outside Development — see DemoHrSeedData for what it writes and how to
+    // remove it again.
+    if (app.Environment.IsDevelopment())
+    {
+        DemoHrSeedData.Apply(
+            db,
+            scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DemoData"),
+            builder.Configuration["DemoData:SeedHrForTenantSlug"],
+            builder.Configuration["DemoData:SeedHrForOwnerEmail"],
+            builder.Configuration.GetValue("DemoData:PurgeHrDemo", false));
+    }
 }
 
 app.UseExceptionHandler(_ => { }); // delegates entirely to GlobalExceptionHandler above
