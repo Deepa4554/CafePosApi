@@ -394,14 +394,7 @@ public class PayrollController(CafePosDbContext db, IAuditService audit) : Contr
         }
     }
 
-    private async Task<StaffMember> CurrentStaffAsync()
-    {
-        var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
-            ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-        var userId = idClaim is not null && int.TryParse(idClaim, out var id) ? id : (int?)null;
-        var staff = userId is not null ? await db.Staff.FirstOrDefaultAsync(s => s.UserId == userId) : null;
-        return staff ?? throw new ApiValidationException("This login has no linked staff roster entry.");
-    }
+    private Task<StaffMember> CurrentStaffAsync() => this.GetOrCreateCurrentStaffAsync(db);
 
     private async Task<AppUser> CurrentUserAsync()
     {
