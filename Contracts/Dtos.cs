@@ -40,15 +40,37 @@ public record BillCouponRequest(string Code);
 
 public record BillGiftCardRequest(string Code);
 
+/// <summary>Billing-time Service Charge / Packing Charge / Delivery Charge / Tip / Round Off,
+/// applied together as one adjustment sheet — see OrdersController.ApplyBillCharges. Every
+/// field is optional; only the ones supplied (non-null) are changed, so a cashier can set just
+/// one (e.g. TipAmount) without re-sending the others. Send 0 to explicitly clear a charge.
+/// ServiceCharge accepts either a percentage of Subtotal OR a flat amount — not both.</summary>
+public record BillChargesRequest(
+    decimal? ServiceChargePct,
+    decimal? ServiceChargeAmount,
+    decimal? PackingChargeAmount,
+    decimal? DeliveryChargeAmount,
+    decimal? TipAmount,
+    decimal? RoundOffAmount);
+
+/// <summary>Redeems Points of the order's linked customer as a bill-time discount (1 point =
+/// ₹1, matching the earn rate in OrderBuildingService.RecordVisit). See OrdersController.
+/// ApplyBillLoyalty — capped at both the customer's available balance and what's left owed.</summary>
+public record BillLoyaltyRequest(int Points);
+
 /// <summary>One tender in a split payment — e.g. part Cash, part Card.</summary>
 public record PaymentSplitRequest(string Method, decimal Amount);
 
 /// <summary>How the settled bill was paid — Cash / Card / UPI / Multiple. Optional; the
 /// legacy pay call with no body still works (payment method just stays unrecorded). Supply
-/// Splits instead of PaymentMethod to settle across more than one tender — amounts must sum
-/// to the order's Total (see OrdersController.Pay); PaymentMethod is ignored when Splits is
-/// given, and gets set to "Multiple" automatically once more than one tender is used.</summary>
-public record PayRequest(string? PaymentMethod, List<PaymentSplitRequest>? Splits = null);
+/// Splits instead of PaymentMethod to settle across more than one tender. By default the
+/// splits must add up to the order's remaining balance (see OrdersController.Pay);
+/// AllowPartial relaxes that so a cashier can deliberately collect less than the full amount
+/// and leave the rest owing — the order becomes PartiallyPaid instead of Paid, and Pay can be
+/// called again later with the remainder. PaymentMethod is ignored when Splits is given, and
+/// the order's PaymentMethod summary becomes "Multiple" once more than one tender has been
+/// recorded across all Pay calls.</summary>
+public record PayRequest(string? PaymentMethod, List<PaymentSplitRequest>? Splits = null, bool AllowPartial = false);
 
 /// <summary>
 /// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData
@@ -148,9 +170,30 @@ public record OrderDto(
     int CurrentFireBatch,
     bool PendingStaffConfirmation,
     List<FireBatchDto> FireBatches,
-    List<OrderPaymentDto> Payments)
+    List<OrderPaymentDto> Payments,
+    decimal LoyaltyDiscountAmount,
+    int LoyaltyPointsRedeemed,
+    decimal ServiceChargeAmount,
+    decimal PackingChargeAmount,
+    decimal DeliveryChargeAmount,
+    decimal TipAmount,
+    decimal RoundOffAmount,
+    // Sum of every OrderPayment recorded so far — non-zero before Paid flips true only when
+    // a partial payment has been collected (see OrdersController.Pay).
+    decimal AmountPaid,
+    decimal BalanceDue,
+    // True once at least one tender has been collected but the bill isn't fully settled yet.
+    // Never true at the same time as Paid.
+    bool PartiallyPaid,
+    // The linked customer's redeemable point balance — null unless the caller (currently only
+    // Get-by-id) loaded the Customer navigation; the Points screen's own AvailablePoints
+    // lookup is the source of truth, this is just a checkout-time preview.
+    int? CustomerAvailablePoints)
 {
-    public static OrderDto From(Order o) => new(
+    public static OrderDto From(Order o)
+    {
+        var amountPaid = o.Payments.Sum(p => p.Amount);
+        return new(
         o.Id,
         $"#{1000 + o.Id}",
         o.Title,
@@ -191,7 +234,19 @@ public record OrderDto(
         o.FireBatches.OrderBy(b => b.BatchNumber)
             .Select(b => new FireBatchDto(b.BatchNumber, b.Status.ToString().ToUpperInvariant(), b.FiredAt, $"#{1000 + b.Id}"))
             .ToList(),
-        o.Payments.Select(OrderPaymentDto.From).ToList());
+        o.Payments.Select(OrderPaymentDto.From).ToList(),
+        o.LoyaltyDiscountAmount,
+        o.LoyaltyPointsRedeemed,
+        o.ServiceChargeAmount,
+        o.PackingChargeAmount,
+        o.DeliveryChargeAmount,
+        o.TipAmount,
+        o.RoundOffAmount,
+        amountPaid,
+        Math.Max(0, o.Total - amountPaid),
+        !o.Paid && amountPaid > 0,
+        o.Customer?.AvailablePoints);
+    }
 }
 
 public record SetStatusRequest(string Status);

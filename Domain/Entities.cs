@@ -233,6 +233,19 @@ public class Order : ITenantScoped
     /// other discount components by RecomputeTotals, not folded into DiscountAmount.</summary>
     public string? GiftCardCode { get; set; }
     public decimal GiftCardAmountApplied { get; set; }
+    /// <summary>Loyalty points redeemed as a bill-time discount (1 point = ₹1, matching the
+    /// earn rate in OrderBuildingService.RecordVisit) — paired with LoyaltyPointsRedeemed,
+    /// summed into the same discount pool as Coupon/GiftCard by RecomputeTotals.</summary>
+    public decimal LoyaltyDiscountAmount { get; set; }
+    public int LoyaltyPointsRedeemed { get; set; }
+    /// <summary>Billing-time charges — added on top of tax, not themselves taxed (kept simple
+    /// rather than re-running per-line GST on a flat add-on). ServiceCharge/Packing/Delivery/
+    /// Tip are always ≥ 0; RoundOff can be either sign (negative rounds the total down).</summary>
+    public decimal ServiceChargeAmount { get; set; }
+    public decimal PackingChargeAmount { get; set; }
+    public decimal DeliveryChargeAmount { get; set; }
+    public decimal TipAmount { get; set; }
+    public decimal RoundOffAmount { get; set; }
     /// <summary>How the bill was settled — Cash / Card / UPI / Multiple. Set when the order
     /// is marked paid; null until then.</summary>
     public string? PaymentMethod { get; set; }

@@ -66,7 +66,10 @@ public class OrdersController(
     [HttpGet("{id:int}")]
     public async Task<ActionResult<OrderDto>> Get(int id)
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        // .Include(o => o.Customer) only here (not List()) — it's what powers OrderDto's
+        // CustomerAvailablePoints preview on the live checkout/bill screens; List() renders
+        // grids of many orders at once and doesn't need the extra join.
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).Include(o => o.Customer).FirstOrDefaultAsync(o => o.Id == id);
         return order is null ? NotFound() : OrderDto.From(order);
     }
 
@@ -730,11 +733,12 @@ public class OrdersController(
         return int.TryParse(claim, out var id) ? id : null;
     }
 
-    /// <summary>Manager-only markdown applied at the billing stage (order must be Served,
-    /// not yet Paid). Kept as its own field, separate from the order-time DiscountAmount.
-    /// Above ApprovalThresholds.DiscountAmount, a Manager (not the Owner — see Refund's
-    /// comment for why) can't apply it directly: it goes to a pending ApprovalRequest and
-    /// only actually lands on the order once the Owner approves it.</summary>
+    /// <summary>Manager-only markdown applied at billing time (any time before Paid — not
+    /// gated on Served, same reasoning as Pay: a QSR/Cash counter settles before anything's
+    /// necessarily cooked). Kept as its own field, separate from the order-time
+    /// DiscountAmount. Above ApprovalThresholds.DiscountAmount, a Manager (not the Owner —
+    /// see Refund's comment for why) can't apply it directly: it goes to a pending
+    /// ApprovalRequest and only actually lands on the order once the Owner approves it.</summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPatch("{id:int}/bill-discount")]
     public async Task<ActionResult<OrderDto>> ApplyBillDiscount(int id, BillDiscountRequest req)
@@ -742,7 +746,6 @@ public class OrdersController(
         var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot discount a paid order.");
-        if (order.Status != OrderStatus.Served) throw new ApiConflictException("A bill discount can only be applied once the order has been served.");
         if ((req.Pct is null) == (req.Amount is null)) throw new ApiValidationException("Provide either a percentage or a flat amount, not both.");
 
         var amount = req.Amount ?? Math.Round(order.Subtotal * (req.Pct ?? 0) / 100, 2);
@@ -771,15 +774,14 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
-    /// <summary>Redeems a coupon at billing time (order must be Served, not yet Paid). Only
-    /// one coupon per order.</summary>
+    /// <summary>Redeems a coupon at billing time (any time before Paid — not gated on
+    /// Served, see ApplyBillDiscount). Only one coupon per order.</summary>
     [HttpPatch("{id:int}/bill-coupon")]
     public async Task<ActionResult<OrderDto>> ApplyBillCoupon(int id, BillCouponRequest req)
     {
         var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a coupon to a paid order.");
-        if (order.Status != OrderStatus.Served) throw new ApiConflictException("Coupons are applied at billing time, once the order has been served.");
         if (order.CouponCode is not null) throw new ApiConflictException("A coupon has already been applied to this order.");
         if (string.IsNullOrWhiteSpace(req.Code)) throw new ApiValidationException("Enter a coupon code.");
 
@@ -802,15 +804,15 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
-    /// <summary>Redeems a gift card at billing time (order must be Served, not yet Paid).
-    /// Debits only what this bill can absorb. Only one gift card per order.</summary>
+    /// <summary>Redeems a gift card at billing time (any time before Paid — not gated on
+    /// Served, see ApplyBillDiscount). Debits only what this bill can absorb. Only one gift
+    /// card per order.</summary>
     [HttpPatch("{id:int}/bill-giftcard")]
     public async Task<ActionResult<OrderDto>> ApplyBillGiftCard(int id, BillGiftCardRequest req)
     {
         var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a gift card to a paid order.");
-        if (order.Status != OrderStatus.Served) throw new ApiConflictException("Gift cards are applied at billing time, once the order has been served.");
         if (order.GiftCardCode is not null) throw new ApiConflictException("A gift card has already been applied to this order.");
         if (string.IsNullOrWhiteSpace(req.Code)) throw new ApiValidationException("Enter a gift card code.");
 
@@ -819,12 +821,73 @@ public class OrdersController(
         if (giftCard.Status != GiftCardStatus.Active) throw new ApiConflictException("Gift card is not active.");
         if (giftCard.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Gift card has expired.");
 
-        var owedBeforeGiftCard = Math.Max(0, order.Subtotal - order.DiscountAmount - order.BillDiscountAmount - order.CouponDiscountAmount);
+        var owedBeforeGiftCard = Math.Max(0, order.Subtotal - order.DiscountAmount - order.BillDiscountAmount - order.CouponDiscountAmount - order.LoyaltyDiscountAmount);
         var redeem = Math.Min(giftCard.Balance, owedBeforeGiftCard);
         order.GiftCardCode = giftCard.Code;
         order.GiftCardAmountApplied = redeem;
         giftCard.Balance -= redeem;
         if (giftCard.Balance <= 0) giftCard.Status = GiftCardStatus.Used;
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Redeems the order's linked customer's loyalty points as a bill-time discount
+    /// (1 point = ₹1, matching the earn rate in OrderBuildingService.RecordVisit). Same
+    /// not-gated-on-Served timing as the other billing-time adjustments above. Gated on a real
+    /// guest phone number — an anonymous walk-in's Customer row is a shared bucket (see
+    /// OrderBuildingService.FindOrCreateCustomerAsync), not a real individual's point balance,
+    /// so redeeming against it wouldn't mean anything.</summary>
+    [HttpPatch("{id:int}/bill-loyalty")]
+    public async Task<ActionResult<OrderDto>> ApplyBillLoyalty(int id, BillLoyaltyRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
+            .Include(o => o.FireBatches).Include(o => o.Payments).Include(o => o.Customer)
+            .FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot redeem points on a paid order.");
+        if (order.LoyaltyPointsRedeemed > 0) throw new ApiConflictException("Loyalty points have already been redeemed on this order.");
+        if (string.IsNullOrWhiteSpace(order.GuestPhone)) throw new ApiValidationException("A guest mobile number is needed to redeem loyalty points.");
+        if (req.Points <= 0) throw new ApiValidationException("Points must be positive.");
+        var customer = order.Customer ?? throw new ApiValidationException("No customer linked to this order.");
+        if (req.Points > customer.AvailablePoints) throw new ApiValidationException($"Only {customer.AvailablePoints} points available.");
+
+        var owedBeforeLoyalty = Math.Max(0, order.Subtotal - order.DiscountAmount - order.BillDiscountAmount - order.CouponDiscountAmount - order.GiftCardAmountApplied);
+        var redeemedPoints = Math.Min(req.Points, (int)Math.Floor(owedBeforeLoyalty));
+        if (redeemedPoints <= 0) throw new ApiConflictException("Nothing left on this bill for points to cover.");
+
+        customer.RedeemedPoints += redeemedPoints;
+        order.LoyaltyPointsRedeemed = redeemedPoints;
+        order.LoyaltyDiscountAmount = redeemedPoints;
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Sets Service Charge / Packing Charge / Delivery Charge / Tip / Round Off in
+    /// one call — every field optional, only the ones supplied change (send 0 to clear one).
+    /// Same not-gated-on-Served timing as the discount/coupon/gift-card adjustments above, and
+    /// open to any authenticated staff (not Owner/Manager-only) since these are routine billing
+    /// add-ons, not a discretionary markdown.</summary>
+    [HttpPatch("{id:int}/bill-charges")]
+    public async Task<ActionResult<OrderDto>> ApplyBillCharges(int id, BillChargesRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot adjust charges on a paid order.");
+        if (req.ServiceChargePct is not null && req.ServiceChargeAmount is not null)
+            throw new ApiValidationException("Provide either a service charge percentage or a flat amount, not both.");
+        if (req.ServiceChargePct is < 0 || req.ServiceChargeAmount is < 0 || req.PackingChargeAmount is < 0
+            || req.DeliveryChargeAmount is < 0 || req.TipAmount is < 0)
+            throw new ApiValidationException("Charges cannot be negative.");
+
+        if (req.ServiceChargePct is not null) order.ServiceChargeAmount = Math.Round(order.Subtotal * req.ServiceChargePct.Value / 100, 2);
+        else if (req.ServiceChargeAmount is not null) order.ServiceChargeAmount = req.ServiceChargeAmount.Value;
+        if (req.PackingChargeAmount is not null) order.PackingChargeAmount = req.PackingChargeAmount.Value;
+        if (req.DeliveryChargeAmount is not null) order.DeliveryChargeAmount = req.DeliveryChargeAmount.Value;
+        if (req.TipAmount is not null) order.TipAmount = req.TipAmount.Value;
+        if (req.RoundOffAmount is not null) order.RoundOffAmount = req.RoundOffAmount.Value;
+
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
         return OrderDto.From(order);
@@ -869,13 +932,32 @@ public class OrdersController(
                 if (split.Amount <= 0)
                     throw new ApiValidationException("Each split amount must be greater than zero.");
             }
+            // Cumulative across every Pay call on this order — a partial payment (AllowPartial)
+            // can be topped up by a later call, so what matters is the running total against
+            // the bill, not just what this one call brought.
             var splitTotal = splits.Sum(s => s.Amount);
-            if (Math.Abs(splitTotal - order.Total) > 0.01m)
-                throw new ApiValidationException($"Split amounts (₹{splitTotal:0.00}) must add up to the bill total (₹{order.Total:0.00}).");
+            var alreadyPaid = order.Payments.Sum(p => p.Amount);
+            var remaining = order.Total - alreadyPaid;
+            var newTotalPaid = alreadyPaid + splitTotal;
 
-            order.PaymentMethod = splits.Count > 1 ? "Multiple" : splits[0].Method.Trim();
+            if (splitTotal - remaining > 0.01m)
+                throw new ApiValidationException($"Payment (₹{splitTotal:0.00}) is more than the remaining balance (₹{remaining:0.00}).");
+            if (!req.AllowPartial && Math.Abs(splitTotal - remaining) > 0.01m)
+                throw new ApiValidationException($"Split amounts (₹{splitTotal:0.00}) must add up to the remaining balance (₹{remaining:0.00}).");
+
             foreach (var split in splits)
                 order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = split.Method.Trim(), Amount = split.Amount });
+            order.PaymentMethod = order.Payments.Count > 1 ? "Multiple" : order.Payments[0].Method;
+
+            // Balance fully covered (allowing for rounding) — settle for real. Otherwise this
+            // was a deliberate partial tender (AllowPartial): leave Paid false, the Payments
+            // rows recorded above already carry the running AmountPaid/BalanceDue (see
+            // OrderDto.From) and a later Pay call collects the rest.
+            if (order.Total - newTotalPaid > 0.01m)
+            {
+                await db.SaveChangesAsync();
+                return OrderDto.From(order);
+            }
         }
         else
         {

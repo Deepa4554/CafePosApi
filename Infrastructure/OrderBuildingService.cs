@@ -567,7 +567,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             throw new InvalidOperationException(
                 $"RecomputeTotals needs order {o.Id}'s Items loaded — fetch it with .Include(o => o.Items).");
 
-        var totalDiscount = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied;
+        var totalDiscount = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount;
         var lines = o.Items.Where(i => !i.Voided).ToList();
         var gross = lines.Sum(i => i.Price * i.Qty);
         var discount = Math.Min(Math.Max(0, totalDiscount), gross);
@@ -591,7 +591,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
 
         o.Tax = tax;
-        o.Total = Math.Max(0, gross - discount) + tax;
+        o.Total = Math.Max(0, gross - discount) + tax
+            + o.ServiceChargeAmount + o.PackingChargeAmount + o.DeliveryChargeAmount + o.TipAmount + o.RoundOffAmount;
     }
 
     private async Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null)
