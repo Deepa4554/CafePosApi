@@ -18,6 +18,7 @@ public static class ScreenCatalog
         ["KDS"] = PlanCategory.Normal,
         ["AI"] = PlanCategory.Plus,
         ["TokenDashboard"] = PlanCategory.Normal,
+        ["TakeawayDelivery"] = PlanCategory.Normal,
         ["QRMenu"] = PlanCategory.Normal,
         ["Billing"] = PlanCategory.Normal,
         ["CRM"] = PlanCategory.Plus,

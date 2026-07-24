@@ -1007,6 +1007,28 @@ public class OrdersController(
                 order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = method, Amount = order.Total });
         }
 
+        // KeepOpen: the payment above fully covers the balance, but this is a deliberate
+        // advance (Pay First) rather than a real settle — leave Paid false/PartiallyPaid true
+        // so AddItem/RemoveItem/etc (which only gate on Paid) keep working. If more items get
+        // added later, BalanceDue goes positive again on its own (Total grows, AmountPaid
+        // doesn't); if not, Close finalizes it without a further payment.
+        if (req?.KeepOpen == true)
+        {
+            await db.SaveChangesAsync();
+            return OrderDto.From(order);
+        }
+
+        await CloseOrderAsync(order);
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>Marks Paid and closes any linked guest session — the actual "this bill is now
+    /// settled" transition, shared by Pay (once a payment fully covers the balance) and Close
+    /// (finalizing a KeepOpen/Pay First order that already covers its balance with no further
+    /// payment to collect). See PayRequest.KeepOpen.</summary>
+    private async Task CloseOrderAsync(Order order)
+    {
         order.Paid = true;
 
         // Guest-session settle hook (doc Section 5.1): the exact instant a table's bill
@@ -1021,7 +1043,26 @@ public class OrdersController(
             session.ClosedReason = SessionCloseReason.Settled;
             session.ClosedAt = DateTime.UtcNow;
         }
+    }
 
+    /// <summary>Finalizes a KeepOpen (Pay First) order once no more items are going to be
+    /// added — the payment already recorded fully covers the balance, so there's nothing new
+    /// to collect, just the "this is genuinely done" transition that Pay's balance-due flow
+    /// can't express (it always requires a positive amount to submit). Rejects if anything's
+    /// still owed; use Pay to collect that first.</summary>
+    [HttpPatch("{id:int}/close")]
+    public async Task<ActionResult<OrderDto>> Close(int id)
+    {
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
+        if (order.Paid) throw new ApiConflictException("Order is already paid.");
+
+        var remaining = order.Total - order.Payments.Sum(p => p.Amount);
+        if (remaining > 0.01m)
+            throw new ApiValidationException($"₹{remaining:0.00} is still due — collect that before closing.");
+
+        await CloseOrderAsync(order);
         await db.SaveChangesAsync();
         return OrderDto.From(order);
     }

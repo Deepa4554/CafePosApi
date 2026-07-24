@@ -71,8 +71,12 @@ public record PaymentSplitRequest(string Method, decimal Amount);
 /// and leave the rest owing — the order becomes PartiallyPaid instead of Paid, and Pay can be
 /// called again later with the remainder. PaymentMethod is ignored when Splits is given, and
 /// the order's PaymentMethod summary becomes "Multiple" once more than one tender has been
-/// recorded across all Pay calls.</summary>
-public record PayRequest(string? PaymentMethod, List<PaymentSplitRequest>? Splits = null, bool AllowPartial = false);
+/// recorded across all Pay calls. KeepOpen is the opposite kind of exception: the payment
+/// fully covers (or exceeds) the balance, but the order should NOT close — e.g. a Pay First
+/// order that's still expected to have more items added. The order stays Paid=false/
+/// PartiallyPaid=true even at 100% covered; OrdersController.Close finalizes it later once
+/// nothing more will be added.</summary>
+public record PayRequest(string? PaymentMethod, List<PaymentSplitRequest>? Splits = null, bool AllowPartial = false, bool KeepOpen = false);
 
 /// <summary>
 /// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData
