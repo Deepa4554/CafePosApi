@@ -70,6 +70,10 @@ public class SupabaseImageStorageService(HttpClient http, IOptions<SupabaseStora
 
         using var request = new HttpRequestMessage(HttpMethod.Post, uploadUrl) { Content = content };
         request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _options.SecretKey);
+        // Supabase's newer "sb_secret_..." API key format is not a JWT, so the gateway also
+        // needs it echoed in the apikey header (Authorization alone gets rejected as
+        // "Invalid Compact JWS") — same requirement as the JS client's global headers.
+        request.Headers.Add("apikey", _options.SecretKey);
 
         HttpResponseMessage response;
         try
