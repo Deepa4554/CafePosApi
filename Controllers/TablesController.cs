@@ -30,7 +30,16 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
     [HttpGet]
     public async Task<IEnumerable<object>> List()
     {
-        var tables = await db.Tables.OrderBy(t => t.Id).ToListAsync();
+        var allTables = await db.Tables.OrderBy(t => t.Id).ToListAsync();
+        // A merged-in "guest" table (see CafeTable.MergedIntoTableId) is hidden from the
+        // grid entirely — its seats fold into its host's MergedSeats below instead — since
+        // merging is a floor-plan concept (temporarily one bookable unit), not a second row
+        // to show alongside its host.
+        var tables = allTables.Where(t => t.MergedIntoTableId is null).ToList();
+        var guestsByHost = allTables
+            .Where(t => t.MergedIntoTableId is not null)
+            .GroupBy(t => t.MergedIntoTableId!.Value)
+            .ToDictionary(g => g.Key, g => g.ToList());
         var openOrders = await db.Orders
             .Where(o => !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served) && o.TableCode != null)
             .Select(o => new { o.Id, o.TableCode, o.Status, o.Total, o.GuestName, o.GuestPhone })
@@ -47,6 +56,7 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
         return tables.Select(t =>
         {
             var order = openOrders.FirstOrDefault(o => o.TableCode == t.Code);
+            var guests = guestsByHost.GetValueOrDefault(t.Id);
             return new
             {
                 t.Id,
@@ -61,6 +71,11 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
                 GuestPhone = order?.GuestPhone,
                 QrToken = qrTokens.Encode(t.TenantId, t.Code),
                 ActiveSessionId = activeSessionsByTable.GetValueOrDefault(t.Id),
+                // t.Seats itself is never touched by a merge (see MergedIntoTableId's doc
+                // comment) — MergedSeats is the read-time sum, so Unmerge needs no reconciliation.
+                MergedSeats = guests is null ? t.Seats : t.Seats + guests.Sum(g => g.Seats),
+                // Id included (not just Code) — Unmerge is called per-guest by id.
+                MergedWith = guests?.Select(g => new { g.Id, g.Code }).ToList() ?? [],
             };
         });
     }
@@ -147,11 +162,66 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
         var table = await db.Tables.FindAsync(id);
         if (table is null) return NotFound();
 
+        if (table.MergedIntoTableId is not null) throw new ApiConflictException($"Table {table.Code} is merged with another table — unmerge it first.");
+        if (await db.Tables.AnyAsync(t => t.MergedIntoTableId == id)) throw new ApiConflictException($"Table {table.Code} has other tables merged into it — unmerge them first.");
+
         var busy = await db.Orders.AnyAsync(o => o.TableCode == table.Code && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
         if (busy) throw new ApiConflictException($"Table {table.Code} has an open order.");
 
         db.Tables.Remove(table);
         await db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>Temporarily folds one currently-empty table's seating into another's — for a
+    /// party bigger than one table holds, before anyone's ordered anything (see
+    /// CafeTable.MergedIntoTableId's doc comment). Owner/Manager only, same gate as
+    /// Create/Delete since this restructures the floor plan. Deliberately NOT for combining
+    /// two already-occupied tables' bills — every real request for this feature turned out to
+    /// mean "more seats for one party", not "merge two running orders into one invoice".</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("{id:int}/merge")]
+    public async Task<IActionResult> Merge(int id, MergeTableRequest req)
+    {
+        if (id == req.TargetHostTableId) throw new ApiValidationException("Pick a different table to merge with.");
+
+        var guest = await db.Tables.FindAsync(id);
+        if (guest is null) return NotFound();
+        var host = await db.Tables.FindAsync(req.TargetHostTableId);
+        if (host is null) throw new ApiValidationException("Target table not found.");
+
+        // Flat structure only — a guest can't itself be (or become) a host, and vice versa.
+        if (guest.MergedIntoTableId is not null) throw new ApiConflictException($"Table {guest.Code} is already merged with another table.");
+        if (host.MergedIntoTableId is not null) throw new ApiConflictException($"Table {host.Code} is itself merged into another table — merge with its host instead.");
+        if (await db.Tables.AnyAsync(t => t.MergedIntoTableId == guest.Id)) throw new ApiConflictException($"Table {guest.Code} already has other tables merged into it.");
+
+        var guestBusy = await db.Orders.AnyAsync(o => o.TableCode == guest.Code && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
+        if (guestBusy) throw new ApiConflictException($"Table {guest.Code} has an open order — only empty tables can be merged.");
+        var hostBusy = await db.Orders.AnyAsync(o => o.TableCode == host.Code && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
+        if (hostBusy) throw new ApiConflictException($"Table {host.Code} has an open order — only empty tables can be merged.");
+
+        guest.MergedIntoTableId = host.Id;
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.TableMerge, AuditResource.Table, host.Id.ToString(),
+            $"Table {guest.Code} merged into {host.Code}.", AuditSeverity.Low);
+        return NoContent();
+    }
+
+    /// <summary>Splits a merged-in table back out to standalone — the reverse of Merge.
+    /// Seats on both rows were never mutated by Merge, so this needs no reconciliation.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("{id:int}/unmerge")]
+    public async Task<IActionResult> Unmerge(int id)
+    {
+        var table = await db.Tables.FindAsync(id);
+        if (table is null) return NotFound();
+        if (table.MergedIntoTableId is null) throw new ApiValidationException($"Table {table.Code} isn't merged with anything.");
+
+        var host = await db.Tables.FindAsync(table.MergedIntoTableId.Value);
+        table.MergedIntoTableId = null;
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.TableMerge, AuditResource.Table, id.ToString(),
+            $"Table {table.Code} split back out from {host?.Code ?? "its host"}.", AuditSeverity.Low);
         return NoContent();
     }
 }

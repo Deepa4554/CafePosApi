@@ -94,6 +94,7 @@ public enum AuditAction
     BillingChange, SubscriptionChange,
     SettingsChange, Export,
     ApprovalGranted, ApprovalDenied,
+    TableShift, TableMerge,
 }
 
 public enum AuditResource { Order, Customer, Staff, Inventory, Menu, Invoice, Subscription, Auth, Settings, Branch, Table, Attendance, Payroll, Loan }

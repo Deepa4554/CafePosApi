@@ -644,6 +644,46 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
+    /// <summary>Moves an in-progress dine-in order to a different, currently-empty table —
+    /// e.g. a party asks to move seats. Only relabels TableCode/Title; every line item, fire
+    /// batch, and total is untouched. No Owner/Manager gate — same routine-floor-action
+    /// availability as Fire/Add Items, not Cancel's stricter one, since nothing here is
+    /// destructive or reversible-by-undo-only. Deliberately does NOT support swapping two
+    /// already-occupied tables' orders — every real request for this feature turned out to
+    /// mean "move this one order", not "exchange two".</summary>
+    [HttpPost("{id:int}/shift-table")]
+    public async Task<ActionResult<OrderDto>> ShiftTable(int id, ShiftTableRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Cancelled) throw new ApiConflictException("This order is cancelled.");
+        if (order.TableCode is null) throw new ApiValidationException("This order isn't seated at a table.");
+
+        var newCode = req.NewTableCode.Trim();
+        if (string.IsNullOrWhiteSpace(newCode)) throw new ApiValidationException("Pick a table to shift to.");
+        if (newCode == order.TableCode) throw new ApiValidationException($"Already at table {newCode}.");
+        if (!await db.Tables.AnyAsync(t => t.Code == newCode)) throw new ApiValidationException($"Table {newCode} doesn't exist.");
+
+        // Same "is this table free" rule TablesController.List/Delete already use — a table
+        // only reads as occupied while it has a live (not cancelled, not fully paid+served) order.
+        var busy = await db.Orders.AnyAsync(o => o.TableCode == newCode && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
+        if (busy) throw new ApiConflictException($"Table {newCode} already has an open order.");
+
+        var oldCode = order.TableCode;
+        order.TableCode = newCode;
+        // Title is a creation-time snapshot (see OrderBuildingService's title-building
+        // switch), not derived at read time — leaving it stale would mislead anywhere it's
+        // shown directly (order history, notifications), even though KOT/receipt printing
+        // already reconstructs its own title from TableCode fresh at print time.
+        var guestSuffix = string.IsNullOrWhiteSpace(order.GuestName) ? "" : $" – {order.GuestName.Trim()}";
+        order.Title = $"Table #{newCode}{guestSuffix}";
+
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.TableShift, AuditResource.Order, order.Id.ToString(),
+            $"Order {order.Id} shifted from table {oldCode} to {newCode}.", AuditSeverity.Low);
+        return OrderDto.From(order);
+    }
+
     /// <summary>Cancels one whole KOT/fire-batch — voids every not-yet-served line in THAT
     /// round only, via the same before-cook-reverses/after-cook-doesn't rule as
     /// RemoveItem/Cancel (see VoidItemAsync). Every other round on the order (already

@@ -28,6 +28,8 @@ public record RefundOrderRequest(decimal? Amount, string? Reason);
 
 public record CancelOrderRequest(string? Reason);
 
+public record ShiftTableRequest(string NewTableCode);
+
 // ---------- Order lifecycle (add item / fire / billing-time discounts / payment) ----------
 
 public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null);
@@ -373,6 +375,8 @@ public record BestSellerDto(int Id, string Name, string Category, decimal Price,
 // ---------- Tables ----------
 
 public record CreateTableRequest(string Zone, int Seats);
+
+public record MergeTableRequest(int TargetHostTableId);
 
 // ---------- Inventory ----------
 

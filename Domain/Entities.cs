@@ -161,6 +161,17 @@ public class CafeTable : ITenantScoped
     public required string Code { get; set; }
     public required string Zone { get; set; }
     public int Seats { get; set; }
+    /// <summary>Set only on a "guest" table temporarily folded into another ("host") table's
+    /// seating for a party too big for one table — e.g. T5.MergedIntoTableId = T3.Id. Null
+    /// on every standalone table, and on a host itself (structure is flat: a host can have
+    /// many guests, but a guest can never itself be a host — see TablesController.Merge).
+    /// Merging is only ever offered between two currently-EMPTY tables (TablesController.List
+    /// derives occupancy from live Orders, never from this field) — a big party's actual
+    /// order still just goes on the host's own Code once seated, nothing else changes about
+    /// how orders work. TablesController.List hides any table with this set from the normal
+    /// grid and folds its Seats into the host's reported total; Unmerge clears it back to null,
+    /// fully reversible since Seats itself is never mutated on either row.</summary>
+    public int? MergedIntoTableId { get; set; }
 }
 
 /// <summary>One row per (tenant, calendar day) — LastNumber is incremented atomically via an
