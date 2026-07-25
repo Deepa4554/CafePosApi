@@ -165,6 +165,19 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         return await menuPhotoAi.ExtractMenuItemsAsync(req.ImageDataUri);
     }
 
+    /// <summary>Categorizes menu text the client already OCR'd on-device (Tesseract.js) via
+    /// Groq — the free tier that doesn't need Google Cloud billing set up (see
+    /// MenuPhotoAiService.CategorizeOcrTextAsync). Same empty-isn't-an-error contract as
+    /// ImportPhoto above.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("categorize-text")]
+    public async Task<ActionResult<List<CreateMenuItemRequest>>> CategorizeText(CategorizeMenuTextRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.OcrText))
+            throw new ApiValidationException("OCR text is required.");
+        return await menuPhotoAi.CategorizeOcrTextAsync(req.OcrText);
+    }
+
     /// <summary>
     /// Powers CSV import (onboarding "Import from CSV" and any future bulk-add flow).
     /// Rows missing a name or with a negative/zero price are silently skipped rather

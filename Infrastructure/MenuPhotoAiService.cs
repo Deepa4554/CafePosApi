@@ -10,6 +10,13 @@ namespace CafePOS.Api.Infrastructure;
 public interface IMenuPhotoAiService
 {
     Task<List<CreateMenuItemRequest>> ExtractMenuItemsAsync(string imageDataUri, CancellationToken ct = default);
+
+    /// <summary>Categorizes menu text that's already been OCR'd elsewhere (the client's own
+    /// on-device Tesseract.js pass — see menuPhotoImport.ts) via Groq alone, skipping Google
+    /// Vision entirely. Exists because Vision requires a Google Cloud billing account linked
+    /// before it'll serve any request at all (even within its free tier), which is a real
+    /// setup hurdle Tesseract.js + Groq doesn't have — this works with just GROQ_API_KEY.</summary>
+    Task<List<CreateMenuItemRequest>> CategorizeOcrTextAsync(string ocrText, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -91,6 +98,22 @@ public class MenuPhotoAiService(HttpClient http, IConfiguration configuration, I
         }
 
         return [];
+    }
+
+    public async Task<List<CreateMenuItemRequest>> CategorizeOcrTextAsync(string ocrText, CancellationToken ct = default)
+    {
+        var groqKey = configuration["GROQ_API_KEY"];
+        if (string.IsNullOrWhiteSpace(groqKey)) return [];
+
+        try
+        {
+            return await CallGroqAsync(groqKey, ocrText, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Groq menu-text categorization failed");
+            return [];
+        }
     }
 
     private static (string MediaType, string Base64) ParseDataUri(string dataUri)

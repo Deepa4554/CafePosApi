@@ -317,6 +317,9 @@ public record CreateMenuItemRequest(
 /// own image picker already produces for every other photo upload in the app.</summary>
 public record ImportMenuPhotoRequest(string ImageDataUri);
 
+/// <summary>Raw text already OCR'd client-side (Tesseract.js) — see MenuController.CategorizeText.</summary>
+public record CategorizeMenuTextRequest(string OcrText);
+
 public record UpdateMenuItemRequest(
     string? Name,
     string? Category,
