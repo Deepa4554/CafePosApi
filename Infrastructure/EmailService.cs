@@ -1,6 +1,7 @@
-using System.Net;
-using System.Net.Mail;
+using MailKit.Net.Smtp;
+using MailKit.Security;
 using Microsoft.Extensions.Options;
+using MimeKit;
 
 namespace CafePOS.Api.Infrastructure;
 
@@ -35,11 +36,16 @@ public interface IEmailService
 /// account needed beyond the Gmail address itself. If unconfigured, falls back to
 /// logging the code so local development never gets blocked on email setup.
 ///
-/// Note: the caller (AuthController.IssueOtpAsync) fires this without awaiting it —
-/// SmtpClient.Timeout doesn't reliably abort a hung TCP connect on Linux, so if Gmail's
-/// SMTP is slow/blocked from the host, this call can still hang well past the 8s below;
-/// the fire-and-forget wrapper is what actually keeps the HTTP response (and the mobile
-/// client) from hanging along with it, regardless of whether this timeout kicks in.
+/// Uses MailKit rather than the legacy System.Net.Mail.SmtpClient: on Render's Linux
+/// containers, smtp.gmail.com resolves to an IPv6 address first, but the container has
+/// no outbound IPv6 route — System.Net.Mail.SmtpClient only tries the first resolved
+/// address and fails outright (SocketException 101 "Network is unreachable"), which is
+/// exactly the silent production failure this class used to have. MailKit's ConnectAsync
+/// walks every resolved address until one connects, so it falls through to IPv4 fine.
+///
+/// Note: the caller (AuthController.IssueOtpAsync) fires this without awaiting it, so a
+/// slow/hung connection attempt can't make the HTTP response (and the mobile client) hang
+/// along with it.
 /// </summary>
 public class SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailService> logger) : IEmailService
 {
@@ -57,16 +63,13 @@ public class SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailS
             ? "We received a request to reset the password on your PrabandhOS account."
             : "This is to inform you that you have registered successfully with PrabandhOS.";
 
-        using var client = new SmtpClient("smtp.gmail.com", 587)
+        var message = new MimeMessage();
+        message.From.Add(MailboxAddress.Parse(_options.GmailAddress));
+        message.To.Add(MailboxAddress.Parse(toEmail));
+        message.Subject = purpose == OtpPurpose.PasswordReset ? "Reset your password" : "Verify your email";
+        message.Body = new TextPart("plain")
         {
-            Credentials = new NetworkCredential(_options.GmailAddress, _options.GmailAppPassword),
-            EnableSsl = true,
-            Timeout = 8000,
-        };
-        using var message = new MailMessage(_options.GmailAddress, toEmail)
-        {
-            Subject = purpose == OtpPurpose.PasswordReset ? "Reset your password" : "Verify your email",
-            Body = $"Hi there,\n\n" +
+            Text = $"Hi there,\n\n" +
                    $"{intro}\n\n" +
                    $"Here is your OTP to verify your email:-\n\n" +
                    $"{code}\n\n" +
@@ -75,9 +78,13 @@ public class SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailS
                    $"PrabandhOS Team",
         };
 
+        using var client = new SmtpClient { Timeout = 8000 };
         try
         {
-            await client.SendMailAsync(message);
+            await client.ConnectAsync("smtp.gmail.com", 587, SecureSocketOptions.StartTls);
+            await client.AuthenticateAsync(_options.GmailAddress, _options.GmailAppPassword);
+            await client.SendAsync(message);
+            await client.DisconnectAsync(true);
         }
         catch (Exception ex)
         {
