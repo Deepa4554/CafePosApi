@@ -19,7 +19,7 @@ public interface IOrderBuildingService
     Task<Order> BuildOrderAsync(
         CafePosDbContext db, string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
         decimal discountPct, ClaimsPrincipal? user, int? explicitTenantId = null, int? branchId = null,
-        string? guestPhone = null, int? servedByStaffId = null);
+        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null);
 
     /// <summary>Adds a new unfired cart line or overwrites an existing unfired line's qty for
     /// the same (menuItemId, modifier) pair — qty is the line's FINAL quantity, not a delta.
@@ -88,7 +88,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     public async Task<Order> BuildOrderAsync(
         CafePosDbContext db, string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
         decimal discountPct, ClaimsPrincipal? user, int? explicitTenantId = null, int? branchId = null,
-        string? guestPhone = null, int? servedByStaffId = null)
+        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null)
     {
         if (items.Count == 0)
             throw new ApiValidationException("Order must contain at least one item.");
@@ -221,7 +221,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         if (explicitTenantId is int tid2) order.TenantId = tid2;
         db.Orders.Add(order);
 
-        var customer = await FindOrCreateCustomerAsync(db, guest ?? "Walk-in Guest", guestPhone, explicitTenantId);
+        var customer = await FindOrCreateCustomerAsync(db, guest ?? "Walk-in Guest", guestPhone, explicitTenantId, guestAddress);
         order.Customer = customer;
         RecordVisit(customer, order.Total);
         TrackFavorites(db, customer, orderItems, explicitTenantId);
@@ -595,7 +595,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             + o.ServiceChargeAmount + o.PackingChargeAmount + o.DeliveryChargeAmount + o.TipAmount + o.RoundOffAmount;
     }
 
-    private async Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null)
+    private async Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null, string? guestAddress = null)
     {
         var customersQuery = TenantScoped(db.Customers, explicitTenantId).Include(c => c.FavoriteItems);
 
@@ -609,9 +609,14 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             customer = await customersQuery.FirstOrDefaultAsync(c => c.Name.ToLower() == normalizedName);
         }
 
+        var trimmedAddress = string.IsNullOrWhiteSpace(guestAddress) ? null : guestAddress.Trim();
+
         if (customer is not null)
         {
             if (guestPhone is not null && customer.Phone is null) customer.Phone = guestPhone;
+            // Overwrite rather than "only if blank" — a returning guest who gives a new
+            // address at the counter has moved, the old one on file is stale either way.
+            if (trimmedAddress is not null) customer.AddressLine1 = trimmedAddress;
             return customer;
         }
 
@@ -620,6 +625,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         {
             Name = guestName,
             Phone = guestPhone,
+            AddressLine1 = trimmedAddress,
             ReferralCode = $"{(slug.Length >= 4 ? slug[..4] : slug.PadRight(4, 'X'))}{Random.Shared.Next(100, 999)}",
         };
         if (explicitTenantId is int tid) customer.TenantId = tid;

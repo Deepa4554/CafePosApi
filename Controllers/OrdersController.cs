@@ -159,7 +159,7 @@ public class OrdersController(
         // it to the kitchen — the POS calls POST /orders/{id}/fire as an explicit second
         // step (or "Hold Order" skips firing). This is what separates ordering from kitchen
         // dispatch: an order can exist and be edited before any item is sent to the line.
-        var order = await orderBuilder.BuildOrderAsync(db, req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, User, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId);
+        var order = await orderBuilder.BuildOrderAsync(db, req.OrderType, req.TableCode, req.GuestName, req.Items, req.DiscountPct, User, branchId: req.BranchId, guestPhone: normalizedPhone, servedByStaffId: req.ServedByStaffId, guestAddress: req.GuestAddress);
 
         // A QSR counter order has no staff member coming back to press "Fire" — like the
         // guest-QR path, it goes straight to the kitchen the instant it's rung up.

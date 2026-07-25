@@ -22,7 +22,10 @@ public record CreateOrderRequest(
     // Who actually took/served this order — omit to default to the logged-in user's
     // own StaffMember record (self-service waiter); explicit when a Cashier/Manager/
     // Owner rings up an order on behalf of a different waiter from a shared counter POS.
-    int? ServedByStaffId = null);
+    int? ServedByStaffId = null,
+    // Saved onto the guest's Customer record (see OrderBuildingService.FindOrCreateCustomerAsync)
+    // rather than the order itself — useful for delivery, and remembered for next visit.
+    string? GuestAddress = null);
 
 public record RefundOrderRequest(decimal? Amount, string? Reason);
 
