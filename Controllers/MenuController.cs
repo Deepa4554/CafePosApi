@@ -303,6 +303,27 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         return NoContent();
     }
 
+    /// <summary>Wipes the entire menu in one go — "start over" for a cafe that imported a
+    /// bad CSV/photo batch and would rather clear everything than delete items one at a
+    /// time. Past orders are untouched: OrderItem keeps its own name/price snapshot and
+    /// only loosely references MenuItemId (no DB-level FK), same as every other loose
+    /// reference in this schema, so order history and reports stay intact even though the
+    /// menu items themselves are gone. Same per-item image cleanup as the single Delete
+    /// above, just for every item at once.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpDelete]
+    public async Task<IActionResult> DeleteAll()
+    {
+        var images = await db.MenuItemImages.ToListAsync();
+        db.MenuItemImages.RemoveRange(images);
+
+        var items = await db.MenuItems.ToListAsync();
+        db.MenuItems.RemoveRange(items);
+
+        await db.SaveChangesAsync();
+        return NoContent();
+    }
+
     /// <summary>Extra photos beyond the item's single cover Image — a gallery an owner
     /// can build up over time (plating shot, ingredients close-up, etc.).</summary>
     [Authorize]
