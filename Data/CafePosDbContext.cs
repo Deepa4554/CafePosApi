@@ -241,6 +241,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<InventoryTransaction>().Property(t => t.Type).HasConversion<string>();
         modelBuilder.Entity<InventoryTransaction>().Property(t => t.WasteReasonCode).HasConversion<string>();
         modelBuilder.Entity<StockTake>().Property(s => s.Status).HasConversion<string>();
+        modelBuilder.Entity<PurchaseOrder>().Property(p => p.Status).HasConversion<string>();
         modelBuilder.Entity<GuestSession>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<GuestSession>().Property(s => s.ClosedReason).HasConversion<string>();
         modelBuilder.Entity<AppUser>().Property(u => u.AccessMode).HasConversion<string>();

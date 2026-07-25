@@ -218,7 +218,7 @@ builder.Services.AddSingleton<IRealtimeNotifier, RealtimeNotifier>();
 const string DevCorsPolicy = "DevCors";
 const string ProdCorsPolicy = "ProdCors";
 var lanOriginPattern = new System.Text.RegularExpressions.Regex(
-    @"^http://(localhost|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}):(3000|8081)$");
+    @"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}):\d+$");
 // Real deployed frontend origin(s) — set via appsettings.Production.json /
 // env var "AllowedOrigins__0" etc. once the frontend has a real domain. Empty
 // by default so production doesn't silently fall back to the dev LAN policy.

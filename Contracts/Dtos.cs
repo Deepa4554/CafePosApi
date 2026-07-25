@@ -424,15 +424,22 @@ public record UpdateVendorRequest(string Name, string? Phone, string? Email, str
 
 // ---------- Purchase Orders ----------
 
-public record PurchaseItemRequest(int InventoryItemId, double Quantity, string Unit, decimal UnitCost, DateOnly? ExpiryDate = null);
+/// <summary>UnitCost is the expected/quoted price, if known — optional, since the real
+/// price isn't confirmed until Receive.</summary>
+public record PurchaseItemRequest(int InventoryItemId, double Quantity, string Unit, decimal? UnitCost = null);
 
 /// <summary>Supply VendorId to link a real vendor (preferred); SupplierName is the legacy
 /// free-text fallback, still accepted when no vendor master entry exists yet.</summary>
 public record CreatePurchaseOrderRequest(int? VendorId, string? SupplierName, string? Note, List<PurchaseItemRequest> Items);
 
-public record PurchaseItemDto(int InventoryItemId, string InventoryItemName, double Quantity, string Unit, decimal UnitCost, DateOnly? ExpiryDate);
+public record ReceivePurchaseItemRequest(int PurchaseItemId, double ReceivedQuantity, decimal UnitCost, DateOnly? ExpiryDate);
 
-public record PurchaseOrderDto(int Id, int? VendorId, string? SupplierName, string? VendorPhone, string? Note, string CreatedByName, DateTime CreatedAt, List<PurchaseItemDto> Items);
+/// <summary>Every line on the order must be covered — partial receipt isn't supported yet.</summary>
+public record ReceivePurchaseOrderRequest(List<ReceivePurchaseItemRequest> Items);
+
+public record PurchaseItemDto(int PurchaseItemId, int InventoryItemId, string InventoryItemName, double Quantity, string Unit, decimal? UnitCost, DateOnly? ExpiryDate, double? ReceivedQuantity);
+
+public record PurchaseOrderDto(int Id, int? VendorId, string? SupplierName, string? VendorPhone, string? Note, string Status, string CreatedByName, DateTime CreatedAt, DateTime? ReceivedAt, string? ReceivedByName, List<PurchaseItemDto> Items);
 
 // ---------- Recipes ----------
 

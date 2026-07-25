@@ -167,6 +167,12 @@ public class Vendor : ITenantScoped
 
 // ---------- Purchase Orders ----------
 
+/// <summary>Ordered: placed with the vendor, stock untouched. Received: goods confirmed
+/// in-hand — this is the point stock/batches/cost actually update (see
+/// PurchaseOrdersController.Receive). Cancelled: order dropped before it ever arrived,
+/// so — like Ordered — it never touched stock.</summary>
+public enum PurchaseOrderStatus { Ordered, Received, Cancelled }
+
 public class PurchaseOrder : ITenantScoped
 {
     public int Id { get; set; }
@@ -177,9 +183,13 @@ public class PurchaseOrder : ITenantScoped
     /// and as a fallback display when VendorId is null.</summary>
     public string? SupplierName { get; set; }
     public string? Note { get; set; }
+    public PurchaseOrderStatus Status { get; set; } = PurchaseOrderStatus.Ordered;
     public int CreatedByUserId { get; set; }
     public string CreatedByName { get; set; } = "System";
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? ReceivedAt { get; set; }
+    public int? ReceivedByUserId { get; set; }
+    public string? ReceivedByName { get; set; }
     public List<PurchaseItem> Items { get; set; } = [];
 }
 
@@ -189,8 +199,14 @@ public class PurchaseItem : ITenantScoped
     public int TenantId { get; set; }
     public int PurchaseOrderId { get; set; }
     public int InventoryItemId { get; set; }
+    /// <summary>Quantity asked for at order time.</summary>
     public double Quantity { get; set; }
     public required string Unit { get; set; }
-    public decimal UnitCost { get; set; }
+    /// <summary>Null until Received — the real cost isn't known until the vendor's actual
+    /// invoice at receiving time (an order-time value would just be a guess).</summary>
+    public decimal? UnitCost { get; set; }
+    /// <summary>Set only at Receive — unknowable before the goods are physically in hand.</summary>
     public DateOnly? ExpiryDate { get; set; }
+    /// <summary>Null until Received. May differ from Quantity (short/over shipment).</summary>
+    public double? ReceivedQuantity { get; set; }
 }
