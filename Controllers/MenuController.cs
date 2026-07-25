@@ -10,7 +10,7 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/menu-items")]
-public class MenuController(CafePosDbContext db, IImageStorageService imageStorage) : ControllerBase
+public class MenuController(CafePosDbContext db, IImageStorageService imageStorage, IMenuPhotoAiService menuPhotoAi) : ControllerBase
 {
     /// <summary>Public — powers the customer-facing QR Menu as well as the internal POS grid.
     /// Eager-loads Variants/Modifiers (with Options) — this is the one endpoint the POS grid
@@ -145,6 +145,24 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         db.MenuItems.Add(item);
         await db.SaveChangesAsync();
         return CreatedAtAction(nameof(List), new { id = item.Id }, item);
+    }
+
+    /// <summary>
+    /// Powers "Import from Photo" (onboarding and MenuScreen) — parses a photographed menu
+    /// into draft items via MenuPhotoAiService's Claude / Google Vision + Groq fallback
+    /// chain. Returns the raw list for the client to show in its existing review-before-save
+    /// screen (same one CSV import uses) rather than creating items directly, since AI
+    /// output — like OCR output — should always be checked before it hits the real menu.
+    /// An empty result isn't an error: it just means every AI tier is unconfigured/failed,
+    /// and the client falls back to on-device OCR on its own (see menuPhotoImport.ts).
+    /// </summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("import-photo")]
+    public async Task<ActionResult<List<CreateMenuItemRequest>>> ImportPhoto(ImportMenuPhotoRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.ImageDataUri))
+            throw new ApiValidationException("An image is required.");
+        return await menuPhotoAi.ExtractMenuItemsAsync(req.ImageDataUri);
     }
 
     /// <summary>

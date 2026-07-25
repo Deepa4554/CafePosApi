@@ -124,6 +124,11 @@ builder.Services.AddHttpClient<IEmailService, BrevoEmailService>();
 builder.Services.Configure<GeminiOptions>(builder.Configuration.GetSection("Gemini"));
 builder.Services.AddHttpClient<IGeminiService, GeminiService>();
 
+// ---------- AI menu-photo import (Claude -> Google Vision + Groq fallback chain) ----------
+// Reads ANTHROPIC_API_KEY / GOOGLE_APPLICATION_CREDENTIALS / GROQ_API_KEY directly as flat
+// env vars (no appsettings section) — see MenuPhotoAiService's doc comment.
+builder.Services.AddHttpClient<IMenuPhotoAiService, MenuPhotoAiService>();
+
 // ---------- Image storage (Supabase Storage) ----------
 builder.Services.Configure<SupabaseStorageOptions>(builder.Configuration.GetSection("Supabase"));
 builder.Services.AddHttpClient<IImageStorageService, SupabaseImageStorageService>();

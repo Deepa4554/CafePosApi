@@ -313,6 +313,10 @@ public record CreateMenuItemRequest(
     string? VegNonVegType = null,
     int? TaxGroupId = null);
 
+/// <summary>ImageDataUri is a "data:image/...;base64,..." string — same shape the client's
+/// own image picker already produces for every other photo upload in the app.</summary>
+public record ImportMenuPhotoRequest(string ImageDataUri);
+
 public record UpdateMenuItemRequest(
     string? Name,
     string? Category,
