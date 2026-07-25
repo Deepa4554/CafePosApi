@@ -510,6 +510,14 @@ public class CafeSettings : ITenantScoped
     public string Currency { get; set; } = "INR (₹)";
     public string Region { get; set; } = "Asia/Kolkata";
 
+    /// <summary>Which onboarding style card the Owner picked (see OnboardingTypeScreen) —
+    /// "coffee" (QSR)/"bakery"/"restaurant"/"lounge". Stores the stable id, not the display
+    /// label, since the label text can change independently (e.g. "Coffee Shop" -> "QSR")
+    /// without needing to touch stored data. Not read by anything yet — captured now so a
+    /// future feature (starter-menu suggestions, receipt wording, analytics segmentation,
+    /// ...) has it available without a fresh onboarding-time prompt.</summary>
+    public string? BusinessType { get; set; }
+
     // Receipt Customization / Branding
     public string BusinessName { get; set; } = "PrabandhOS";
     public string ReceiptHeader { get; set; } = "Welcome to PrabandhOS\n123 Coffee Street";

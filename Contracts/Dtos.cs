@@ -493,6 +493,7 @@ public record UpdateSettingsRequest(
     string? Currency,
     string? Region,
     string? BusinessName,
+    string? BusinessType,
     string? ReceiptHeader,
     string? ReceiptFooter,
     string? LogoUrl,

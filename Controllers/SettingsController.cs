@@ -55,6 +55,7 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.Currency is not null) settings.Currency = req.Currency;
         if (req.Region is not null) settings.Region = req.Region;
         if (req.BusinessName is not null) settings.BusinessName = req.BusinessName.Trim();
+        if (req.BusinessType is not null) settings.BusinessType = req.BusinessType;
         if (req.ReceiptHeader is not null) settings.ReceiptHeader = req.ReceiptHeader;
         if (req.ReceiptFooter is not null) settings.ReceiptFooter = req.ReceiptFooter;
         if (req.LogoUrl is not null) settings.LogoUrl = await imageStorage.ResolveAsync("cafe-logo", req.LogoUrl);
