@@ -115,10 +115,10 @@ builder.Services.AddScoped<IGuestSessionService, GuestSessionService>();
 builder.Services.AddHostedService<GuestSessionSweepService>();
 
 // ---------- Email (cafe-signup OTP) ----------
-// Sends via Gmail SMTP if Email:GmailAddress/GmailAppPassword are configured; otherwise
+// Sends via Brevo's HTTPS API if Email:BrevoApiKey/SenderEmail are configured; otherwise
 // logs the code so local dev isn't blocked. See appsettings.Development.json.
 builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
-builder.Services.AddSingleton<IEmailService, SmtpEmailService>();
+builder.Services.AddHttpClient<IEmailService, BrevoEmailService>();
 
 // ---------- AI (Gemini) ----------
 builder.Services.Configure<GeminiOptions>(builder.Configuration.GetSection("Gemini"));

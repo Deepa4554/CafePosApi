@@ -1,20 +1,19 @@
-using MailKit.Net.Smtp;
-using MailKit.Security;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
-using MimeKit;
 
 namespace CafePOS.Api.Infrastructure;
 
 public class EmailOptions
 {
-    /// <summary>The Gmail address emails are sent from, e.g. "yourcafe@gmail.com".</summary>
-    public string GmailAddress { get; set; } = "";
-    /// <summary>
-    /// A Gmail "App Password" (16 characters, generated under Google Account →
-    /// Security → 2-Step Verification → App passwords) — NOT your normal Gmail
-    /// password. Gmail requires 2-Step Verification to be on before it'll offer this.
-    /// </summary>
-    public string GmailAppPassword { get; set; } = "";
+    /// <summary>Brevo (formerly Sendinblue) transactional-email API key — Dashboard →
+    /// SMTP & API → API Keys.</summary>
+    public string BrevoApiKey { get; set; } = "";
+    /// <summary>Must be a sender verified in Brevo (Senders, Domains & Dedicated IPs →
+    /// Senders), or Brevo rejects the send.</summary>
+    public string SenderEmail { get; set; } = "";
+    public string SenderName { get; set; } = "PrabandhOS";
 }
 
 /// <summary>What the OTP is for — the two flows share the same code/expiry mechanics
@@ -32,30 +31,24 @@ public interface IEmailService
 }
 
 /// <summary>
-/// Sends mail via Gmail's SMTP relay (smtp.gmail.com:587) — free, no third-party
-/// account needed beyond the Gmail address itself. If unconfigured, falls back to
-/// logging the code so local development never gets blocked on email setup.
-///
-/// Uses MailKit rather than the legacy System.Net.Mail.SmtpClient: on Render's Linux
-/// containers, smtp.gmail.com resolves to an IPv6 address first, but the container has
-/// no outbound IPv6 route — System.Net.Mail.SmtpClient only tries the first resolved
-/// address and fails outright (SocketException 101 "Network is unreachable"), which is
-/// exactly the silent production failure this class used to have. MailKit's ConnectAsync
-/// walks every resolved address until one connects, so it falls through to IPv4 fine.
-///
-/// Note: the caller (AuthController.IssueOtpAsync) fires this without awaiting it, so a
-/// slow/hung connection attempt can't make the HTTP response (and the mobile client) hang
-/// along with it.
+/// Sends mail via Brevo's transactional email HTTP API (api.brevo.com) rather than SMTP.
+/// Render blocks outbound SMTP ports (25/465/587) at the network/firewall level for every
+/// service on the platform, for spam-abuse reasons — confirmed here first by an instant
+/// "Network is unreachable" and, after trying a different mail client, a hard connect
+/// timeout. No .NET SMTP client can get through from Render regardless of library. Brevo's
+/// API runs over plain HTTPS (443), which isn't blocked. If unconfigured, falls back to
+/// logging the code so local dev isn't blocked on setup.
 /// </summary>
-public class SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailService> logger) : IEmailService
+public class BrevoEmailService(HttpClient http, IOptions<EmailOptions> options, ILogger<BrevoEmailService> logger) : IEmailService
 {
     private readonly EmailOptions _options = options.Value;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task SendOtpAsync(string toEmail, string code, OtpPurpose purpose)
     {
-        if (string.IsNullOrWhiteSpace(_options.GmailAddress) || string.IsNullOrWhiteSpace(_options.GmailAppPassword))
+        if (string.IsNullOrWhiteSpace(_options.BrevoApiKey) || string.IsNullOrWhiteSpace(_options.SenderEmail))
         {
-            logger.LogWarning("Email:GmailAddress/GmailAppPassword not configured — OTP for {Email} is {Code}", toEmail, code);
+            logger.LogWarning("Email:BrevoApiKey/SenderEmail not configured — OTP for {Email} is {Code}", toEmail, code);
             return;
         }
 
@@ -63,32 +56,41 @@ public class SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailS
             ? "We received a request to reset the password on your PrabandhOS account."
             : "This is to inform you that you have registered successfully with PrabandhOS.";
 
-        var message = new MimeMessage();
-        message.From.Add(MailboxAddress.Parse(_options.GmailAddress));
-        message.To.Add(MailboxAddress.Parse(toEmail));
-        message.Subject = purpose == OtpPurpose.PasswordReset ? "Reset your password" : "Verify your email";
-        message.Body = new TextPart("plain")
-        {
-            Text = $"Hi there,\n\n" +
-                   $"{intro}\n\n" +
-                   $"Here is your OTP to verify your email:-\n\n" +
-                   $"{code}\n\n" +
-                   $"This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n" +
-                   $"Regards,\n" +
-                   $"PrabandhOS Team",
-        };
+        var payload = new BrevoSendRequest(
+            new BrevoSender(_options.SenderName, _options.SenderEmail),
+            [new BrevoRecipient(toEmail)],
+            purpose == OtpPurpose.PasswordReset ? "Reset your password" : "Verify your email",
+            $"Hi there,\n\n" +
+            $"{intro}\n\n" +
+            $"Here is your OTP to verify your email:-\n\n" +
+            $"{code}\n\n" +
+            $"This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n" +
+            $"Regards,\n" +
+            $"PrabandhOS Team");
 
-        using var client = new SmtpClient { Timeout = 8000 };
         try
         {
-            await client.ConnectAsync("smtp.gmail.com", 587, SecureSocketOptions.StartTls);
-            await client.AuthenticateAsync(_options.GmailAddress, _options.GmailAppPassword);
-            await client.SendAsync(message);
-            await client.DisconnectAsync(true);
+            using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.brevo.com/v3/smtp/email")
+            {
+                Content = JsonContent.Create(payload, options: JsonOptions),
+            };
+            request.Headers.Add("api-key", _options.BrevoApiKey);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            var response = await http.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync();
+                logger.LogError("Brevo send failed for OTP to {Email}: {Status} {Body}", toEmail, response.StatusCode, body);
+            }
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "SMTP send failed for OTP to {Email}", toEmail);
+            logger.LogError(ex, "Brevo send failed for OTP to {Email}", toEmail);
         }
     }
+
+    private record BrevoSendRequest(BrevoSender Sender, List<BrevoRecipient> To, string Subject, string TextContent);
+    private record BrevoSender(string Name, string Email);
+    private record BrevoRecipient(string Email);
 }
