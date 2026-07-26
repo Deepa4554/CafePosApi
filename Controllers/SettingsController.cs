@@ -108,18 +108,21 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.ServiceChargeAutoApplyDineIn is not null) settings.ServiceChargeAutoApplyDineIn = req.ServiceChargeAutoApplyDineIn.Value;
         if (req.ServiceChargeAutoApplyTakeaway is not null) settings.ServiceChargeAutoApplyTakeaway = req.ServiceChargeAutoApplyTakeaway.Value;
         if (req.ServiceChargeAutoApplyDelivery is not null) settings.ServiceChargeAutoApplyDelivery = req.ServiceChargeAutoApplyDelivery.Value;
+        if (req.ServiceChargeAutoApplyToken is not null) settings.ServiceChargeAutoApplyToken = req.ServiceChargeAutoApplyToken.Value;
 
         if (req.PackingChargeClearDefault is true) settings.PackingChargeDefaultAmount = null;
         else if (req.PackingChargeDefaultAmount is not null) settings.PackingChargeDefaultAmount = req.PackingChargeDefaultAmount;
         if (req.PackingChargeAutoApplyDineIn is not null) settings.PackingChargeAutoApplyDineIn = req.PackingChargeAutoApplyDineIn.Value;
         if (req.PackingChargeAutoApplyTakeaway is not null) settings.PackingChargeAutoApplyTakeaway = req.PackingChargeAutoApplyTakeaway.Value;
         if (req.PackingChargeAutoApplyDelivery is not null) settings.PackingChargeAutoApplyDelivery = req.PackingChargeAutoApplyDelivery.Value;
+        if (req.PackingChargeAutoApplyToken is not null) settings.PackingChargeAutoApplyToken = req.PackingChargeAutoApplyToken.Value;
 
         if (req.DeliveryChargeClearDefault is true) settings.DeliveryChargeDefaultAmount = null;
         else if (req.DeliveryChargeDefaultAmount is not null) settings.DeliveryChargeDefaultAmount = req.DeliveryChargeDefaultAmount;
         if (req.DeliveryChargeAutoApplyDineIn is not null) settings.DeliveryChargeAutoApplyDineIn = req.DeliveryChargeAutoApplyDineIn.Value;
         if (req.DeliveryChargeAutoApplyTakeaway is not null) settings.DeliveryChargeAutoApplyTakeaway = req.DeliveryChargeAutoApplyTakeaway.Value;
         if (req.DeliveryChargeAutoApplyDelivery is not null) settings.DeliveryChargeAutoApplyDelivery = req.DeliveryChargeAutoApplyDelivery.Value;
+        if (req.DeliveryChargeAutoApplyToken is not null) settings.DeliveryChargeAutoApplyToken = req.DeliveryChargeAutoApplyToken.Value;
 
         await db.SaveChangesAsync();
         taxRateCache.Invalidate(settings.TenantId);

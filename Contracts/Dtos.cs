@@ -27,6 +27,15 @@ public record CreateOrderRequest(
     // rather than the order itself — useful for delivery, and remembered for next visit.
     string? GuestAddress = null);
 
+/// <summary>Fills in (or corrects) the guest's details on an order that already exists —
+/// the "cashier hits Send-on-WhatsApp and only then realises no number was taken" case, which
+/// is why Order.GuestPhone is documented as capturable after placement. Deliberately allowed
+/// on a paid order too: sending the bill is the main reason to add a number at all, and that
+/// happens after settling. Only non-null fields are applied, so the phone can be set without
+/// disturbing a name that's already there. Setting a phone also re-links the order's CRM
+/// customer — see OrdersController.UpdateGuest.</summary>
+public record UpdateOrderGuestRequest(string? GuestName = null, string? GuestPhone = null);
+
 public record RefundOrderRequest(decimal? Amount, string? Reason);
 
 public record CancelOrderRequest(string? Reason);
@@ -532,16 +541,19 @@ public record UpdateSettingsRequest(
     bool? ServiceChargeAutoApplyDineIn = null,
     bool? ServiceChargeAutoApplyTakeaway = null,
     bool? ServiceChargeAutoApplyDelivery = null,
+    bool? ServiceChargeAutoApplyToken = null,
     bool? ServiceChargeClearDefault = null,
     decimal? PackingChargeDefaultAmount = null,
     bool? PackingChargeAutoApplyDineIn = null,
     bool? PackingChargeAutoApplyTakeaway = null,
     bool? PackingChargeAutoApplyDelivery = null,
+    bool? PackingChargeAutoApplyToken = null,
     bool? PackingChargeClearDefault = null,
     decimal? DeliveryChargeDefaultAmount = null,
     bool? DeliveryChargeAutoApplyDineIn = null,
     bool? DeliveryChargeAutoApplyTakeaway = null,
     bool? DeliveryChargeAutoApplyDelivery = null,
+    bool? DeliveryChargeAutoApplyToken = null,
     bool? DeliveryChargeClearDefault = null);
 
 // ---------- Order Note Suggestions ----------

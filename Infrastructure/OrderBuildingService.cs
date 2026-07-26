@@ -71,6 +71,12 @@ public interface IOrderBuildingService
     /// distinct from the guest cart's upsert-by-line behaviour) can still share the
     /// deduction logic instead of duplicating it.</summary>
     Task ConsumeInventoryAsync(CafePosDbContext db, Dictionary<int, MenuItem> menu, List<OrderItem> items, int orderId, int? explicitTenantId = null);
+
+    /// <summary>Resolves the CRM customer for a guest — by phone first, then by name, creating
+    /// one if neither matches. Exposed so OrdersController.UpdateGuest can re-link an order
+    /// whose phone arrives after creation using exactly the same matching rules the order was
+    /// built with, rather than a second, subtly-different lookup. Does not save.</summary>
+    Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null, string? guestAddress = null);
 }
 
 public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext tenantContext, ILogger<OrderBuildingService> logger) : IOrderBuildingService
@@ -604,28 +610,29 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     /// <summary>Starting Service/Packing/Delivery charge for a brand-new order, driven purely
     /// by CafeSettings' Auto Charges config (see Entities.CafeSettings) — a charge with no
     /// default set (null) or not enabled for this order type comes back 0, same as a biller
-    /// never having touched that tile. Only DINE_IN/TAKEAWAY/DELIVERY are ever matched; QSR/
+    /// never having touched that tile. DINE_IN/TAKEAWAY/DELIVERY/QSR (Token) are matched;
     /// CASH counter sales don't carry any of these three charges by default.</summary>
     private static (decimal Service, decimal Packing, decimal Delivery) ComputeDefaultCharges(CafeSettings s, string orderType, decimal subtotal)
     {
-        var service = s.ServiceChargeDefaultPct is decimal svcPct && AppliesTo(orderType, s.ServiceChargeAutoApplyDineIn, s.ServiceChargeAutoApplyTakeaway, s.ServiceChargeAutoApplyDelivery)
+        var service = s.ServiceChargeDefaultPct is decimal svcPct && AppliesTo(orderType, s.ServiceChargeAutoApplyDineIn, s.ServiceChargeAutoApplyTakeaway, s.ServiceChargeAutoApplyDelivery, s.ServiceChargeAutoApplyToken)
             ? Math.Round(subtotal * svcPct / 100, 2) : 0;
-        var packing = s.PackingChargeDefaultAmount is decimal pkgAmt && AppliesTo(orderType, s.PackingChargeAutoApplyDineIn, s.PackingChargeAutoApplyTakeaway, s.PackingChargeAutoApplyDelivery)
+        var packing = s.PackingChargeDefaultAmount is decimal pkgAmt && AppliesTo(orderType, s.PackingChargeAutoApplyDineIn, s.PackingChargeAutoApplyTakeaway, s.PackingChargeAutoApplyDelivery, s.PackingChargeAutoApplyToken)
             ? pkgAmt : 0;
-        var delivery = s.DeliveryChargeDefaultAmount is decimal dlvAmt && AppliesTo(orderType, s.DeliveryChargeAutoApplyDineIn, s.DeliveryChargeAutoApplyTakeaway, s.DeliveryChargeAutoApplyDelivery)
+        var delivery = s.DeliveryChargeDefaultAmount is decimal dlvAmt && AppliesTo(orderType, s.DeliveryChargeAutoApplyDineIn, s.DeliveryChargeAutoApplyTakeaway, s.DeliveryChargeAutoApplyDelivery, s.DeliveryChargeAutoApplyToken)
             ? dlvAmt : 0;
         return (service, packing, delivery);
     }
 
-    private static bool AppliesTo(string orderType, bool dineIn, bool takeaway, bool delivery) => orderType switch
+    private static bool AppliesTo(string orderType, bool dineIn, bool takeaway, bool delivery, bool token) => orderType switch
     {
         "DINE_IN" => dineIn,
         "TAKEAWAY" => takeaway,
         "DELIVERY" => delivery,
+        "QSR" => token,
         _ => false,
     };
 
-    private async Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null, string? guestAddress = null)
+    public async Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null, string? guestAddress = null)
     {
         var customersQuery = TenantScoped(db.Customers, explicitTenantId).Include(c => c.FavoriteItems);
 

@@ -592,16 +592,19 @@ public class CafeSettings : ITenantScoped
     public bool ServiceChargeAutoApplyDineIn { get; set; } = true;
     public bool ServiceChargeAutoApplyTakeaway { get; set; }
     public bool ServiceChargeAutoApplyDelivery { get; set; }
+    public bool ServiceChargeAutoApplyToken { get; set; }
 
     public decimal? PackingChargeDefaultAmount { get; set; }
     public bool PackingChargeAutoApplyDineIn { get; set; }
     public bool PackingChargeAutoApplyTakeaway { get; set; } = true;
     public bool PackingChargeAutoApplyDelivery { get; set; } = true;
+    public bool PackingChargeAutoApplyToken { get; set; }
 
     public decimal? DeliveryChargeDefaultAmount { get; set; }
     public bool DeliveryChargeAutoApplyDineIn { get; set; }
     public bool DeliveryChargeAutoApplyTakeaway { get; set; }
     public bool DeliveryChargeAutoApplyDelivery { get; set; } = true;
+    public bool DeliveryChargeAutoApplyToken { get; set; }
 
     // Receipt Builder — which optional sections print on the customer bill (see
     // receiptFormat.ts buildReceiptLines, the one shared line-model every print

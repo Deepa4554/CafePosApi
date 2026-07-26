@@ -1067,6 +1067,65 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
+    /// <summary>Fills in the guest's phone/name on an order that already exists — see
+    /// UpdateOrderGuestRequest. Deliberately NOT gated on Paid: the reason a number gets added
+    /// late is almost always "send the guest their bill", which happens after settling.
+    ///
+    /// Setting a phone also moves the order's CRM link. An order rung up without a number is
+    /// attached to whatever FindOrCreateCustomerAsync matched at the time (typically the
+    /// shared "Walk-in Guest" record), and its visit/spend/points were already credited there
+    /// by RecordVisit. Re-running the same lookup with the phone either lands on that same
+    /// record — in which case the phone is simply stamped onto it and nothing moves — or on
+    /// the real customer who owns that number, in which case this order's visit is transferred
+    /// so the walk-in placeholder isn't left holding a stranger's spend.</summary>
+    [HttpPatch("{id:int}/guest")]
+    public async Task<ActionResult<OrderDto>> UpdateGuest(int id, UpdateOrderGuestRequest req)
+    {
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be edited.");
+
+        // Same digits-only normalization + 10-digit rule Create uses, so a number added here
+        // is stored in the identical shape one captured up front would be — anything else and
+        // the customer-by-phone lookup below would silently miss.
+        var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
+        if (normalizedPhone is not null && normalizedPhone.Length != 10)
+            throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
+        var trimmedName = string.IsNullOrWhiteSpace(req.GuestName) ? null : req.GuestName.Trim();
+        if (normalizedPhone is null && trimmedName is null)
+            throw new ApiValidationException("Nothing to update — supply a guest name or mobile number.");
+
+        if (trimmedName is not null) order.GuestName = trimmedName;
+        if (normalizedPhone is not null) order.GuestPhone = normalizedPhone;
+
+        if (normalizedPhone is not null)
+        {
+            var previous = order.CustomerId is int prevId ? await db.Customers.FirstOrDefaultAsync(c => c.Id == prevId) : null;
+            var customer = await orderBuilder.FindOrCreateCustomerAsync(db, order.GuestName ?? "Walk-in Guest", normalizedPhone);
+            if (previous is null || previous.Id != customer.Id)
+            {
+                // Reverse what RecordVisit credited to the old record at creation, then credit
+                // the same visit to the one this order actually belongs to. Clamped at zero:
+                // an order created before CRM linking existed can have a CustomerId pointing at
+                // a record whose counters were never incremented for it.
+                if (previous is not null)
+                {
+                    previous.VisitCount = Math.Max(0, previous.VisitCount - 1);
+                    previous.TotalSpent = Math.Max(0m, previous.TotalSpent - order.Total);
+                    previous.TotalPoints = Math.Max(0, previous.TotalPoints - (int)Math.Floor(order.Total));
+                }
+                customer.VisitCount += 1;
+                customer.TotalSpent += order.Total;
+                customer.TotalPoints += (int)Math.Floor(order.Total);
+                customer.LastVisitAt = DateTime.UtcNow;
+                order.Customer = customer;
+            }
+        }
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
     /// <summary>Full or partial refund — financially sensitive, so unlike most of this
     /// controller it's explicitly restricted rather than relying on the auth fallback
     /// policy (any authenticated user) that everything else here uses. Above
