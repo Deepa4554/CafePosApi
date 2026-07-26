@@ -579,6 +579,30 @@ public class CafeSettings : ITenantScoped
     public bool QsrEnabled { get; set; } = true;
     public bool CashEnabled { get; set; } = true;
 
+    // Auto Charges — lets an Owner define Service/Packing/Delivery charge once instead of
+    // a biller re-entering it on every bill. Each charge has a default value (null = the
+    // charge is off entirely, matching how ServiceChargeDefaultPct/PackingChargeDefaultAmount/
+    // DeliveryChargeDefaultAmount already read as "no default configured") plus which order
+    // types it auto-applies to on order creation (OrderBuildingService.BuildOrderAsync) —
+    // same on/off-per-order-type shape as DineInEnabled/TakeawayEnabled/DeliveryEnabled above,
+    // just scoped to one charge instead of the whole order type. A biller can still remove or
+    // change an auto-applied charge per bill via OrderBillActions' existing removable tiles —
+    // this only sets the starting value, it doesn't lock it.
+    public decimal? ServiceChargeDefaultPct { get; set; }
+    public bool ServiceChargeAutoApplyDineIn { get; set; } = true;
+    public bool ServiceChargeAutoApplyTakeaway { get; set; }
+    public bool ServiceChargeAutoApplyDelivery { get; set; }
+
+    public decimal? PackingChargeDefaultAmount { get; set; }
+    public bool PackingChargeAutoApplyDineIn { get; set; }
+    public bool PackingChargeAutoApplyTakeaway { get; set; } = true;
+    public bool PackingChargeAutoApplyDelivery { get; set; } = true;
+
+    public decimal? DeliveryChargeDefaultAmount { get; set; }
+    public bool DeliveryChargeAutoApplyDineIn { get; set; }
+    public bool DeliveryChargeAutoApplyTakeaway { get; set; }
+    public bool DeliveryChargeAutoApplyDelivery { get; set; } = true;
+
     // Receipt Builder — which optional sections print on the customer bill (see
     // receiptFormat.ts buildReceiptLines, the one shared line-model every print
     // transport/screen renders from). Business name, items, and totals always print —

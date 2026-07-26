@@ -96,6 +96,31 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.Latitude is not null) settings.Latitude = req.Latitude;
         if (req.Longitude is not null) settings.Longitude = req.Longitude;
 
+        if (req.ServiceChargeDefaultPct is < 0 or > 100)
+            throw new ApiValidationException("Service charge % must be between 0 and 100.");
+        if (req.PackingChargeDefaultAmount is < 0)
+            throw new ApiValidationException("Packing charge must be 0 or more.");
+        if (req.DeliveryChargeDefaultAmount is < 0)
+            throw new ApiValidationException("Delivery charge must be 0 or more.");
+
+        if (req.ServiceChargeClearDefault is true) settings.ServiceChargeDefaultPct = null;
+        else if (req.ServiceChargeDefaultPct is not null) settings.ServiceChargeDefaultPct = req.ServiceChargeDefaultPct;
+        if (req.ServiceChargeAutoApplyDineIn is not null) settings.ServiceChargeAutoApplyDineIn = req.ServiceChargeAutoApplyDineIn.Value;
+        if (req.ServiceChargeAutoApplyTakeaway is not null) settings.ServiceChargeAutoApplyTakeaway = req.ServiceChargeAutoApplyTakeaway.Value;
+        if (req.ServiceChargeAutoApplyDelivery is not null) settings.ServiceChargeAutoApplyDelivery = req.ServiceChargeAutoApplyDelivery.Value;
+
+        if (req.PackingChargeClearDefault is true) settings.PackingChargeDefaultAmount = null;
+        else if (req.PackingChargeDefaultAmount is not null) settings.PackingChargeDefaultAmount = req.PackingChargeDefaultAmount;
+        if (req.PackingChargeAutoApplyDineIn is not null) settings.PackingChargeAutoApplyDineIn = req.PackingChargeAutoApplyDineIn.Value;
+        if (req.PackingChargeAutoApplyTakeaway is not null) settings.PackingChargeAutoApplyTakeaway = req.PackingChargeAutoApplyTakeaway.Value;
+        if (req.PackingChargeAutoApplyDelivery is not null) settings.PackingChargeAutoApplyDelivery = req.PackingChargeAutoApplyDelivery.Value;
+
+        if (req.DeliveryChargeClearDefault is true) settings.DeliveryChargeDefaultAmount = null;
+        else if (req.DeliveryChargeDefaultAmount is not null) settings.DeliveryChargeDefaultAmount = req.DeliveryChargeDefaultAmount;
+        if (req.DeliveryChargeAutoApplyDineIn is not null) settings.DeliveryChargeAutoApplyDineIn = req.DeliveryChargeAutoApplyDineIn.Value;
+        if (req.DeliveryChargeAutoApplyTakeaway is not null) settings.DeliveryChargeAutoApplyTakeaway = req.DeliveryChargeAutoApplyTakeaway.Value;
+        if (req.DeliveryChargeAutoApplyDelivery is not null) settings.DeliveryChargeAutoApplyDelivery = req.DeliveryChargeAutoApplyDelivery.Value;
+
         await db.SaveChangesAsync();
         taxRateCache.Invalidate(settings.TenantId);
         await audit.LogAsync(AuditAction.SettingsChange, AuditResource.Settings, null, "Cafe settings updated.", AuditSeverity.Medium);

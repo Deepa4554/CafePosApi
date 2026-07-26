@@ -104,8 +104,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
     }
 
     /// <summary>Manual correction after a physical stock count — sets Current to an exact
-    /// value. A shortfall FIFO-consumes existing batches; a surplus lands in a new
-    /// no-expiry "found stock" batch (a physical recount has no known lot/expiry).</summary>
+    /// value. Creates a single consolidated ledger entry for the adjustment.</summary>
     [HttpPost("{id:int}/adjust")]
     public async Task<ActionResult<InventoryItemDto>> Adjust(int id, AdjustStockRequest req)
     {
@@ -115,27 +114,144 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
             throw new ApiValidationException("Stock cannot be adjusted below zero.");
 
         var delta = req.NewQuantity - item.Current;
+        if (delta == 0) return InventoryItemDto.From(item);
+
         var reason = req.Reason?.Trim();
+        var wasAboveReorder = item.Current > item.ReorderLevel;
+        var previous = item.Current;
+        item.Current = req.NewQuantity;
+
         if (delta < 0)
-            await InventoryBatchService.ConsumeFifoAsync(db, item, -delta, InventoryTransactionType.ManualAdjustment,
-                referenceId: null, orderItemId: null, reason, wasteReasonCode: null, CurrentUserId(), CurrentUserName());
-        else if (delta > 0)
-            InventoryBatchService.CreateBatch(db, item, delta, item.UnitCost, expiryDate: null,
-                InventoryTransactionType.ManualAdjustment, referenceId: null, CurrentUserId(), CurrentUserName());
+        {
+            var batches = await db.InventoryBatches
+                .Where(b => b.InventoryItemId == item.Id && b.Quantity > 0)
+                .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
+                .ThenBy(b => b.ReceivedAt)
+                .ThenBy(b => b.Id)
+                .ToListAsync();
+
+            var remaining = -delta;
+            foreach (var batch in batches)
+            {
+                if (remaining <= 0) break;
+                var take = Math.Min(remaining, batch.Quantity);
+                batch.Quantity -= take;
+                remaining -= take;
+            }
+
+            if (remaining > 0 && batches.Count > 0)
+                batches.Last().Quantity -= remaining;
+        }
+        else
+        {
+            var batch = new InventoryBatch
+            {
+                TenantId = item.TenantId,
+                InventoryItemId = item.Id,
+                Quantity = delta,
+                UnitCost = item.UnitCost,
+            };
+            db.InventoryBatches.Add(batch);
+        }
+
+        db.InventoryTransactions.Add(new InventoryTransaction
+        {
+            TenantId = item.TenantId,
+            InventoryItemId = item.Id,
+            Type = InventoryTransactionType.ManualAdjustment,
+            PreviousStock = previous,
+            ChangedQuantity = delta,
+            RemainingStock = item.Current,
+            Reason = reason,
+            UserId = CurrentUserId(),
+            UserName = CurrentUserName(),
+        });
+
+        if (wasAboveReorder && item.Current <= item.ReorderLevel && !item.LowStockNotified)
+        {
+            item.LowStockNotified = true;
+            db.Notifications.Add(new AppNotification
+            {
+                TenantId = item.TenantId,
+                Title = "Low stock",
+                Body = $"{item.Name} is down to {item.Current:0.##}{item.Unit} (reorder at {item.ReorderLevel:0.##}{item.Unit}).",
+                Category = NotificationCategory.Inventory,
+                Channel = NotificationChannel.InApp,
+                ActionUrl = "/inventory",
+            });
+        }
 
         await db.SaveChangesAsync();
         return InventoryItemDto.From(item);
     }
 
     [HttpGet("transactions")]
-    public async Task<IEnumerable<InventoryTransactionDto>> AllTransactions([FromQuery] int page = 1, [FromQuery] int pageSize = 50)
+    public async Task<TransactionsPagedResult> AllTransactions(
+        [FromQuery] string? types = null,
+        [FromQuery] DateTime? dateFrom = null,
+        [FromQuery] DateTime? dateTo = null,
+        [FromQuery] string? search = null,
+        [FromQuery] int? branchId = null,
+        [FromQuery] int pageNumber = 1,
+        [FromQuery] int pageSize = 50,
+        [FromQuery] string sortBy = "date",
+        [FromQuery] string sortOrder = "desc")
     {
         pageSize = Math.Clamp(pageSize, 1, 200);
-        page = Math.Max(1, page);
+        pageNumber = Math.Max(1, pageNumber);
 
-        var txns = await db.InventoryTransactions.OrderByDescending(t => t.CreatedAt)
-            .Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
-        return await ToDtos(txns);
+        var query = from t in db.InventoryTransactions
+                    join i in db.InventoryItems on t.InventoryItemId equals i.Id
+                    select new { Transaction = t, Item = i };
+
+        // Filter by transaction types
+        if (!string.IsNullOrWhiteSpace(types))
+        {
+            var typeList = types.Split(',').Select(t => t.Trim()).ToList();
+            query = query.Where(x => typeList.Contains(x.Transaction.Type.ToString()));
+        }
+
+        // Filter by date range
+        if (dateFrom.HasValue)
+            query = query.Where(x => x.Transaction.CreatedAt >= dateFrom.Value);
+        if (dateTo.HasValue)
+            query = query.Where(x => x.Transaction.CreatedAt <= dateTo.Value);
+
+        // Filter by search term (item name or user)
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var searchLower = search.ToLower();
+            query = query.Where(x =>
+                x.Item.Name.ToLower().Contains(searchLower) ||
+                x.Transaction.UserName.ToLower().Contains(searchLower));
+        }
+
+        // Filter by branch
+        if (branchId.HasValue)
+            query = query.Where(x => x.Item.BranchId == branchId.Value);
+
+        // Apply sorting
+        query = (sortBy.ToLower(), sortOrder.ToLower()) switch
+        {
+            ("item", "asc") => query.OrderBy(x => x.Item.Name),
+            ("item", _) => query.OrderByDescending(x => x.Item.Name),
+            ("user", "asc") => query.OrderBy(x => x.Transaction.UserName),
+            ("user", _) => query.OrderByDescending(x => x.Transaction.UserName),
+            (_, "asc") => query.OrderBy(x => x.Transaction.CreatedAt),
+            _ => query.OrderByDescending(x => x.Transaction.CreatedAt),
+        };
+
+        var totalItems = await query.CountAsync();
+        var totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
+
+        var results = await query
+            .Skip((pageNumber - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        var txns = results.Select(x => x.Transaction).ToList();
+        var dtos = await ToDtos(txns);
+        return new TransactionsPagedResult(dtos, totalItems, totalPages, pageNumber, pageSize);
     }
 
     [HttpGet("{id:int}/transactions")]

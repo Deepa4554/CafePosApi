@@ -149,6 +149,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var clampedDiscountPct = Math.Clamp(discountPct, 0, 100);
         var discountAmount = Math.Round(subtotal * clampedDiscountPct / 100, 2);
 
+        var settings = await TenantScoped(db.Settings, explicitTenantId).FirstAsync();
+        var (defaultServiceCharge, defaultPackingCharge, defaultDeliveryCharge) = ComputeDefaultCharges(settings, orderType, subtotal);
+
         // QSR counter orders get a daily-resetting token instead of a table — stamped here
         // (not inside the SaveChanges transaction below) since the UPSERT is already
         // atomic on its own; a rolled-back order can at worst waste one token number, same
@@ -216,6 +219,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             CreatedByName = createdByName,
             ServedByStaffId = servedBy?.Id,
             ServedByName = servedBy?.Name,
+            ServiceChargeAmount = defaultServiceCharge,
+            PackingChargeAmount = defaultPackingCharge,
+            DeliveryChargeAmount = defaultDeliveryCharge,
         };
         RecomputeTotals(order, taxRatePct);
         if (explicitTenantId is int tid2) order.TenantId = tid2;
@@ -594,6 +600,30 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         o.Total = Math.Max(0, gross - discount) + tax
             + o.ServiceChargeAmount + o.PackingChargeAmount + o.DeliveryChargeAmount + o.TipAmount + o.RoundOffAmount;
     }
+
+    /// <summary>Starting Service/Packing/Delivery charge for a brand-new order, driven purely
+    /// by CafeSettings' Auto Charges config (see Entities.CafeSettings) — a charge with no
+    /// default set (null) or not enabled for this order type comes back 0, same as a biller
+    /// never having touched that tile. Only DINE_IN/TAKEAWAY/DELIVERY are ever matched; QSR/
+    /// CASH counter sales don't carry any of these three charges by default.</summary>
+    private static (decimal Service, decimal Packing, decimal Delivery) ComputeDefaultCharges(CafeSettings s, string orderType, decimal subtotal)
+    {
+        var service = s.ServiceChargeDefaultPct is decimal svcPct && AppliesTo(orderType, s.ServiceChargeAutoApplyDineIn, s.ServiceChargeAutoApplyTakeaway, s.ServiceChargeAutoApplyDelivery)
+            ? Math.Round(subtotal * svcPct / 100, 2) : 0;
+        var packing = s.PackingChargeDefaultAmount is decimal pkgAmt && AppliesTo(orderType, s.PackingChargeAutoApplyDineIn, s.PackingChargeAutoApplyTakeaway, s.PackingChargeAutoApplyDelivery)
+            ? pkgAmt : 0;
+        var delivery = s.DeliveryChargeDefaultAmount is decimal dlvAmt && AppliesTo(orderType, s.DeliveryChargeAutoApplyDineIn, s.DeliveryChargeAutoApplyTakeaway, s.DeliveryChargeAutoApplyDelivery)
+            ? dlvAmt : 0;
+        return (service, packing, delivery);
+    }
+
+    private static bool AppliesTo(string orderType, bool dineIn, bool takeaway, bool delivery) => orderType switch
+    {
+        "DINE_IN" => dineIn,
+        "TAKEAWAY" => takeaway,
+        "DELIVERY" => delivery,
+        _ => false,
+    };
 
     private async Task<Customer> FindOrCreateCustomerAsync(CafePosDbContext db, string guestName, string? guestPhone, int? explicitTenantId = null, string? guestAddress = null)
     {

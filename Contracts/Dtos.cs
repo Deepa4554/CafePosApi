@@ -417,6 +417,9 @@ public record InventoryTransactionDto(
     int Id, int InventoryItemId, string InventoryItemName, string Type, double PreviousStock,
     double ChangedQuantity, double RemainingStock, string? Reason, string? WasteReasonCode, string? ReferenceId, string UserName, DateTime CreatedAt);
 
+public record TransactionsPagedResult(
+    List<InventoryTransactionDto> Items, int TotalItems, int TotalPages, int PageNumber, int PageSize);
+
 // ---------- Inventory Batches (FIFO + expiry) ----------
 
 /// <summary>One physical lot — see InventoryBatchService. DaysUntilExpiry is negative once
@@ -524,7 +527,22 @@ public record UpdateSettingsRequest(
     bool? OrderPendingConfirmationAlertsEnabled = null,
     bool? OrderReadyAlertsEnabled = null,
     decimal? Latitude = null,
-    decimal? Longitude = null);
+    decimal? Longitude = null,
+    decimal? ServiceChargeDefaultPct = null,
+    bool? ServiceChargeAutoApplyDineIn = null,
+    bool? ServiceChargeAutoApplyTakeaway = null,
+    bool? ServiceChargeAutoApplyDelivery = null,
+    bool? ServiceChargeClearDefault = null,
+    decimal? PackingChargeDefaultAmount = null,
+    bool? PackingChargeAutoApplyDineIn = null,
+    bool? PackingChargeAutoApplyTakeaway = null,
+    bool? PackingChargeAutoApplyDelivery = null,
+    bool? PackingChargeClearDefault = null,
+    decimal? DeliveryChargeDefaultAmount = null,
+    bool? DeliveryChargeAutoApplyDineIn = null,
+    bool? DeliveryChargeAutoApplyTakeaway = null,
+    bool? DeliveryChargeAutoApplyDelivery = null,
+    bool? DeliveryChargeClearDefault = null);
 
 // ---------- Order Note Suggestions ----------
 
