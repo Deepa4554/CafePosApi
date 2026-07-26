@@ -12,8 +12,8 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    [Migration("20260725181947_AddBusinessTypeToSettings")]
-    partial class AddBusinessTypeToSettings
+    [Migration("20260725181339_AddBusinessTypeAndTableMergeColumn")]
+    partial class AddBusinessTypeAndTableMergeColumn
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)

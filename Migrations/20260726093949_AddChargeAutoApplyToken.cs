@@ -10,26 +10,13 @@ namespace CafePOS.Api.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.AddColumn<bool>(
-                name: "DeliveryChargeAutoApplyToken",
-                table: "Settings",
-                type: "boolean",
-                nullable: false,
-                defaultValue: false);
-
-            migrationBuilder.AddColumn<bool>(
-                name: "PackingChargeAutoApplyToken",
-                table: "Settings",
-                type: "boolean",
-                nullable: false,
-                defaultValue: false);
-
-            migrationBuilder.AddColumn<bool>(
-                name: "ServiceChargeAutoApplyToken",
-                table: "Settings",
-                type: "boolean",
-                nullable: false,
-                defaultValue: false);
+            // IF NOT EXISTS — see AddChargeAutoApplySettings for why: keeps this migration
+            // safe to re-run against a shared dev database that may already have the column.
+            migrationBuilder.Sql(@"
+                ALTER TABLE ""Settings"" ADD COLUMN IF NOT EXISTS ""DeliveryChargeAutoApplyToken"" boolean NOT NULL DEFAULT false;
+                ALTER TABLE ""Settings"" ADD COLUMN IF NOT EXISTS ""PackingChargeAutoApplyToken"" boolean NOT NULL DEFAULT false;
+                ALTER TABLE ""Settings"" ADD COLUMN IF NOT EXISTS ""ServiceChargeAutoApplyToken"" boolean NOT NULL DEFAULT false;
+            ");
         }
 
         /// <inheritdoc />

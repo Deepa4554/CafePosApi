@@ -12,8 +12,8 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    [Migration("20260726105045_AddChargeAutoApplyToken")]
-    partial class AddChargeAutoApplyToken
+    [Migration("20260726070017_AddChargeAutoApplySettings")]
+    partial class AddChargeAutoApplySettings
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -545,9 +545,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<bool>("DeliveryChargeAutoApplyTakeaway")
                         .HasColumnType("boolean");
 
-                    b.Property<bool>("DeliveryChargeAutoApplyToken")
-                        .HasColumnType("boolean");
-
                     b.Property<decimal?>("DeliveryChargeDefaultAmount")
                         .HasColumnType("numeric");
 
@@ -601,9 +598,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<bool>("PackingChargeAutoApplyTakeaway")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("PackingChargeAutoApplyToken")
                         .HasColumnType("boolean");
 
                     b.Property<decimal?>("PackingChargeDefaultAmount")
@@ -660,9 +654,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<bool>("ServiceChargeAutoApplyTakeaway")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("ServiceChargeAutoApplyToken")
                         .HasColumnType("boolean");
 
                     b.Property<decimal?>("ServiceChargeDefaultPct")
