@@ -199,13 +199,24 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         var defaultStation = await ResolveStationAsync(null);
         // Names already on the menu (plus names seen earlier in this same file) count as
         // duplicates and are skipped, so re-importing the same CSV can't double the menu.
-        var seenNames = (await db.MenuItems.Select(m => m.Name).ToListAsync())
-            .Select(n => n.Trim().ToLowerInvariant())
-            .ToHashSet();
+        var existingNames = (await db.MenuItems.Select(m => m.Name).ToListAsync())
+            .Select(n => n.Trim())
+            .ToList();
+        var seenNamesLower = existingNames.Select(n => n.ToLowerInvariant()).ToHashSet();
         var created = new List<MenuItem>();
         foreach (var req in valid)
         {
-            if (!seenNames.Add(req.Name.Trim().ToLowerInvariant())) continue;
+            var name = req.Name.Trim();
+            var nameLower = name.ToLowerInvariant();
+            if (seenNamesLower.Contains(nameLower)) continue;
+            // AI/OCR reading the same photo twice (Import from Photo, re-scanned) doesn't
+            // reliably produce byte-identical text — "Nachos Loaded" vs "Nachoes Loaded" is
+            // the same item, not two — so an exact-match check alone lets it back in on a
+            // second scan. Catch that near-miss case too, without touching manual single-item
+            // Create/Update, where a person typing a name has full control over what they meant.
+            if (existingNames.Any(existing => IsNearDuplicateName(existing, name))) continue;
+            seenNamesLower.Add(nameLower);
+            existingNames.Add(name);
             var item = new MenuItem
             {
                 Name = req.Name.Trim(),
@@ -225,6 +236,41 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         db.MenuItems.AddRange(created);
         await db.SaveChangesAsync();
         return new BulkImportResultDto(created.Count, items.Count - created.Count);
+    }
+
+    /// <summary>Strips everything but letters/digits and lowercases, so near-duplicate
+    /// comparison runs on the actual characters, not spacing/punctuation OCR noise
+    /// ("Nachos  Loaded!" vs "nachos loaded" compare identically once normalized).</summary>
+    private static string NormalizeForFuzzyMatch(string name) =>
+        new(name.Where(char.IsLetterOrDigit).ToArray());
+
+    /// <summary>True when two names are close enough to be the same item read slightly
+    /// differently by AI/OCR on two separate scans of the same photo (see BulkCreate).
+    /// Ratio-based, not a fixed edit distance, so it scales with name length: a 1-character
+    /// difference on a long name ("Nachos Loaded" / "Nachoes Loaded") is a near-duplicate,
+    /// but the same edit distance on a short name ("Tea" / "Pea") is a different item.</summary>
+    private static bool IsNearDuplicateName(string a, string b)
+    {
+        var na = NormalizeForFuzzyMatch(a).ToLowerInvariant();
+        var nb = NormalizeForFuzzyMatch(b).ToLowerInvariant();
+        if (na.Length == 0 || nb.Length == 0) return na == nb;
+        return (double)LevenshteinDistance(na, nb) / Math.Max(na.Length, nb.Length) <= 0.15;
+    }
+
+    private static int LevenshteinDistance(string a, string b)
+    {
+        var dp = new int[a.Length + 1, b.Length + 1];
+        for (var i = 0; i <= a.Length; i++) dp[i, 0] = i;
+        for (var j = 0; j <= b.Length; j++) dp[0, j] = j;
+        for (var i = 1; i <= a.Length; i++)
+        {
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                dp[i, j] = Math.Min(Math.Min(dp[i - 1, j] + 1, dp[i, j - 1] + 1), dp[i - 1, j - 1] + cost);
+            }
+        }
+        return dp[a.Length, b.Length];
     }
 
     [Authorize(Policy = Policies.OwnerOrManager)]
