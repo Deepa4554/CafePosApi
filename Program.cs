@@ -94,8 +94,13 @@ builder.Services.AddDbContext<CafePosDbContext>(options =>
 var jwtSecret = builder.Configuration["Jwt:Secret"];
 if (string.IsNullOrWhiteSpace(jwtSecret))
 {
-    // Dev-only fallback so the API still boots with zero config. Production
-    // MUST set Jwt:Secret (env var Jwt__Secret) to a real random 32+ byte value.
+    // Dev-only fallback so the API still boots with zero config. Outside Development
+    // this refuses to start instead: the fallback string is public in this repo, so
+    // running production on it would let anyone forge admin tokens. Set env var
+    // Jwt__Secret to a real random 32+ byte value.
+    if (!builder.Environment.IsDevelopment())
+        throw new InvalidOperationException(
+            "Jwt:Secret is not configured. Set the Jwt__Secret environment variable to a random 32+ byte value before running outside Development.");
     jwtSecret = "dev-only-insecure-secret-key-change-me-before-prod-32chars!";
 }
 builder.Services.Configure<JwtOptions>(options =>

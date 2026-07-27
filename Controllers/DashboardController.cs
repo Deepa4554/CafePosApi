@@ -31,34 +31,39 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
     [HttpGet("analytics")]
     public async Task<DashboardAnalyticsDto> Analytics([FromQuery] int days = 7, [FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null)
     {
-        var now = DateTime.UtcNow;
+        // Period bounds are computed in IST (a from/to date or "today" means the cafe's
+        // calendar day, see IstClock) and converted to UTC only for the SQL comparison
+        // against the stored-UTC CreatedAt.
+        var nowIst = IstClock.NowIst;
 
-        DateTime periodStart;
-        DateTime periodEndExclusive;
-        DateTime previousPeriodStart;
+        DateTime periodStartIst;
+        DateTime periodEndExclusiveIst;
+        DateTime previousPeriodStartIst;
 
         if (from is not null || to is not null)
         {
-            periodStart = (from ?? to!.Value).ToDateTime(TimeOnly.MinValue);
-            periodEndExclusive = (to ?? from!.Value).ToDateTime(TimeOnly.MinValue).AddDays(1);
-            if (periodEndExclusive <= periodStart) periodEndExclusive = periodStart.AddDays(1);
-            previousPeriodStart = periodStart - (periodEndExclusive - periodStart);
+            periodStartIst = (from ?? to!.Value).ToDateTime(TimeOnly.MinValue);
+            periodEndExclusiveIst = (to ?? from!.Value).ToDateTime(TimeOnly.MinValue).AddDays(1);
+            if (periodEndExclusiveIst <= periodStartIst) periodEndExclusiveIst = periodStartIst.AddDays(1);
+            previousPeriodStartIst = periodStartIst - (periodEndExclusiveIst - periodStartIst);
         }
         else
         {
             if (days <= 0) days = 7;
-            periodStart = now.AddDays(-days);
-            periodEndExclusive = now;
-            previousPeriodStart = now.AddDays(-2 * days);
+            periodStartIst = nowIst.AddDays(-days);
+            periodEndExclusiveIst = nowIst;
+            previousPeriodStartIst = nowIst.AddDays(-2 * days);
         }
 
+        var previousPeriodStartUtc = previousPeriodStartIst - IstClock.Offset;
+        var periodEndExclusiveUtc = periodEndExclusiveIst - IstClock.Offset;
         var orders = await db.Orders
             .Include(o => o.Items)
-            .Where(o => o.CreatedAt >= previousPeriodStart && o.CreatedAt < periodEndExclusive)
+            .Where(o => o.CreatedAt >= previousPeriodStartUtc && o.CreatedAt < periodEndExclusiveUtc)
             .ToListAsync();
 
-        var currentPaid = orders.Where(o => o.Paid && o.CreatedAt >= periodStart).ToList();
-        var previousPaid = orders.Where(o => o.Paid && o.CreatedAt >= previousPeriodStart && o.CreatedAt < periodStart).ToList();
+        var currentPaid = orders.Where(o => o.Paid && IstClock.ToIst(o.CreatedAt) >= periodStartIst).ToList();
+        var previousPaid = orders.Where(o => o.Paid && IstClock.ToIst(o.CreatedAt) >= previousPeriodStartIst && IstClock.ToIst(o.CreatedAt) < periodStartIst).ToList();
 
         var revenue = currentPaid.Sum(o => o.Total);
         var previousRevenue = previousPaid.Sum(o => o.Total);
@@ -67,11 +72,12 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
         var gstCollected = currentPaid.Sum(o => o.Tax);
         var refundsTotal = currentPaid.Where(o => o.Refunded).Sum(o => o.RefundedAmount ?? 0m);
 
-        // Calendar-day revenue (resets at midnight, not a rolling 24h window) — its own
-        // query, deliberately independent of whatever period/range was requested above,
-        // so it's always "today" even when viewing a custom range that excludes today.
+        // Calendar-day revenue (resets at IST midnight, not a rolling 24h window) — its
+        // own query, deliberately independent of whatever period/range was requested
+        // above, so it's always "today" even when viewing a custom range that excludes today.
+        var todayStartUtc = IstClock.IstDateStartUtc(DateOnly.FromDateTime(nowIst.Date));
         var todayPaidTotal = await db.Orders
-            .Where(o => o.Paid && o.CreatedAt >= now.Date && o.CreatedAt < now.Date.AddDays(1))
+            .Where(o => o.Paid && o.CreatedAt >= todayStartUtc && o.CreatedAt < todayStartUtc.AddDays(1))
             .Select(o => o.Total)
             .ToListAsync();
         var todayRevenue = todayPaidTotal.Sum();
@@ -80,16 +86,19 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
         var inventoryItems = await db.InventoryItems.ToListAsync();
         var inventoryValue = inventoryItems.Sum(i => (decimal)i.Current * i.UnitCost);
 
-        var daySpan = Math.Max(1, (int)Math.Ceiling((periodEndExclusive - periodStart).TotalDays));
+        var daySpan = Math.Max(1, (int)Math.Ceiling((periodEndExclusiveIst - periodStartIst).TotalDays));
         var weekly = Enumerable.Range(0, daySpan).Select(offset =>
         {
-            var day = periodStart.Date.AddDays(offset);
-            var dayRevenue = currentPaid.Where(o => o.CreatedAt.Date == day).Sum(o => o.Total);
+            var day = periodStartIst.Date.AddDays(offset);
+            var dayRevenue = currentPaid.Where(o => IstClock.ToIst(o.CreatedAt).Date == day).Sum(o => o.Total);
             return new DailyRevenueDto(daySpan <= 7 ? day.ToString("ddd").ToUpperInvariant() : day.ToString("d MMM"), dayRevenue);
         }).ToList();
 
+        // IST hours against DaypartBuckets' cafe-local-time ranges — same shift
+        // OrdersController.RushForecast applies; raw UTC hours put the 1 PM lunch rush
+        // in the morning bucket.
         var hourCounts = DaypartBuckets.All
-            .Select(b => currentPaid.Count(o => o.CreatedAt.Hour >= b.StartHour && o.CreatedAt.Hour < b.EndHour))
+            .Select(b => currentPaid.Count(o => IstClock.ToIst(o.CreatedAt).Hour >= b.StartHour && IstClock.ToIst(o.CreatedAt).Hour < b.EndHour))
             .ToList();
         var maxHourCount = Math.Max(1, hourCounts.Count > 0 ? hourCounts.Max() : 0);
         var peakHours = DaypartBuckets.All
@@ -121,17 +130,20 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
     {
         if (forecastDays <= 0) forecastDays = 7;
         const int historyDays = 14;
-        var now = DateTime.UtcNow;
-        var historyStart = now.Date.AddDays(-historyDays + 1);
+        // History days are IST calendar days (see IstClock) — same day-boundary rule as
+        // Analytics above, so "yesterday's revenue" means the same thing on both charts.
+        var nowIst = IstClock.NowIst;
+        var historyStartIst = nowIst.Date.AddDays(-historyDays + 1);
+        var historyStartUtc = historyStartIst - IstClock.Offset;
 
         var paidOrders = await db.Orders
-            .Where(o => o.Paid && o.CreatedAt >= historyStart)
+            .Where(o => o.Paid && o.CreatedAt >= historyStartUtc)
             .Select(o => new { o.CreatedAt, o.Total })
             .ToListAsync();
 
         var dailyRevenue = Enumerable.Range(0, historyDays)
-            .Select(offset => historyStart.AddDays(offset))
-            .Select(day => paidOrders.Where(o => o.CreatedAt.Date == day).Sum(o => o.Total))
+            .Select(offset => historyStartIst.AddDays(offset))
+            .Select(day => paidOrders.Where(o => IstClock.ToIst(o.CreatedAt).Date == day).Sum(o => o.Total))
             .ToList();
 
         var (slope, intercept) = FitLinearTrend(dailyRevenue);
@@ -141,7 +153,7 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
             {
                 var dayIndex = historyDays - 1 + i; // continue the same x-axis used to fit the line
                 var predicted = (decimal)slope * dayIndex + intercept;
-                var date = now.Date.AddDays(i);
+                var date = nowIst.Date.AddDays(i);
                 return new ForecastPointDto(date.ToString("MMM d"), Math.Max(0, Math.Round(predicted, 2)));
             })
             .ToList();

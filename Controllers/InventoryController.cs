@@ -39,6 +39,12 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
             throw new ApiValidationException("Name is required.");
         if (req.Max <= 0)
             throw new ApiValidationException("Max stock must be greater than zero.");
+        // Per-branch check: the same ingredient legitimately exists in each branch's stock.
+        // Inactive items don't block the name — deactivate-then-recreate is the supported
+        // way to start an ingredient over (see the reactivate endpoint).
+        var nameLower = req.Name.Trim().ToLower();
+        if (await db.InventoryItems.AnyAsync(i => i.IsActive && i.BranchId == req.BranchId && i.Name.ToLower() == nameLower))
+            throw new ApiValidationException("An inventory item with this name already exists.");
 
         var item = new InventoryItem
         {

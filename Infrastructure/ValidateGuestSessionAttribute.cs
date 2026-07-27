@@ -55,7 +55,15 @@ public class ValidateGuestSessionAttribute(bool isWrite = false) : Attribute, IA
         if (session.Status is GuestSessionStatus.Closed or GuestSessionStatus.Revoked)
         {
             sessionService.ClearCookie(context.HttpContext.Response);
-            context.Result = Problem(StatusCodes.Status410Gone, "This session has ended.");
+            // StaffClosed + a cancelled order = staff rejected/cancelled this guest's order
+            // (see OrdersController.Cancel's session hook) — say so, rather than the generic
+            // "ended" a settled bill gets, so the guest isn't left staring at a reset menu.
+            var declined = session.ClosedReason == SessionCloseReason.StaffClosed
+                && session.OrderId is int closedOrderId
+                && await db.Orders.IgnoreQueryFilters().AnyAsync(o => o.Id == closedOrderId && o.Cancelled);
+            context.Result = Problem(StatusCodes.Status410Gone, declined
+                ? "The cafe couldn't accept your order. Please speak to a staff member."
+                : "This session has ended.");
             return;
         }
 

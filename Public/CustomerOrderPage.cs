@@ -302,7 +302,7 @@ public static class CustomerOrderPage
       <div class="guest-row">
         <input type="text" id="guest-name" placeholder="e.g. Priya" maxlength="60" />
       </div>
-      <div class="field-label" style="margin-top:12px">Mobile number *</div>
+      <div class="field-label" style="margin-top:12px">Mobile number (optional)</div>
       <div class="guest-row">
         <input type="tel" id="guest-phone" placeholder="e.g. 9876543210" maxlength="10" inputmode="numeric" />
       </div>
@@ -441,7 +441,7 @@ public static class CustomerOrderPage
     stopPolling();
     pollTimer = setInterval(function () {
       fetchJson(sessionBase + '/state').then(handleStateUpdate).catch(function (err) {
-        if (err.status === 410) showEnded('This session has ended.');
+        if (err.status === 410) showEnded(err.message || 'This session has ended.');
       });
     }, 5000);
   }
@@ -449,11 +449,26 @@ public static class CustomerOrderPage
   // Applied both right after an action and on each poll tick — the session's own status
   // (LOCKED from another device requesting the bill, etc.) always wins over whatever
   // screen we were already showing.
+  function unfiredFingerprint(order) {
+    return JSON.stringify((order && order.items || []).filter(function (i) { return i.fireBatch === 0 && !i.voided; }));
+  }
+
   function handleStateUpdate(s) {
+    var previousFingerprint = unfiredFingerprint(state.order);
     state.order = s.order;
+    // A cancelled order normally also closes the session (the poll then gets a 410), but
+    // if the session is somehow still alive, don't silently reset to an empty menu.
+    if (s.order && s.order.cancelled) { showEnded('The cafe couldn\'t accept your order. Please speak to a staff member.'); return; }
     if (s.status === 'LOCKED') { showBillScreen(s); return; }
     if (s.order && s.order.pendingStaffConfirmation) { showWaitingScreen(); return; }
     if (s.order && s.order.currentFireBatch > 0) { showPlacedScreen(s); return; }
+
+    // Most poll ticks bring back an unchanged cart — nothing on this session changed since
+    // the last tick. Skip the render entirely rather than tearing down and re-decoding every
+    // item's image (some are multi-MB base64) every 5 seconds for no visible change; a real
+    // external change (another device, staff editing the order) still gets the full refresh.
+    if (unfiredFingerprint(s.order) === previousFingerprint) { syncCartFromOrder(); return; }
+
     syncCartFromOrder();
     renderMenu();
     renderBestSellers();
@@ -599,6 +614,79 @@ public static class CustomerOrderPage
     });
   }
 
+  // Builds just the cart-dependent part of one item's card — the existing-lines box for
+  // combo items, and the Add/stepper/Customize control. Kept separate from the image/name/
+  // price so a qty change can patch this alone: full renderMenu() would otherwise tear down
+  // and re-decode every item's image (some are multi-MB base64, see MenuItem.Image) on every
+  // single tap, which is what made adding items feel laggy.
+  function fillItemActions(item, linesSlot, actionsSlot) {
+    var hasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
+    var qty = state.cart[item.id] || 0;
+
+    linesSlot.innerHTML = '';
+    if (!state.browseOnly && hasOptions) {
+      var lines = linesForItem(item.id);
+      if (lines.length > 0) {
+        var linesBox = el('div', 'item-lines');
+        lines.forEach(function (line) {
+          var row = el('div', 'item-line-row');
+          row.appendChild(el('span', 'line-label', line.qty + '× ' + (lineDescriptor(line) || 'Regular')));
+          var stepper = el('div', 'stepper');
+          var minus = el('button', null, '−');
+          minus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty - 1); };
+          var qtyEl = el('span', 'qty', String(line.qty));
+          var plus = el('button', null, '+');
+          plus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty + 1); };
+          stepper.appendChild(minus);
+          stepper.appendChild(qtyEl);
+          stepper.appendChild(plus);
+          row.appendChild(stepper);
+          linesBox.appendChild(row);
+        });
+        linesSlot.appendChild(linesBox);
+      }
+    }
+
+    actionsSlot.innerHTML = '';
+    // Ordering is a table-only feature — the no-table "general menu" code (see
+    // TablesController.GetMenuOnlyQrToken) is for browsing prices/availability
+    // only, so it never gets an Add/quantity stepper at all.
+    if (state.browseOnly) return;
+    if (hasOptions) {
+      var customize = el('button', 'customize-btn', 'Customize');
+      customize.onclick = function () { openItemOptions(item); };
+      actionsSlot.appendChild(customize);
+    } else {
+      var stepper2 = el('div', 'stepper');
+      if (qty > 0) {
+        var minus2 = el('button', null, '−');
+        minus2.onclick = function () { changeQty(item.id, -1); };
+        var qtyEl2 = el('span', 'qty', String(qty));
+        var plus2 = el('button', null, '+');
+        plus2.onclick = function () { changeQty(item.id, 1); };
+        stepper2.appendChild(minus2);
+        stepper2.appendChild(qtyEl2);
+        stepper2.appendChild(plus2);
+      } else {
+        var add = el('button', 'add', 'Add');
+        add.onclick = function () { changeQty(item.id, 1); };
+        stepper2.appendChild(add);
+      }
+      actionsSlot.appendChild(stepper2);
+    }
+  }
+
+  // Re-fills just one item's lines/stepper in place, in lieu of renderMenu() — the fast
+  // path after every cart change (see changeLineQty) so only this one item's small button/
+  // text subtree is touched, never its (or any other item's) image.
+  function patchItemCard(menuItemId) {
+    var card = document.querySelector('.item-card[data-item-id="' + menuItemId + '"]');
+    if (!card) return;
+    var item = state.menu.find(function (m) { return m.id === menuItemId; });
+    if (!item) return;
+    fillItemActions(item, card.querySelector('.item-lines-slot'), card.querySelector('.item-actions-slot'));
+  }
+
   function renderMenu() {
     var root = document.getElementById('menu-root');
     root.innerHTML = '';
@@ -611,9 +699,8 @@ public static class CustomerOrderPage
     categories.forEach(function (cat) {
       root.appendChild(el('div', 'cat-title', cat));
       menu.filter(function (m) { return m.category === cat; }).forEach(function (item) {
-        var hasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
-        var qty = state.cart[item.id] || 0;
         var card = el('div', 'item-card' + (item.available ? '' : ' unavailable'));
+        card.dataset.itemId = String(item.id);
 
         if (item.image) {
           var img = document.createElement('img');
@@ -625,6 +712,7 @@ public static class CustomerOrderPage
           card.appendChild(el('div', 'item-thumb placeholder', '🍽️'));
         }
 
+        var hasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
         var info = el('div', 'item-info');
         var nameRow = el('div', 'item-name-row');
         var badge = vnvBadge(item.vegNonVegType);
@@ -635,63 +723,50 @@ public static class CustomerOrderPage
         info.appendChild(el('div', 'item-price', (hasOptions ? 'from ' : '') + money(hasOptions ? Math.min.apply(null, [item.price].concat(item.variants.map(function (v) { return v.price; }))) : item.price)));
         if (!item.available) info.appendChild(el('div', 'unavailable-tag', 'CURRENTLY UNAVAILABLE'));
 
-        // Existing combos of this item already in the cart, each with its own stepper —
-        // only meaningful once an item can have more than one distinct line (variant/topping
-        // picks), which a plain item never does.
-        if (!state.browseOnly && hasOptions) {
-          var lines = linesForItem(item.id);
-          if (lines.length > 0) {
-            var linesBox = el('div', 'item-lines');
-            lines.forEach(function (line) {
-              var row = el('div', 'item-line-row');
-              row.appendChild(el('span', 'line-label', line.qty + '× ' + (lineDescriptor(line) || 'Regular')));
-              var stepper = el('div', 'stepper');
-              var minus = el('button', null, '−');
-              minus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty - 1); };
-              var qtyEl = el('span', 'qty', String(line.qty));
-              var plus = el('button', null, '+');
-              plus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty + 1); };
-              stepper.appendChild(minus);
-              stepper.appendChild(qtyEl);
-              stepper.appendChild(plus);
-              row.appendChild(stepper);
-              linesBox.appendChild(row);
-            });
-            info.appendChild(linesBox);
-          }
-        }
+        var linesSlot = el('div', 'item-lines-slot');
+        info.appendChild(linesSlot);
         card.appendChild(info);
 
-        // Ordering is a table-only feature — the no-table "general menu" code (see
-        // TablesController.GetMenuOnlyQrToken) is for browsing prices/availability
-        // only, so it never gets an Add/quantity stepper at all.
-        if (!state.browseOnly) {
-          if (hasOptions) {
-            var customize = el('button', 'customize-btn', 'Customize');
-            customize.onclick = function () { openItemOptions(item); };
-            card.appendChild(customize);
-          } else {
-            var stepper = el('div', 'stepper');
-            if (qty > 0) {
-              var minus = el('button', null, '−');
-              minus.onclick = function () { changeQty(item.id, -1); };
-              var qtyEl = el('span', 'qty', String(qty));
-              var plus = el('button', null, '+');
-              plus.onclick = function () { changeQty(item.id, 1); };
-              stepper.appendChild(minus);
-              stepper.appendChild(qtyEl);
-              stepper.appendChild(plus);
-            } else {
-              var add = el('button', 'add', 'Add');
-              add.onclick = function () { changeQty(item.id, 1); };
-              stepper.appendChild(add);
-            }
-            card.appendChild(stepper);
-          }
-        }
+        var actionsSlot = el('div', 'item-actions-slot');
+        card.appendChild(actionsSlot);
+
+        fillItemActions(item, linesSlot, actionsSlot);
         root.appendChild(card);
       });
     });
+  }
+
+  // Same stepper markup as fillItemActions' plain-item branch, into a caller-supplied slot —
+  // best sellers are always plain add/qty (no Customize), so this doesn't need the
+  // lines-box/hasOptions handling that function carries.
+  function fillBestSellerStepper(item, actionsSlot) {
+    actionsSlot.innerHTML = '';
+    if (state.browseOnly) return;
+    var qty = state.cart[item.id] || 0;
+    var stepper = el('div', 'stepper');
+    if (qty > 0) {
+      var minus = el('button', null, '−');
+      minus.onclick = function () { changeQty(item.id, -1); };
+      var qtyEl = el('span', 'qty', String(qty));
+      var plus = el('button', null, '+');
+      plus.onclick = function () { changeQty(item.id, 1); };
+      stepper.appendChild(minus);
+      stepper.appendChild(qtyEl);
+      stepper.appendChild(plus);
+    } else {
+      var add = el('button', 'add', 'Add');
+      add.onclick = function () { changeQty(item.id, 1); };
+      stepper.appendChild(add);
+    }
+    actionsSlot.appendChild(stepper);
+  }
+
+  function patchBestSellerCard(menuItemId) {
+    var card = document.querySelector('.bs-card[data-item-id="' + menuItemId + '"]');
+    if (!card) return;
+    var item = state.bestSellers.find(function (m) { return m.id === menuItemId; });
+    if (!item) return;
+    fillBestSellerStepper(item, card.querySelector('.item-actions-slot'));
   }
 
   function renderBestSellers() {
@@ -701,47 +776,85 @@ public static class CustomerOrderPage
     var strip = document.getElementById('bestsellers-strip');
     strip.innerHTML = '';
     state.bestSellers.forEach(function (item) {
-      var qty = state.cart[item.id] || 0;
       var card = el('div', 'bs-card' + (item.available ? '' : ' unavailable'));
+      card.dataset.itemId = String(item.id);
       card.appendChild(el('div', 'item-name', item.name));
       card.appendChild(el('div', 'item-price', money(item.price)));
 
-      if (!state.browseOnly) {
-        var stepper = el('div', 'stepper');
-        if (qty > 0) {
-          var minus = el('button', null, '−');
-          minus.onclick = function () { changeQty(item.id, -1); };
-          var qtyEl = el('span', 'qty', String(qty));
-          var plus = el('button', null, '+');
-          plus.onclick = function () { changeQty(item.id, 1); };
-          stepper.appendChild(minus);
-          stepper.appendChild(qtyEl);
-          stepper.appendChild(plus);
-        } else {
-          var add = el('button', 'add', 'Add');
-          add.onclick = function () { changeQty(item.id, 1); };
-          stepper.appendChild(add);
-        }
-        card.appendChild(stepper);
-      }
+      var actionsSlot = el('div', 'item-actions-slot');
+      card.appendChild(actionsSlot);
+      fillBestSellerStepper(item, actionsSlot);
+
       strip.appendChild(card);
     });
   }
 
-  // Every tap immediately calls the server (the cart lives session-side, not just in
-  // this tab — see GuestSessionController.AddCartItem) and re-syncs from its response,
-  // rather than trusting local arithmetic. variantId/modifierOptionIds identify WHICH
-  // line to upsert — the backend treats (menuItem, variant, exact option set) as the
-  // line's identity (see OrderBuildingService.AddOrUpdateCartItemAsync), so an existing
-  // line's qty change must resend the exact same combo, not just the menuItemId.
+  // A plain item (no variant/modifiers) has an unambiguous unit price — state.menu's own
+  // item.price, with no variant/topping surcharge to account for — so unlike a brand-new
+  // combo line (whose price/id genuinely don't exist client-side yet), it's safe to fabricate
+  // a full optimistic order-item line for it, not just bump the display-only state.cart map.
+  // Doing so lets cartCount()/cartSubtotal() (and so the cart bar) update instantly too,
+  // instead of only the tapped item's own stepper. This fabricated line is temporary — it
+  // gets discarded and replaced wholesale by the server's real Order the moment the request
+  // resolves (state.order = s.order in changeLineQty's .then).
+  function applyLocalQty(menuItemId, variantId, modifierOptionIds, nextQty) {
+    var isPlain = !variantId && (!modifierOptionIds || modifierOptionIds.length === 0);
+
+    if (isPlain) {
+      state.cart[menuItemId] = nextQty;
+      if (!state.order) return true; // no cart-bar total to keep in sync until a session order exists
+      var plainItems = state.order.items || (state.order.items = []);
+      var plainIdx = plainItems.findIndex(function (i) {
+        return i.menuItemId === menuItemId && !i.variantId && lineOptionIds(i).length === 0 && i.fireBatch === 0 && !i.voided;
+      });
+      if (nextQty <= 0) {
+        if (plainIdx !== -1) plainItems.splice(plainIdx, 1);
+      } else if (plainIdx !== -1) {
+        plainItems[plainIdx].qty = nextQty;
+      } else {
+        var menuItem = state.menu.find(function (m) { return m.id === menuItemId; });
+        plainItems.push({ menuItemId: menuItemId, qty: nextQty, price: menuItem ? menuItem.price : 0, fireBatch: 0, voided: false, variantId: null, variantName: null, selectedModifiers: [] });
+      }
+      return true;
+    }
+
+    // Existing combo line (already has a real price/id from a prior round trip) — safe to
+    // mutate its qty in place. A brand-new combo line has neither yet, so that one case is
+    // left for the server response to fill in — returns false so the caller knows not to
+    // patch the DOM yet (the options modal has already closed by then regardless).
+    if (!state.order) return false;
+    var sortedIds = (modifierOptionIds || []).slice().sort(function (a, b) { return a - b; });
+    var items = state.order.items || [];
+    var idx = items.findIndex(function (i) {
+      if (i.menuItemId !== menuItemId || i.fireBatch !== 0 || i.voided) return false;
+      var lineIds = lineOptionIds(i).sort(function (a, b) { return a - b; });
+      return i.variantId === variantId && lineIds.length === sortedIds.length && lineIds.every(function (id, k) { return id === sortedIds[k]; });
+    });
+    if (idx === -1) return false;
+    if (nextQty <= 0) items.splice(idx, 1); else items[idx].qty = nextQty;
+    return true;
+  }
+
+  // Every tap updates the tapped item's own card instantly via applyLocalQty/patchItemCard
+  // (no waiting on the network) — the request below is fired in the background and only
+  // reconciles state afterward, which is normally a no-op since the optimistic guess already
+  // matches. variantId/modifierOptionIds (not just menuItemId) identify WHICH line to
+  // upsert server-side (see OrderBuildingService.AddOrUpdateCartItemAsync), so an existing
+  // line's qty change must resend the exact same combo. If the request fails, the snapshots
+  // below put both possible optimistic targets (state.cart for a plain item, state.order for
+  // a combo line) back exactly how they were, then patch the one card that changed.
   function changeLineQty(menuItemId, variantId, modifierOptionIds, nextQty) {
     clearError();
     var next = Math.max(0, nextQty);
     var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
-    if (!state.order && phoneDigits.length !== 10) {
-      showError('Enter a valid 10-digit mobile number before adding items.');
-      document.getElementById('guest-phone').focus();
-      return;
+
+    var previousCartQty = state.cart[menuItemId];
+    var previousOrderSnapshot = state.order ? JSON.parse(JSON.stringify(state.order)) : null;
+    var patchedOptimistically = applyLocalQty(menuItemId, variantId, modifierOptionIds, next);
+    if (patchedOptimistically) {
+      patchItemCard(menuItemId);
+      patchBestSellerCard(menuItemId);
+      renderCartBar();
     }
 
     fetchJson(sessionBase + '/cart/items', {
@@ -760,11 +873,18 @@ public static class CustomerOrderPage
       state.order = s.order;
       syncCartFromOrder();
       if (state.order) document.getElementById('guest-card').style.display = 'none';
-      renderMenu();
-      renderBestSellers();
+      patchItemCard(menuItemId);
+      patchBestSellerCard(menuItemId);
       renderCartBar();
     }).catch(function (err) {
-      if (err.status === 410) { showEnded('This session has ended.'); return; }
+      if (patchedOptimistically) {
+        state.order = previousOrderSnapshot;
+        if (previousCartQty === undefined) delete state.cart[menuItemId]; else state.cart[menuItemId] = previousCartQty;
+        patchItemCard(menuItemId);
+        patchBestSellerCard(menuItemId);
+        renderCartBar();
+      }
+      if (err.status === 410) { showEnded(err.message || 'This session has ended.'); return; }
       if (err.status === 423) { showBillScreen({ order: state.order }); return; }
       showError(err.message);
     });
@@ -962,7 +1082,7 @@ public static class CustomerOrderPage
       document.getElementById('processing-overlay').classList.remove('show');
       btn.disabled = false;
       btn.textContent = 'Place Order';
-      if (err.status === 410) { showEnded('This session has ended.'); return; }
+      if (err.status === 410) { showEnded(err.message || 'This session has ended.'); return; }
       showError(err.message);
     });
   }
@@ -971,7 +1091,7 @@ public static class CustomerOrderPage
     fetchJson(sessionBase + '/request-bill', { method: 'POST' }).then(function (s) {
       showBillScreen(s);
     }).catch(function (err) {
-      if (err.status === 410) { showEnded('This session has ended.'); return; }
+      if (err.status === 410) { showEnded(err.message || 'This session has ended.'); return; }
       showError(err.message);
     });
   }

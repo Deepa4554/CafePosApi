@@ -50,6 +50,7 @@ public static class ScreenCatalog
         ["PrinterSettings"] = PlanCategory.Normal,
         ["KitchenFlowSettings"] = PlanCategory.Normal,
         ["StationManagement"] = PlanCategory.Normal,
+        ["TaxSlabManagement"] = PlanCategory.Normal,
         ["OrderTypesSettings"] = PlanCategory.Normal,
         ["ReceiptBuilder"] = PlanCategory.Normal,
         ["CafeProfileDetail"] = PlanCategory.Normal,

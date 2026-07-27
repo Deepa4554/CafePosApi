@@ -26,8 +26,8 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
 {
     /// <summary>Punch in/out must happen within this radius of the cafe's registered
     /// location — loose enough to absorb ordinary phone-GPS drift, tight enough to stop
-    /// a punch from home. Skipped entirely (not just widened) when the cafe hasn't
-    /// registered a location yet — see EnsureWithinGeofenceAsync.</summary>
+    /// a punch from home. A cafe with no registered location can't punch at all (staff
+    /// are told to get the Owner to set it first) — see EnsureWithinGeofenceAsync.</summary>
     private const double GeofenceRadiusMeters = 500;
 
     // ---------- Self-service punch state machine ----------
@@ -37,10 +37,18 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
     public async Task<ActionResult<AttendanceRecordDto>> PunchIn(PunchRequest req)
     {
         var staff = await CurrentStaffAsync();
+        // Self-service punch-in is strictly "now, for today" — the date must be today's
+        // (cafe clock, see IstClock) and the timestamp is ALWAYS the server's. The
+        // request's OccurredAt is deliberately ignored: attendance drives payroll, and
+        // trusting a client-supplied time would let anyone erase a late mark or inflate
+        // hours with a hand-crafted API call. Backdating is the Owner/Manager-gated,
+        // note-required, audited manual/correct endpoints' job.
+        if (req.LocalDate != TodayIst())
+            throw new ApiValidationException("Punch-in can only be recorded for today.");
         var existing = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staff.Id && a.Date == req.LocalDate);
         if (existing?.PunchInAt is not null) throw new ApiConflictException("Already punched in for this day.");
 
-        var occurredAt = req.OccurredAt ?? DateTime.UtcNow;
+        var occurredAt = DateTime.UtcNow;
         var shift = await FindShiftForDay(staff.Id, req.LocalDate);
         var settings = await CurrentSettingsAsync();
         await EnsureWithinGeofenceAsync(req, settings);
@@ -66,11 +74,16 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
     public async Task<ActionResult<AttendanceRecordDto>> PunchOut(PunchRequest req)
     {
         var staff = await CurrentStaffAsync();
-        var record = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staff.Id && a.Date == req.LocalDate);
+        // Server time only — same anti-spoofing rule as PunchIn. FindOpenRecordAsync
+        // also handles the overnight case: a shift that crossed midnight lives on
+        // yesterday's record, and "punch out" at 1 AM must close THAT session instead of
+        // failing with "not punched in" against today's empty date.
+        EnsureTodayOrYesterday(req.LocalDate);
+        var record = await FindOpenRecordAsync(staff.Id, req.LocalDate);
         if (record?.PunchInAt is null) throw new ApiConflictException("Not punched in for this day.");
         if (record.PunchOutAt is not null) throw new ApiConflictException("Already punched out for this day.");
 
-        var occurredAt = req.OccurredAt ?? DateTime.UtcNow;
+        var occurredAt = DateTime.UtcNow;
         if (occurredAt <= record.PunchInAt.Value) throw new ApiValidationException("Punch-out must be after punch-in.");
 
         var settings = await CurrentSettingsAsync();
@@ -122,15 +135,18 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
     public async Task<IActionResult> BreakStart(PunchRequest req)
     {
         var staff = await CurrentStaffAsync();
-        var record = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staff.Id && a.Date == req.LocalDate);
+        // Same rules as PunchOut: server time only, and the open session may live on
+        // yesterday's record (overnight shift) — see FindOpenRecordAsync.
+        EnsureTodayOrYesterday(req.LocalDate);
+        var record = await FindOpenRecordAsync(staff.Id, req.LocalDate);
         if (record?.PunchInAt is null || record.PunchOutAt is not null) throw new ApiConflictException("Not currently punched in.");
 
-        var lastLog = await LastLogForDayAsync(staff.Id, req.LocalDate);
+        var lastLog = await LastLogSinceAsync(staff.Id, record.PunchInAt.Value);
         if (lastLog?.Type == AttendanceLogType.BreakStart) throw new ApiConflictException("A break is already in progress.");
 
         db.AttendanceLogs.Add(new AttendanceLog
         {
-            StaffId = staff.Id, Type = AttendanceLogType.BreakStart, Timestamp = req.OccurredAt ?? DateTime.UtcNow,
+            StaffId = staff.Id, Type = AttendanceLogType.BreakStart, Timestamp = DateTime.UtcNow,
             Latitude = req.Latitude, Longitude = req.Longitude, Source = AttendanceLogSource.Staff,
         });
         await db.SaveChangesAsync();
@@ -142,13 +158,14 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
     public async Task<ActionResult<AttendanceRecordDto>> BreakEnd(PunchRequest req)
     {
         var staff = await CurrentStaffAsync();
-        var record = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staff.Id && a.Date == req.LocalDate);
+        EnsureTodayOrYesterday(req.LocalDate);
+        var record = await FindOpenRecordAsync(staff.Id, req.LocalDate);
         if (record?.PunchInAt is null || record.PunchOutAt is not null) throw new ApiConflictException("Not currently punched in.");
 
-        var lastLog = await LastLogForDayAsync(staff.Id, req.LocalDate);
+        var lastLog = await LastLogSinceAsync(staff.Id, record.PunchInAt.Value);
         if (lastLog?.Type != AttendanceLogType.BreakStart) throw new ApiConflictException("No break is currently in progress.");
 
-        var occurredAt = req.OccurredAt ?? DateTime.UtcNow;
+        var occurredAt = DateTime.UtcNow;
         record.BreakMinutes += (int)Math.Max(0, (occurredAt - lastLog.Timestamp).TotalMinutes);
 
         db.AttendanceLogs.Add(new AttendanceLog
@@ -313,19 +330,50 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
             .OrderBy(s => s.StartsAt).FirstOrDefaultAsync();
     }
 
-    private async Task<AttendanceLog?> LastLogForDayAsync(int staffId, DateOnly date)
+    /// <summary>Today's date on the cafe's clock (IST — see IstClock), which is what a
+    /// punch's LocalDate is validated against.</summary>
+    private static DateOnly TodayIst() => DateOnly.FromDateTime(IstClock.NowIst);
+
+    /// <summary>Self-service punches may only target the current shift: today, or
+    /// yesterday for an overnight session crossing midnight (see FindOpenRecordAsync).
+    /// Anything older is a correction — that's the Owner/Manager-gated manual/correct
+    /// endpoints' job, not a staff member's own button.</summary>
+    private static void EnsureTodayOrYesterday(DateOnly localDate)
     {
-        var dayStart = date.ToDateTime(TimeOnly.MinValue);
-        var dayEnd = dayStart.AddDays(1);
-        return await db.AttendanceLogs.Where(l => l.StaffId == staffId && l.Timestamp >= dayStart && l.Timestamp < dayEnd)
-            .OrderByDescending(l => l.Timestamp).FirstOrDefaultAsync();
+        var today = TodayIst();
+        if (localDate != today && localDate != today.AddDays(-1))
+            throw new ApiValidationException("Punches can only be recorded for the current shift.");
     }
+
+    /// <summary>The attendance record the caller's CURRENT session lives on: the given
+    /// date's record if it's open (punched in, not yet out), otherwise yesterday's if
+    /// THAT one is still open — a night shift that crossed midnight punches out at 1 AM
+    /// against yesterday's record, not today's empty date. Falls back to the given
+    /// date's record (possibly null/closed) so callers' error messages still apply.</summary>
+    private async Task<AttendanceRecord?> FindOpenRecordAsync(int staffId, DateOnly localDate)
+    {
+        var record = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staffId && a.Date == localDate);
+        if (record?.PunchInAt is not null && record.PunchOutAt is null) return record;
+
+        var previous = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staffId && a.Date == localDate.AddDays(-1));
+        if (previous?.PunchInAt is not null && previous.PunchOutAt is null) return previous;
+
+        return record;
+    }
+
+    /// <summary>Latest log of this session — everything since its punch-in. Replaces the
+    /// old calendar-day window, which treated the IST date as a UTC range (logs between
+    /// 00:00–05:30 IST fell outside it) and broke for sessions crossing midnight; the
+    /// punch-in timestamp bounds the session exactly regardless of either.</summary>
+    private async Task<AttendanceLog?> LastLogSinceAsync(int staffId, DateTime since) =>
+        await db.AttendanceLogs.Where(l => l.StaffId == staffId && l.Timestamp >= since)
+            .OrderByDescending(l => l.Timestamp).FirstOrDefaultAsync();
 
     /// <summary>If the staff member forgot to end a break before punching out, close it
     /// automatically at punch-out time rather than blocking the punch-out entirely.</summary>
     private async Task AutoCloseOpenBreakAsync(int staffId, AttendanceRecord record, DateTime punchOutAt)
     {
-        var lastLog = await LastLogForDayAsync(staffId, record.Date);
+        var lastLog = await LastLogSinceAsync(staffId, record.PunchInAt!.Value);
         if (lastLog?.Type != AttendanceLogType.BreakStart) return;
 
         record.BreakMinutes += (int)Math.Max(0, (punchOutAt - lastLog.Timestamp).TotalMinutes);
@@ -340,21 +388,22 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         await db.Settings.FirstOrDefaultAsync() ?? new CafeSettings();
 
     /// <summary>Location is mandatory on every punch — a missing coordinate always 400s.
-    /// The distance check itself only runs once the cafe has actually registered its own
-    /// coordinates (Cafe Profile's "Use Current Location"); until then there's nothing to
-    /// compare against, so punches are accepted (and still geotagged) without blocking
-    /// day-1 use before an Owner has set the cafe's location.</summary>
+    /// The cafe's own registered coordinates (Cafe Profile's "Use Current Location") are
+    /// mandatory too: without them the geofence can't mean anything, so rather than
+    /// silently accepting punches from anywhere, punching is blocked with a message
+    /// telling the staff member to get the Owner to set the cafe's location first.</summary>
     private static Task EnsureWithinGeofenceAsync(PunchRequest req, CafeSettings settings)
     {
         if (req.Latitude is null || req.Longitude is null)
             throw new ApiValidationException("Location is required to punch in/out — please enable location access.");
 
-        if (settings.Latitude is decimal cafeLat && settings.Longitude is decimal cafeLon)
-        {
-            var distance = GeoDistance.Meters(req.Latitude.Value, req.Longitude.Value, cafeLat, cafeLon);
-            if (distance > GeofenceRadiusMeters)
-                throw new ApiValidationException($"You must be within {GeofenceRadiusMeters:0}m of the cafe to punch in/out.");
-        }
+        if (settings.Latitude is not decimal cafeLat || settings.Longitude is not decimal cafeLon)
+            throw new ApiValidationException(
+                "The cafe's location isn't set yet, so attendance can't be verified. Ask the owner to set it first in Settings → Cafe Profile → 'Use Current Location'.");
+
+        var distance = GeoDistance.Meters(req.Latitude.Value, req.Longitude.Value, cafeLat, cafeLon);
+        if (distance > GeofenceRadiusMeters)
+            throw new ApiValidationException($"You must be within {GeofenceRadiusMeters:0}m of the cafe to punch in/out.");
 
         return Task.CompletedTask;
     }

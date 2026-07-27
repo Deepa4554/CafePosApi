@@ -69,7 +69,18 @@ public class GuestSessionController(
             // CASE 1: fresh table, fresh session.
             session = new GuestSession { TenantId = tenantId, TableId = table.Id, ExpiresAt = DateTime.UtcNow.AddHours(HardTtlHours) };
             db.GuestSessions.Add(session);
-            await db.SaveChangesAsync();
+            try
+            {
+                await db.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                // Two phones scanned a fresh table in the same instant — the DB's unique
+                // "one Active/Locked session per table" index let exactly one insert win.
+                // Funnel the loser into the JOIN flow instead of surfacing a 500.
+                db.Entry(session).State = EntityState.Detached;
+                return new ScanResultDto("JOIN", null);
+            }
 
             var (raw, hash) = sessionService.IssueToken();
             db.SessionDevices.Add(new SessionDevice { TenantId = tenantId, SessionId = session.Id, TokenHash = hash, UserAgent = Request.Headers["User-Agent"].ToString() });
@@ -141,15 +152,34 @@ public class GuestSessionController(
         if (session.OrderId is null)
         {
             if (req.Qty <= 0) throw new ApiValidationException("Quantity must be at least 1.");
-            // Same mandatory-phone rule as OrdersController.Create/CreatePublic — matches
-            // this guest's order to a Customer by phone (see FindOrCreateCustomerAsync).
+            // Phone is optional here (unlike OrdersController.Create's staff path) — a guest
+            // who skips it just doesn't get matched to a Customer record (see
+            // FindOrCreateCustomerAsync), but ordering itself isn't blocked on it.
             var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
-            if (normalizedPhone is null || normalizedPhone.Length != 10)
-                throw new ApiValidationException("A valid 10-digit mobile number is required.");
+            if (normalizedPhone is not null && normalizedPhone.Length != 10)
+                throw new ApiValidationException("Mobile number must be exactly 10 digits.");
 
             var order = await orderBuilder.BuildOrderAsync(db, "DINE_IN", table.Code, req.GuestName,
                 items: [new CreateOrderItemDto(req.MenuItemId, req.Qty, req.Modifier, req.VariantId, req.ModifierOptionIds)],
                 discountPct: 0, user: null, explicitTenantId: session.TenantId, guestPhone: normalizedPhone);
+
+            // Two joined devices can race past the OrderId-null check above and each build
+            // an order (BuildOrderAsync's busy check can't see the other's uncommitted
+            // insert). Re-read the claim: if another device won, fold this item into the
+            // winner's cart and retire our duplicate, instead of stranding an open order
+            // that keeps the table stuck busy.
+            await db.Entry(session).ReloadAsync();
+            if (session.OrderId is int winnerId && winnerId != order.Id)
+            {
+                order.Cancelled = true;
+                order.CancelledAt = DateTime.UtcNow;
+                order.CancelReason = "Duplicate cart from two devices ordering at once.";
+                var winner = await LoadOrderAsync(winnerId) ?? throw new ApiConflictException("Order not found.");
+                await orderBuilder.AddOrUpdateCartItemAsync(db, winner, req.MenuItemId, req.Qty, req.Modifier, session.TenantId, req.VariantId, req.ModifierOptionIds);
+                await db.SaveChangesAsync();
+                return GuestSessionStateDto.From(session, table.Code, winner);
+            }
+
             session.OrderId = order.Id;
             await db.SaveChangesAsync();
             return GuestSessionStateDto.From(session, table.Code, order);
@@ -157,6 +187,7 @@ public class GuestSessionController(
 
         var existingOrder = await LoadOrderAsync(session.OrderId) ?? throw new ApiConflictException("Order not found.");
         if (existingOrder.Paid) throw new ApiConflictException("This order has already been paid.");
+        if (existingOrder.Cancelled) throw new ApiConflictException("This order was declined by the cafe. Please call a staff member.");
 
         await orderBuilder.AddOrUpdateCartItemAsync(db, existingOrder, req.MenuItemId, req.Qty, req.Modifier, session.TenantId, req.VariantId, req.ModifierOptionIds);
         await db.SaveChangesAsync();
@@ -181,6 +212,7 @@ public class GuestSessionController(
 
         var order = await LoadOrderAsync(session.OrderId) ?? throw new ApiConflictException("Order not found.");
         if (order.Paid) throw new ApiConflictException("This order has already been paid.");
+        if (order.Cancelled) throw new ApiConflictException("This order was declined by the cafe. Please call a staff member.");
 
         var hasUnfiredItems = order.Items.Any(i => i.FireBatch == 0 && !i.Voided);
         if (!hasUnfiredItems && !order.PendingStaffConfirmation)

@@ -23,10 +23,10 @@ public interface IOrderBuildingService
 
     /// <summary>Adds a new unfired cart line or overwrites an existing unfired line's qty for
     /// the same (menuItemId, modifier) pair — qty is the line's FINAL quantity, not a delta.
-    /// qty == 0 removes the line. Only deducts inventory for a qty INCREASE (mirrors
-    /// OrdersController.AddItem/RemoveItem: stock is debited on add, never credited back on
-    /// removal/decrease — an existing, deliberately-unchanged behaviour). Recomputes
-    /// order.Subtotal/Tax/Total. Does not save — the caller saves.</summary>
+    /// qty == 0 removes the line. Never touches inventory: cart lines stay FireBatch == 0
+    /// and stock is only consumed when they're actually fired (see FireUnfiredItemsAsync,
+    /// the single deduction point). Recomputes order.Subtotal/Tax/Total. Does not save —
+    /// the caller saves.</summary>
     Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId,
         int? variantId = null, List<int>? modifierOptionIds = null);
 
@@ -133,7 +133,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
             var (linePrice, variantName, selections, stationName, lineTaxRatePct) = await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId);
-            orderItems.Add(new OrderItem
+            var orderItem = new OrderItem
             {
                 MenuItemId = menuItem.Id,
                 Name = menuItem.Name,
@@ -146,7 +146,12 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 StationName = stationName,
                 VegNonVegType = menuItem.VegNonVegType,
                 TaxRatePct = lineTaxRatePct,
-            });
+            };
+            // Anonymous guest requests have no JWT, so StampTenantIds would fall back to the
+            // default tenant — and the ambient query filter would then hide these lines from
+            // the cafe's own staff (orders showing "0 items", Confirm always failing).
+            if (explicitTenantId is int lineTid) orderItem.TenantId = lineTid;
+            orderItems.Add(orderItem);
         }
 
         var effectiveTenantId = explicitTenantId ?? tenantContext.TenantIdOrDefault;
@@ -337,6 +342,11 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 order.Items.Remove(existing);
                 db.OrderItems.Remove(existing);
             }
+            // If this removal emptied out every unfired line while the order sat in the
+            // staff confirmation queue, drop the flag — otherwise the order lingers there
+            // as a "0 items" card whose Confirm can never succeed.
+            if (order.PendingStaffConfirmation && !order.Items.Any(i => i.FireBatch == 0))
+                order.PendingStaffConfirmation = false;
             order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
             RecomputeTotals(order, await GetTaxRatePctAsync(db, explicitTenantId));
             return null;
@@ -367,6 +377,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 VegNonVegType = menuItem.VegNonVegType,
                 TaxRatePct = taxRatePct,
                 FireBatch = 0,
+                // Guest cart lines are created without a JWT — stamp the tenant explicitly or
+                // StampTenantIds defaults them to tenant 1, hiding them from the cafe's staff.
+                TenantId = explicitTenantId,
             };
             order.Items.Add(existing);
         }
@@ -436,13 +449,17 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 // duplicate on a Radio/MultiSelect group collapses to a single unit.
                 var qty = groupById[option.ModifierId].Type == "Quantity" ? qtyByOptionId[option.Id] : 1;
                 price += option.Price * qty;
-                selections.Add(new OrderItemModifier
+                var selection = new OrderItemModifier
                 {
                     ModifierOptionId = option.Id,
                     Name = option.Name,
                     Price = option.Price,
                     Qty = qty,
-                });
+                };
+                // Same explicit stamp as the OrderItem itself — guest requests have no JWT
+                // for StampTenantIds to derive the tenant from.
+                if (explicitTenantId is int selTid) selection.TenantId = selTid;
+                selections.Add(selection);
             }
             chosenGroupIds = options.Select(o => o.ModifierId).Distinct().ToList();
         }
@@ -477,7 +494,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
 
         order.CurrentFireBatch += 1;
         foreach (var item in unfired) item.FireBatch = order.CurrentFireBatch;
-        order.FireBatches.Add(new OrderFireBatch { OrderId = order.Id, BatchNumber = order.CurrentFireBatch });
+        var fireBatch = new OrderFireBatch { OrderId = order.Id, BatchNumber = order.CurrentFireBatch };
+        if (explicitTenantId is int batchTid) fireBatch.TenantId = batchTid;
+        order.FireBatches.Add(fireBatch);
         RecomputeBatchStatus(db, order, order.CurrentFireBatch);
         RecomputeOrderStatus(order);
 
@@ -643,7 +662,15 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         if (customer is null)
         {
             var normalizedName = guestName.Trim().ToLower();
-            customer = await customersQuery.FirstOrDefaultAsync(c => c.Name.ToLower() == normalizedName);
+            var byName = await customersQuery.FirstOrDefaultAsync(c => c.Name.ToLower() == normalizedName);
+            // A name match only counts when it can't contradict the phone we were given:
+            // either no phone was supplied (the walk-in bucket case), or the matched
+            // record has no phone yet (it adopts this one just below). Same name but a
+            // DIFFERENT number on file is a different person — fall through and create a
+            // fresh customer instead of crediting this visit to a stranger and silently
+            // dropping the new number.
+            if (guestPhone is null || byName?.Phone is null)
+                customer = byName;
         }
 
         var trimmedAddress = string.IsNullOrWhiteSpace(guestAddress) ? null : guestAddress.Trim();

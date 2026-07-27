@@ -37,6 +37,14 @@ public class TasksController(CafePosDbContext db) : ControllerBase
         if (string.IsNullOrWhiteSpace(req.Title))
             throw new ApiValidationException("Title is required.");
 
+        StaffMember? assignee = null;
+        if (req.AssignedToId is int assignedToId)
+        {
+            assignee = await db.Staff.FindAsync(assignedToId);
+            if (assignee is null)
+                throw new ApiValidationException("Selected staff member not found.");
+        }
+
         var task = new StaffTask
         {
             Title = req.Title.Trim(),
@@ -51,23 +59,19 @@ public class TasksController(CafePosDbContext db) : ControllerBase
         // Pushed straight to the assignee's own device(s) only (AppNotification.TargetUserId)
         // — not a tenant-wide broadcast like every other category — since this is only ever
         // that one staff member's business. Silently skipped if the assignee has no app login
-        // to target (StaffMember.UserId null) or the id doesn't resolve to a real roster entry.
-        if (req.AssignedToId is int assignedToId)
+        // to target (StaffMember.UserId null).
+        if (assignee?.UserId is int assigneeUserId)
         {
-            var assignee = await db.Staff.FindAsync(assignedToId);
-            if (assignee?.UserId is int assigneeUserId)
+            var actor = await CurrentUserAsync();
+            db.Notifications.Add(new AppNotification
             {
-                var actor = await CurrentUserAsync();
-                db.Notifications.Add(new AppNotification
-                {
-                    Title = "New task assigned",
-                    Body = $"{actor?.Name ?? "Someone"} assigned you \"{task.Title}\" — {req.Priority} priority, due {req.DueDate:MMM d}.",
-                    Category = NotificationCategory.Task,
-                    Channel = NotificationChannel.InApp,
-                    ActionUrl = "/tasks",
-                    TargetUserId = assigneeUserId,
-                });
-            }
+                Title = "New task assigned",
+                Body = $"{actor?.Name ?? "Someone"} assigned you \"{task.Title}\" — {req.Priority} priority, due {req.DueDate:MMM d}.",
+                Category = NotificationCategory.Task,
+                Channel = NotificationChannel.InApp,
+                ActionUrl = "/tasks",
+                TargetUserId = assigneeUserId,
+            });
         }
 
         await db.SaveChangesAsync();

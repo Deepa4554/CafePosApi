@@ -58,8 +58,8 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
     /// period=month (default): last 30 days, top 3. A brand-new cafe with too little order
     /// history (fewer than 3 items with any sales) gets the remaining slots backfilled from
     /// Popular-flagged items (UnitsSold 0) so the section never renders empty on day one.
-    /// period=today: midnight UTC through now, top 1 — "today's most-selling item so far".
-    /// No Popular backfill here: an empty list before the first sale of the day is the
+    /// period=today: midnight UTC through now, top 3 — "today's best-selling items so far".
+    /// No Popular backfill here: a short or empty list before the day's sales pick up is the
     /// correct answer, not a gap to paper over.
     /// </summary>
     [AllowAnonymous]
@@ -68,7 +68,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
     {
         var isToday = period.Equals("today", StringComparison.OrdinalIgnoreCase);
         var cutoff = isToday ? DateTime.UtcNow.Date : DateTime.UtcNow.AddDays(-30);
-        var take = isToday ? 1 : BestSellerCount;
+        var take = BestSellerCount;
 
         var sales = await (
             from oi in db.OrderItems
@@ -112,6 +112,9 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             throw new ApiValidationException("Name cannot exceed 200 characters.");
         if (req.Price < 0)
             throw new ApiValidationException("Price cannot be negative.");
+        var nameLower = req.Name.Trim().ToLower();
+        if (await db.MenuItems.AnyAsync(m => m.Name.ToLower() == nameLower))
+            throw new ApiValidationException("A menu item with this name already exists.");
         if (!string.IsNullOrWhiteSpace(req.ShortCode) && req.ShortCode.Length > 5)
             throw new ApiValidationException("Short code cannot exceed 5 characters.");
         if (!string.IsNullOrWhiteSpace(req.ShortCode))
@@ -194,9 +197,15 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
 
         var valid = items.Where(req => !string.IsNullOrWhiteSpace(req.Name) && req.Price > 0).ToList();
         var defaultStation = await ResolveStationAsync(null);
+        // Names already on the menu (plus names seen earlier in this same file) count as
+        // duplicates and are skipped, so re-importing the same CSV can't double the menu.
+        var seenNames = (await db.MenuItems.Select(m => m.Name).ToListAsync())
+            .Select(n => n.Trim().ToLowerInvariant())
+            .ToHashSet();
         var created = new List<MenuItem>();
         foreach (var req in valid)
         {
+            if (!seenNames.Add(req.Name.Trim().ToLowerInvariant())) continue;
             var item = new MenuItem
             {
                 Name = req.Name.Trim(),
@@ -229,6 +238,9 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         {
             if (string.IsNullOrWhiteSpace(req.Name)) throw new ApiValidationException("Name cannot be blank.");
             if (req.Name.Trim().Length > 200) throw new ApiValidationException("Name cannot exceed 200 characters.");
+            var nameLower = req.Name.Trim().ToLower();
+            if (await db.MenuItems.AnyAsync(m => m.Id != id && m.Name.ToLower() == nameLower))
+                throw new ApiValidationException("A menu item with this name already exists.");
             item.Name = req.Name.Trim();
         }
         if (req.Category is not null) item.Category = req.Category.Trim();

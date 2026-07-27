@@ -33,8 +33,14 @@ public static class InventoryBatchService
         // deduction while it stays low — that's what LowStockNotified is for.
         var wasAboveReorder = ingredient.Current > ingredient.ReorderLevel;
 
+        // IgnoreQueryFilters + the ingredient's own TenantId, NOT the ambient JWT-derived
+        // filter: this runs inside anonymous guest flows too (QR self-ordering fires via
+        // OrderBuildingService.ConsumeInventoryAsync), where the ambient filter resolves to
+        // the DEFAULT tenant — leaving the real cafe's batches invisible, so every guest
+        // sale skipped FIFO and piled up phantom negative batches instead.
         var batches = await db.InventoryBatches
-            .Where(b => b.InventoryItemId == ingredient.Id && b.Quantity > 0)
+            .IgnoreQueryFilters()
+            .Where(b => b.TenantId == ingredient.TenantId && b.InventoryItemId == ingredient.Id && b.Quantity > 0)
             .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
             .ThenBy(b => b.ReceivedAt)
             .ThenBy(b => b.Id)
@@ -164,8 +170,11 @@ public static class InventoryBatchService
         CafePosDbContext db, InventoryTransaction original, InventoryItem ingredient, string reason,
         int? userId, string userName)
     {
+        // Same ambient-filter bypass as ConsumeFifoAsync above — Find/queries here must
+        // resolve the batch by the ingredient's tenant, not the request's JWT tenant.
         var batch = original.InventoryBatchId is int batchId
-            ? await db.InventoryBatches.FindAsync(batchId)
+            ? await db.InventoryBatches.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(b => b.Id == batchId && b.TenantId == ingredient.TenantId)
             : null;
         batch ??= new InventoryBatch
         {

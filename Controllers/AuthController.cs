@@ -100,7 +100,9 @@ public class AuthController(
         var stale = db.EmailOtps.Where(o => o.Email == normalizedEmail && !o.Used);
         db.EmailOtps.RemoveRange(stale);
 
-        var code = Random.Shared.Next(100_000, 999_999).ToString();
+        // Crypto RNG, not Random.Shared — this is a security code, and a seeded/predictable
+        // generator would let OTPs be guessed. Upper bound exclusive: covers 100000–999999.
+        var code = System.Security.Cryptography.RandomNumberGenerator.GetInt32(100_000, 1_000_000).ToString();
         db.EmailOtps.Add(new EmailOtp { Email = normalizedEmail, Code = code, ExpiresAt = DateTime.UtcNow.AddMinutes(10) });
         await db.SaveChangesAsync();
 
@@ -182,7 +184,7 @@ public class AuthController(
 
     /// <summary>
     /// Onboards a brand-new cafe: creates an isolated Tenant, its Owner account, and
-    /// default CafeSettings/Subscription (14-day trial) — all scoped to the new
+    /// default CafeSettings/Subscription (7-day trial) — all scoped to the new
     /// tenant so it starts completely empty and can never see another cafe's data.
     /// Use this (not /register) for "create your cafe" signup; /register is kept for
     /// the existing demo/role-switcher accounts, which stay on the default tenant.
@@ -352,6 +354,12 @@ public class AuthController(
             throw new ApiValidationException("New password must be at least 6 characters.");
 
         user.PasswordHash = hasher.HashPassword(user, req.NewPassword);
+        // Same log-out-everywhere rule as the OTP reset flow above — a password change
+        // that leaves every existing refresh token alive would let a stolen session
+        // survive the very action meant to end it. The caller's current ACCESS token
+        // stays valid until it expires (≤ AccessTokenMinutes); the next refresh
+        // requires signing in with the new password.
+        await RevokeAllSessionsAsync(user.Id);
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.PasswordChange, AuditResource.Auth, user.Id.ToString(), $"{user.Name} changed their password.", AuditSeverity.Medium, user.Id, user.Name);
         return NoContent();

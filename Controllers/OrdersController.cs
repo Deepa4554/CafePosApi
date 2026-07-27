@@ -49,15 +49,21 @@ public class OrdersController(
         // kitchen's ticket list while the food still hasn't gone out.
         if (activeOnly) query = query.Where(o => !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
         if (kdsReady) query = query.Where(o => o.Items.Any(i => i.FireBatch > 0));
-        if (pendingConfirmation is bool pc) query = query.Where(o => o.PendingStaffConfirmation == pc);
+        // pendingConfirmation=true also excludes cancelled orders — a rejected (cancelled)
+        // guest order that somehow got re-flagged must not reappear as an unconfirmable
+        // card in the staff confirmation queue.
+        if (pendingConfirmation is bool pc) query = query.Where(o => o.PendingStaffConfirmation == pc && (!pc || !o.Cancelled));
         if (orderType is not null) query = query.Where(o => o.OrderType == orderType);
         // No branch selected -> see everything (single-location cafes, and cafes that
         // haven't set up branches yet, are unaffected). A branch selected -> only that
         // branch's orders; pre-branch-scoping orders (BranchId null) intentionally drop
         // out of a branch-filtered view since they can't be attributed to one.
         if (branchId is int bid) query = query.Where(o => o.BranchId == bid);
-        if (from is not null) query = query.Where(o => o.CreatedAt >= from.Value.ToDateTime(TimeOnly.MinValue));
-        if (to is not null) query = query.Where(o => o.CreatedAt < to.Value.ToDateTime(TimeOnly.MinValue).AddDays(1));
+        // from/to are IST calendar days (what the app's date pickers and "today" mean) —
+        // shifted to UTC bounds for the stored-UTC CreatedAt, same rule as
+        // DashboardController.Analytics (see IstClock).
+        if (from is not null) query = query.Where(o => o.CreatedAt >= IstClock.IstDateStartUtc(from.Value));
+        if (to is not null) query = query.Where(o => o.CreatedAt < IstClock.IstDateStartUtc(to.Value).AddDays(1));
 
         var paged = await query.OrderByDescending(o => o.CreatedAt).ToPagedResultAsync(page, pageSize);
         return new PagedResult<OrderDto>(paged.Items.Select(OrderDto.From).ToList(), paged.Page, paged.PageSize, paged.TotalCount);
@@ -187,57 +193,22 @@ public class OrdersController(
     }
 
     /// <summary>
-    /// Customer self-ordering from the QR table page (see PublicOrderPageController) — no
-    /// staff login. The encrypted token in the route IS the tenant+table signal (there's
-    /// no JWT to derive one from, and the table is never trusted from client input —
-    /// see CreatePublicOrderRequest) — decoded here and threaded through BuildOrderAsync
-    /// so every lookup/insert lands on the scanned cafe/table, not whatever the default
-    /// tenant is. Always dine-in, and never carries a discount or coupon: those stay a
-    /// deliberate staff action from the POS, not something a QR guest can apply to
-    /// themselves.
+    /// Tombstone for the pre-session QR ordering endpoint. The QR page has ordered through
+    /// GuestSessionController's session flow (scan → cart → order) since Phase 1 of the
+    /// session plan — nothing current calls this. It used to create-and-fire in one shot,
+    /// which bypassed Staff-Confirm Mode and left no GuestSession behind (permanently
+    /// wedging the table's scan flow in STAFF_ASSIST), so it's kept only as a clear 410
+    /// for any stale cached page rather than a confusing 404 or a silent back door.
     /// </summary>
     [AllowAnonymous]
     [HttpPost("public/{token}")]
-    public async Task<ActionResult<OrderDto>> CreatePublic(string token, CreatePublicOrderRequest req)
-    {
-        var decoded = qrTokens.TryDecode(token);
-        if (decoded is null)
-            throw new ApiValidationException("This ordering link is invalid. Please re-scan the QR code.");
-        var (tenantId, tableCode) = decoded.Value;
-
-        // Same mandatory-phone rule as the staff POS path (see Create above) — matches
-        // orders to a Customer by phone, and now required here too so QR self-orders
-        // aren't the one path that skips CRM matching entirely.
-        var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
-        if (normalizedPhone is null || normalizedPhone.Length != 10)
-            throw new ApiValidationException("A valid 10-digit mobile number is required.");
-
-        // An empty table code is the generic "menu only" QR (see
-        // TablesController.GetMenuOnlyQrToken) — browsing only, by design: there's no
-        // seat for the kitchen to deliver to and no staff member watching that QR the
-        // way they would a table, so self-ordering from it is rejected outright rather
-        // than silently becoming an untracked takeaway order. CustomerOrderPage already
-        // hides the Add/cart UI entirely for this case; this is the server-side backstop.
-        if (string.IsNullOrEmpty(tableCode))
-            throw new ApiValidationException("This code is for browsing the menu only. Please order from your table's QR code.");
-
-        var order = await orderBuilder.BuildOrderAsync(db, "DINE_IN", tableCode, req.GuestName, req.Items, discountPct: 0, user: null, explicitTenantId: tenantId, guestPhone: normalizedPhone);
-
-        // A QR-self-ordering guest has no POS to come back and "fire" from — so unlike the
-        // staff path (which fires as an explicit second step), a public order auto-fires
-        // immediately on creation, keeping it a single atomic create-and-send action.
-        try
+    public ActionResult CreatePublic(string token, CreatePublicOrderRequest req) =>
+        new ObjectResult(new ProblemDetails
         {
-            await orderBuilder.FireUnfiredItemsAsync(db, order, tenantId);
-            await db.SaveChangesAsync();
-        }
-        catch (DbUpdateException)
-        {
-            throw new ApiConflictException("This order was already placed — please try again.");
-        }
-
-        return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
-    }
+            Status = StatusCodes.Status410Gone,
+            Title = "This ordering page is out of date — please re-scan the QR code on your table.",
+        })
+        { StatusCode = StatusCodes.Status410Gone };
 
     /// <summary>Moves a given number of ONE line's units one stage forward (New→Read→
     /// Preparing→Ready→Served) — the partial-quantity primitive. "Chowmein ×6" line se sirf
@@ -600,7 +571,19 @@ public class OrdersController(
 
         order.PendingStaffConfirmation = false;
         if (!await orderBuilder.FireUnfiredItemsAsync(db, order, null))
-            throw new ApiValidationException("Nothing to confirm — the cart is empty.");
+        {
+            // Empty cart at confirmation — the guest removed everything after placing (or
+            // the order was stranded by an earlier bug). Auto-cancel instead of throwing:
+            // the old throw happened before SaveChanges, so the flag reset above was lost
+            // and the order sat in every staff member's confirmation queue forever.
+            order.Cancelled = true;
+            order.CancelledAt = DateTime.UtcNow;
+            order.CancelReason = "Guest cart was empty at confirmation.";
+            await db.SaveChangesAsync();
+            await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+                $"Order {order.Id} auto-cancelled at confirmation — guest cart was empty.", AuditSeverity.Low);
+            return OrderDto.From(order);
+        }
 
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
@@ -632,6 +615,21 @@ public class OrdersController(
         order.CancelledAt = DateTime.UtcNow;
         order.CancelReason = req.Reason;
         order.PendingStaffConfirmation = false; // rejecting a still-pending guest order clears the gate too
+
+        // Cancelling/rejecting a guest QR order ends its session too (same hook as
+        // CloseOrderAsync's settle path) — otherwise the guest's phone stays writable
+        // against the cancelled order, silently re-adding items or re-flagging it for
+        // confirmation with no idea staff turned it down.
+        var guestSession = await db.GuestSessions.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.OrderId == order.Id && (s.Status == GuestSessionStatus.Active || s.Status == GuestSessionStatus.Locked));
+        if (guestSession is not null)
+        {
+            guestSession.Status = GuestSessionStatus.Closed;
+            guestSession.ClosedReason = SessionCloseReason.StaffClosed;
+            guestSession.ClosedAt = DateTime.UtcNow;
+        }
+
+        await ReleaseBillRedemptionsAsync(order);
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         foreach (var batch in order.FireBatches)
@@ -720,6 +718,11 @@ public class OrdersController(
             order.Cancelled = true;
             order.CancelledAt = DateTime.UtcNow;
             order.CancelReason = req.Reason;
+            // Cancelling the last KOT cancels the whole order — release its redemptions
+            // exactly like the whole-order Cancel above, then re-derive the (now zeroed)
+            // discount totals.
+            await ReleaseBillRedemptionsAsync(order);
+            OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         }
 
         await db.SaveChangesAsync();
@@ -764,6 +767,46 @@ public class OrdersController(
             await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
                 $"Voided '{item.Name}' (order {order.Id}) after prep started — no stock reversal (wastage). Reason: {reason ?? "not specified"}.",
                 AuditSeverity.Medium);
+        }
+    }
+
+    /// <summary>Returns billing-time redemptions to their owners when an UNPAID order is
+    /// cancelled. The gift card's balance, the single-use coupon, and the loyalty points
+    /// were all debited the instant they were applied (see ApplyBillGiftCard/
+    /// ApplyBillCoupon/ApplyBillLoyalty) on the assumption the bill would be settled — a
+    /// cancellation before payment means the guest bought nothing, so leaving them
+    /// consumed silently burns real customer value. Zeroes the order's redemption amounts
+    /// (codes stay on the order for the audit trail) — callers re-run RecomputeTotals
+    /// after this. Paid orders never reach this: Cancel rejects them (that's Refund
+    /// territory, where goods were actually delivered).</summary>
+    private async Task ReleaseBillRedemptionsAsync(Order order)
+    {
+        if (order.GiftCardAmountApplied > 0 && order.GiftCardCode is not null)
+        {
+            var giftCard = await db.GiftCards.FirstOrDefaultAsync(g => g.Code == order.GiftCardCode);
+            if (giftCard is not null)
+            {
+                giftCard.Balance += order.GiftCardAmountApplied;
+                if (giftCard.Status == GiftCardStatus.Used && giftCard.Balance > 0)
+                    giftCard.Status = GiftCardStatus.Active;
+            }
+            order.GiftCardAmountApplied = 0;
+        }
+
+        if (order.CouponCode is not null && order.CouponDiscountAmount > 0)
+        {
+            var coupon = await db.Coupons.FirstOrDefaultAsync(c => c.Code == order.CouponCode);
+            if (coupon is not null) coupon.IsUsed = false;
+            order.CouponDiscountAmount = 0;
+        }
+
+        if (order.LoyaltyPointsRedeemed > 0)
+        {
+            var customer = order.CustomerId is int cid ? await db.Customers.FirstOrDefaultAsync(c => c.Id == cid) : null;
+            if (customer is not null)
+                customer.RedeemedPoints = Math.Max(0, customer.RedeemedPoints - order.LoyaltyPointsRedeemed);
+            order.LoyaltyPointsRedeemed = 0;
+            order.LoyaltyDiscountAmount = 0;
         }
     }
 
@@ -1001,10 +1044,22 @@ public class OrdersController(
         }
         else
         {
+            // A settle MUST name its tender. This branch used to accept a missing/blank
+            // method and fall through to CloseOrderAsync anyway — marking the bill Paid
+            // with no OrderPayment row at all, invisible to method-wise revenue reporting.
             var method = string.IsNullOrWhiteSpace(req?.PaymentMethod) ? null : req.PaymentMethod.Trim();
-            order.PaymentMethod = method;
-            if (method is not null)
-                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = method, Amount = order.Total });
+            if (method is null)
+                throw new ApiValidationException("A payment method (or splits) is required to settle the bill.");
+            if (!ValidPaymentMethods.Contains(method))
+                throw new ApiValidationException($"'{method}' isn't a valid payment method.");
+
+            // Only the still-owed balance, not order.Total — an earlier deliberate partial
+            // (AllowPartial) already has its own Payments rows; recording the full total
+            // again would make the ledger exceed the bill.
+            var owed = order.Total - order.Payments.Sum(p => p.Amount);
+            if (owed > 0)
+                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = method, Amount = owed });
+            order.PaymentMethod = order.Payments.Count > 1 ? "Multiple" : method;
         }
 
         // KeepOpen: the payment above fully covers the balance, but this is a deliberate
