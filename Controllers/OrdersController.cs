@@ -589,14 +589,18 @@ public class OrdersController(
 
             await db.SaveChangesAsync();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "23505" } pg
+            && pg.ConstraintName is not null && pg.ConstraintName.StartsWith("IX_InventoryTransactions_OrderItemId_InventoryItemId"))
         {
             // Two staff members tapping Confirm on the same pending order at once (the pill
             // is floor-wide, visible on every device) both pass the PendingStaffConfirmation
             // check above before either commits — the loser's FireUnfiredItemsAsync then hits
-            // the DB's unique index on (OrderItemId, InventoryItemId), same backstop
+            // the DB's idempotency index on InventoryTransactions, same backstop
             // ConsumeInventoryAsync's own doc comment describes. Same recovery as
-            // GuestSessionController.PlaceOrder's identical race.
+            // GuestSessionController.PlaceOrder's identical race. Narrowed to this exact
+            // constraint (not every DbUpdateException) so an unrelated save failure still
+            // surfaces as a real 500 with its stack trace logged, instead of being masked
+            // behind a misleading "already confirmed".
             throw new ApiConflictException("This order was already confirmed.");
         }
 
