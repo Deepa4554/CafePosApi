@@ -405,6 +405,11 @@ public record MergeTableRequest(int TargetHostTableId);
 
 public record CreateInventoryItemRequest(string Name, string Category, double Max, string? Unit, decimal? UnitCost, double? MinStock = null, double? ReorderLevel = null, int? BranchId = null, DateOnly? ExpiryDate = null);
 
+/// <summary>Edits an item's own details only. Current stock is deliberately absent — that
+/// moves through Restock/Waste/Adjust so every change keeps a ledger entry. BranchId is
+/// absent too: the item's batches and transactions are already booked against its branch.</summary>
+public record UpdateInventoryItemRequest(string Name, string Category, double Max, string? Unit, decimal? UnitCost, double? MinStock = null, double? ReorderLevel = null);
+
 /// <summary>InventoryItem plus a server-computed LowStock flag (Current &lt;= ReorderLevel)
 /// — replaces the frontend's old hardcoded current/max &lt;= 0.25 ratio guess.</summary>
 public record InventoryItemDto(

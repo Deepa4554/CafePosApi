@@ -69,6 +69,44 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
         return CreatedAtAction(nameof(List), new { id = item.Id }, InventoryItemDto.From(item));
     }
 
+    /// <summary>Edits the item's own details (name, category, unit, thresholds, cost).
+    /// Current stock is untouched here on purpose — it only moves via Restock/Waste/Adjust
+    /// so every quantity change leaves a ledger entry behind.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPut("{id:int}")]
+    public async Task<ActionResult<InventoryItemDto>> Update(int id, UpdateInventoryItemRequest req)
+    {
+        var item = await db.InventoryItems.FindAsync(id);
+        if (item is null) return NotFound();
+
+        if (string.IsNullOrWhiteSpace(req.Name))
+            throw new ApiValidationException("Name is required.");
+        if (req.Max <= 0)
+            throw new ApiValidationException("Max stock must be greater than zero.");
+
+        // Same per-branch uniqueness rule as Create, minus this item itself so saving an
+        // unchanged name isn't rejected as a clash with its own row.
+        var nameLower = req.Name.Trim().ToLower();
+        if (await db.InventoryItems.AnyAsync(i => i.Id != id && i.IsActive && i.BranchId == item.BranchId && i.Name.ToLower() == nameLower))
+            throw new ApiValidationException("An inventory item with this name already exists.");
+
+        item.Name = req.Name.Trim();
+        item.Category = string.IsNullOrWhiteSpace(req.Category) ? "General" : req.Category.Trim();
+        item.Max = req.Max;
+        item.Unit = req.Unit?.Trim() ?? "";
+        item.UnitCost = req.UnitCost ?? item.UnitCost;
+        item.MinStock = req.MinStock ?? 0;
+        item.ReorderLevel = req.ReorderLevel ?? Math.Round(req.Max * 0.25, 2);
+
+        // Raising ReorderLevel can put an already-notified item back under threshold, and
+        // lowering it can lift one clear. Re-arm the alert whenever the new level says the
+        // item is no longer low, matching what a restock past the level does.
+        if (item.Current > item.ReorderLevel) item.LowStockNotified = false;
+
+        await db.SaveChangesAsync();
+        return InventoryItemDto.From(item);
+    }
+
     /// <summary>Quick single-item restock — the button already on each inventory card.
     /// Adds the given quantity as a new batch (not a forced top-up to Max), optionally
     /// dated with an expiry.</summary>
@@ -338,6 +376,15 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
     {
         var item = await db.InventoryItems.FindAsync(id);
         if (item is null) return NotFound();
+
+        // Create only checks active items, so the name can have been taken over by a fresh
+        // item while this one sat deactivated. Restoring blindly would put two active items
+        // with the same name in the branch — the one case Create/Update can't catch.
+        var nameLower = item.Name.Trim().ToLower();
+        if (await db.InventoryItems.AnyAsync(i => i.Id != id && i.IsActive && i.BranchId == item.BranchId &&
+            i.Name.ToLower() == nameLower))
+            throw new ApiValidationException(
+                $"An active item named \"{item.Name}\" already exists. Rename that one first, then restore this.");
 
         item.IsActive = true;
         await db.SaveChangesAsync();
