@@ -312,11 +312,15 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<ApiFailureLog>().HasIndex(f => f.StatusCode);
 
         // Idempotency guard — one Sale-type (fire-time) deduction per (OrderItem,
-        // Ingredient). Existing rows all have OrderItemId == NULL; Postgres treats NULLs
-        // as distinct in a unique index, so historical Sale rows never collide with each
-        // other or with this filter — no backfill needed.
+        // Ingredient, Batch). Batch is part of the key (not just OrderItem+Ingredient)
+        // because ConsumeFifoAsync can legitimately write more than one Sale row for the
+        // same order line's ingredient — a draw that spans two lots is two correctly
+        // batch-tagged rows, not a duplicate; only a second row for the SAME batch means an
+        // actual retry/duplicate fire. Existing rows all have OrderItemId == NULL; Postgres
+        // treats NULLs as distinct in a unique index, so historical Sale rows never collide
+        // with each other or with this filter — no backfill needed.
         modelBuilder.Entity<InventoryTransaction>()
-            .HasIndex(t => new { t.OrderItemId, t.InventoryItemId })
+            .HasIndex(t => new { t.OrderItemId, t.InventoryItemId, t.InventoryBatchId })
             .IsUnique()
             .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL");
 

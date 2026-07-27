@@ -570,22 +570,36 @@ public class OrdersController(
         if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
 
         order.PendingStaffConfirmation = false;
-        if (!await orderBuilder.FireUnfiredItemsAsync(db, order, null))
+        try
         {
-            // Empty cart at confirmation — the guest removed everything after placing (or
-            // the order was stranded by an earlier bug). Auto-cancel instead of throwing:
-            // the old throw happened before SaveChanges, so the flag reset above was lost
-            // and the order sat in every staff member's confirmation queue forever.
-            order.Cancelled = true;
-            order.CancelledAt = DateTime.UtcNow;
-            order.CancelReason = "Guest cart was empty at confirmation.";
+            if (!await orderBuilder.FireUnfiredItemsAsync(db, order, null))
+            {
+                // Empty cart at confirmation — the guest removed everything after placing (or
+                // the order was stranded by an earlier bug). Auto-cancel instead of throwing:
+                // the old throw happened before SaveChanges, so the flag reset above was lost
+                // and the order sat in every staff member's confirmation queue forever.
+                order.Cancelled = true;
+                order.CancelledAt = DateTime.UtcNow;
+                order.CancelReason = "Guest cart was empty at confirmation.";
+                await db.SaveChangesAsync();
+                await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+                    $"Order {order.Id} auto-cancelled at confirmation — guest cart was empty.", AuditSeverity.Low);
+                return OrderDto.From(order);
+            }
+
             await db.SaveChangesAsync();
-            await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
-                $"Order {order.Id} auto-cancelled at confirmation — guest cart was empty.", AuditSeverity.Low);
-            return OrderDto.From(order);
+        }
+        catch (DbUpdateException)
+        {
+            // Two staff members tapping Confirm on the same pending order at once (the pill
+            // is floor-wide, visible on every device) both pass the PendingStaffConfirmation
+            // check above before either commits — the loser's FireUnfiredItemsAsync then hits
+            // the DB's unique index on (OrderItemId, InventoryItemId), same backstop
+            // ConsumeInventoryAsync's own doc comment describes. Same recovery as
+            // GuestSessionController.PlaceOrder's identical race.
+            throw new ApiConflictException("This order was already confirmed.");
         }
 
-        await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
             $"Order {order.Id} confirmed by staff — sent to kitchen.", AuditSeverity.Low);
         return OrderDto.From(order);

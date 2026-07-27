@@ -69,15 +69,20 @@ public static class InventoryBatchService
             });
         }
 
+        // Planned first, written after: the idempotency index below is (OrderItemId,
+        // InventoryItemId, Batch) — one row per DISTINCT batch this deduction actually
+        // touches. Collecting draws per batch (instead of calling WriteRow the moment each
+        // is decided) means the negative-stock fallback below, which can land back on the
+        // SAME batch a plain FIFO walk already drew from, merges into that batch's one row
+        // instead of writing a second row for it and self-colliding with the index.
+        var draws = new List<(InventoryBatch Batch, double Take)>();
         var remaining = amount;
-        InventoryBatch? lastTouched = null;
         foreach (var batch in batches)
         {
             if (remaining <= 0) break;
             var take = Math.Min(remaining, batch.Quantity);
-            WriteRow(batch, take);
+            draws.Add((batch, take));
             remaining -= take;
-            lastTouched = batch;
         }
 
         if (remaining > 0)
@@ -86,10 +91,14 @@ public static class InventoryBatchService
             // (never purchased through this system) or every existing batch is already at
             // zero. Either way, the deduction still happens (never blocked), landing on the
             // last-touched batch or a brand-new zero-quantity one that goes negative.
-            var batch = lastTouched;
-            if (batch is null)
+            if (draws.Count > 0)
             {
-                batch = new InventoryBatch
+                var last = draws[^1];
+                draws[^1] = (last.Batch, last.Take + remaining);
+            }
+            else
+            {
+                var batch = new InventoryBatch
                 {
                     TenantId = ingredient.TenantId,
                     InventoryItemId = ingredient.Id,
@@ -97,9 +106,12 @@ public static class InventoryBatchService
                     UnitCost = ingredient.UnitCost,
                 };
                 db.InventoryBatches.Add(batch);
+                draws.Add((batch, remaining));
             }
-            WriteRow(batch, remaining);
         }
+
+        foreach (var (batch, take) in draws)
+            WriteRow(batch, take);
 
         // Fires once per crossing, regardless of what kind of deduction caused it (sale,
         // waste, adjustment) — an Owner cares that stock ran low, not why. Gated centrally
