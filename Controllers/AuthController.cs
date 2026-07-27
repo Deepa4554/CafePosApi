@@ -1,3 +1,4 @@
+using System.Data;
 using CafePOS.Api.Contracts;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
@@ -8,6 +9,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 
 namespace CafePOS.Api.Controllers;
 
@@ -363,6 +365,155 @@ public class AuthController(
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.PasswordChange, AuditResource.Auth, user.Id.ToString(), $"{user.Name} changed their password.", AuditSeverity.Medium, user.Id, user.Name);
         return NoContent();
+    }
+
+    /// <summary>
+    /// Self-service, irreversible: permanently deletes this Owner's entire cafe — every
+    /// order, menu item, inventory record, staff login, everything tenant-scoped — plus
+    /// the Tenant row itself and every AppUser login under it (this one included). Owner-only
+    /// (Policies.OwnerOnly, not OwnerOrManager) since a Manager account should never be able
+    /// to end the whole cafe. No platform-admin tooling exists for this yet, so it's built as
+    /// self-service instead: naturally scoped to the caller's own tenant only, can never touch
+    /// another cafe's data, and needs no elevated role beyond what an Owner already has.
+    ///
+    /// Deletion order isn't hand-maintained (54+ tenant-scoped tables and growing) — it's
+    /// discovered at request time from Postgres' own catalogs: every table with a "TenantId"
+    /// column, plus the real FK constraints between them, topologically sorted so a
+    /// referencing row is always deleted before the row it points at. That self-corrects as
+    /// the schema grows, instead of silently drifting out of date the way a hard-coded list
+    /// would. RefreshTokens is the one table that references Users without carrying its own
+    /// TenantId column, so it's cleaned up explicitly by UserId lookup first.
+    /// </summary>
+    [Authorize(Policy = Policies.OwnerOnly)]
+    [HttpPost("delete-my-account")]
+    public async Task<ActionResult<DeleteAccountPlanDto>> DeleteMyAccount(DeleteAccountRequest req, [FromQuery] bool dryRun = false)
+    {
+        var user = await CurrentUserAsync();
+        if (hasher.VerifyHashedPassword(user, user.PasswordHash, req.Password) == PasswordVerificationResult.Failed)
+            throw new ApiValidationException("Password is incorrect.");
+        if (!db.Database.IsRelational())
+            throw new ApiValidationException("Account deletion isn't available in this environment.");
+
+        var tenantId = user.TenantId;
+
+        var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+        var wasClosed = conn.State != ConnectionState.Open;
+        if (wasClosed) await conn.OpenAsync();
+        try
+        {
+            var tenantTables = new List<string>();
+            await using (var cmd = new NpgsqlCommand(
+                "SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'TenantId'",
+                conn))
+            await using (var reader = await cmd.ExecuteReaderAsync())
+                while (await reader.ReadAsync()) tenantTables.Add(reader.GetString(0));
+
+            var edges = new List<(string Child, string Parent)>();
+            await using (var cmd = new NpgsqlCommand("""
+                SELECT tc.table_name, ccu.table_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+                WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
+                """, conn))
+            await using (var reader = await cmd.ExecuteReaderAsync())
+                while (await reader.ReadAsync()) edges.Add((reader.GetString(0), reader.GetString(1)));
+
+            var order = TopologicalDeletionOrder(tenantTables, edges);
+
+            // dryRun inspects the exact plan (table order + how many rows each holds for this
+            // tenant right now) without deleting anything — call this first to sanity-check
+            // before the real, irreversible run. Read-only, no transaction needed.
+            if (dryRun)
+            {
+                var counts = new List<TablePlanDto>();
+                foreach (var table in order)
+                {
+                    await using var cmd = new NpgsqlCommand($"""SELECT COUNT(*) FROM "{table}" WHERE "TenantId" = @tid""", conn);
+                    cmd.Parameters.AddWithValue("tid", tenantId);
+                    var n = (long)(await cmd.ExecuteScalarAsync() ?? 0L);
+                    counts.Add(new TablePlanDto(table, n));
+                }
+                return new DeleteAccountPlanDto(tenantId, counts);
+            }
+
+            logger.LogWarning("Deleting tenant {TenantId} ({Email}) — self-service account deletion.", tenantId, user.Email);
+
+            await using var txn = await conn.BeginTransactionAsync();
+            try
+            {
+                // RefreshTokens references Users.UserId but has no TenantId column of its own,
+                // so it's invisible to the discovery query above — delete by explicit lookup
+                // before Users (which the discovery/topological sort below does cover).
+                await using (var cmd = new NpgsqlCommand("""
+                    DELETE FROM "RefreshTokens" WHERE "UserId" IN (SELECT "Id" FROM "Users" WHERE "TenantId" = @tid)
+                    """, conn, txn))
+                {
+                    cmd.Parameters.AddWithValue("tid", tenantId);
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                foreach (var table in order)
+                {
+                    await using var cmd = new NpgsqlCommand($"""DELETE FROM "{table}" WHERE "TenantId" = @tid""", conn, txn);
+                    cmd.Parameters.AddWithValue("tid", tenantId);
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                await using (var cmd = new NpgsqlCommand("""DELETE FROM "Tenants" WHERE "Id" = @tid""", conn, txn))
+                {
+                    cmd.Parameters.AddWithValue("tid", tenantId);
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                await txn.CommitAsync();
+            }
+            catch
+            {
+                await txn.RollbackAsync();
+                throw;
+            }
+        }
+        finally
+        {
+            if (wasClosed) await conn.CloseAsync();
+        }
+
+        logger.LogWarning("Tenant {TenantId} ({Email}) deleted.", tenantId, user.Email);
+        return NoContent();
+    }
+
+    /// <summary>Kahn's-algorithm topological sort over the FK graph restricted to
+    /// <paramref name="tables"/> — a table with an outgoing edge (it holds the FK) must be
+    /// deleted before the table it points at. Self-referencing edges (e.g. CafeTable's own
+    /// MergedIntoTableId) are dropped: a single DELETE removing every row for one tenant in
+    /// one statement is safe against its own self-references. Any table left over after the
+    /// sort (a genuine cross-table cycle, none exist in this schema today) is appended in its
+    /// original order rather than dropped, so nothing silently goes unswept.</summary>
+    private static List<string> TopologicalDeletionOrder(List<string> tables, List<(string Child, string Parent)> edges)
+    {
+        var tableSet = tables.ToHashSet();
+        var relevantEdges = edges.Where(e => e.Child != e.Parent && tableSet.Contains(e.Child) && tableSet.Contains(e.Parent)).ToList();
+
+        var blockedBy = tables.ToDictionary(t => t, _ => 0);
+        var unblocks = tables.ToDictionary(t => t, _ => new List<string>());
+        foreach (var (child, parent) in relevantEdges)
+        {
+            unblocks[child].Add(parent);
+            blockedBy[parent]++;
+        }
+
+        var queue = new Queue<string>(tables.Where(t => blockedBy[t] == 0));
+        var result = new List<string>();
+        while (queue.Count > 0)
+        {
+            var t = queue.Dequeue();
+            result.Add(t);
+            foreach (var next in unblocks[t])
+                if (--blockedBy[next] == 0) queue.Enqueue(next);
+        }
+
+        if (result.Count < tables.Count) result.AddRange(tables.Except(result));
+        return result;
     }
 
     private async Task<AppUser> CurrentUserAsync()

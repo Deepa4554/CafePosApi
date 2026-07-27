@@ -17,6 +17,9 @@ public record RefreshRequest(string? RefreshToken);
 // clears local storage client-side either way).
 public record LogoutRequest(string? RefreshToken);
 public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+public record DeleteAccountRequest(string Password);
+public record TablePlanDto(string Table, long RowCount);
+public record DeleteAccountPlanDto(int TenantId, List<TablePlanDto> Tables);
 
 public record UserDto(int Id, string Email, string? Phone, string Name, string Role, string? ProfilePhoto, int TenantId, bool IsPlatformAdmin, string AccessMode, List<string>? AllowedScreens, int? AssignedStationId)
 {
