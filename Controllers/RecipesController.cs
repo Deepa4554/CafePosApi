@@ -80,6 +80,14 @@ public class RecipesController(CafePosDbContext db, IAuditService audit) : Contr
                 throw new ApiValidationException($"'{line.Unit}' can't be converted to {ingredient.Name}'s unit ('{ingredient.Unit}').");
         }
 
+        // One row per ingredient — the Recipe Builder's picker never stopped the same
+        // ingredient landing on two rows, and ConsumeInventoryAsync merges duplicates
+        // defensively at fire time, but the recipe itself should stay unambiguous (the
+        // variance report and cost view both read it row by row).
+        var duplicated = req.Items.GroupBy(i => i.InventoryItemId).FirstOrDefault(g => g.Count() > 1);
+        if (duplicated is not null)
+            throw new ApiValidationException($"{inventory[duplicated.Key].Name} appears more than once — combine it into a single row.");
+
         var recipe = await db.Recipes.Include(r => r.Items).FirstOrDefaultAsync(r => r.MenuItemId == menuItemId);
         var oldIngredientIds = recipe?.Items.Select(i => i.InventoryItemId).ToHashSet() ?? [];
         if (recipe is null)

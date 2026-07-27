@@ -803,12 +803,21 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 continue;
             }
 
+            // One Deduct per DISTINCT ingredient, not per recipe row. A recipe listing the
+            // same ingredient on two rows (the Recipe Builder never prevented it) would
+            // otherwise call ConsumeFifoAsync twice for the same (line, ingredient) — the
+            // second call re-draws the same batch (its SQL filter sees the database's
+            // quantities, not the first call's in-memory drain) and collides with the Sale
+            // idempotency index, failing the whole fire/confirm.
+            var amountByIngredientId = new Dictionary<int, double>();
             foreach (var recipeItem in recipe.Items)
             {
                 if (!inventory.TryGetValue(recipeItem.InventoryItemId, out var ingredient)) continue;
                 var amount = UnitConverter.Convert(recipeItem.Quantity * line.Qty, recipeItem.Unit, ingredient.Unit);
-                await Deduct(ingredient, amount, line.Id);
+                amountByIngredientId[ingredient.Id] = amountByIngredientId.GetValueOrDefault(ingredient.Id) + amount;
             }
+            foreach (var (ingredientId, amount) in amountByIngredientId)
+                await Deduct(inventory[ingredientId], amount, line.Id);
         }
     }
 }
