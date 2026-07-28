@@ -146,19 +146,11 @@ public class OrdersController(
     [HttpPost]
     public async Task<ActionResult<OrderDto>> Create(CreateOrderRequest req)
     {
-        // Mandatory so every order can be matched to a Customer by phone (see
-        // FindOrCreateCustomerAsync) instead of by name, which two different guests can
-        // share and one guest can spell inconsistently across visits. Enforced here (the
-        // staff POS path) only — CreatePublic (anonymous QR self-ordering) has no phone
-        // field on its request DTO yet and is deliberately left unaffected. QSR counter
-        // orders and Cash Sales are the staff-POS exceptions: a token number (QSR) or the
-        // fact that it's paid on the spot (Cash) already identifies/settles the order, so
-        // the phone stays genuinely optional instead of being forced just for CRM matching.
-        var skipsMandatoryPhone = req.OrderType is "QSR" or "CASH";
+        // Optional on every order type — staff/guest may choose not to give a phone number.
+        // When one IS given, it's still normalized to digits-only and validated as exactly 10
+        // digits so the Customer-by-phone match (see FindOrCreateCustomerAsync) stays reliable.
         var normalizedPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? null : new string(req.GuestPhone.Where(char.IsDigit).ToArray());
-        if (!skipsMandatoryPhone && (normalizedPhone is null || normalizedPhone.Length != 10))
-            throw new ApiValidationException("A valid 10-digit guest mobile number is required.");
-        if (skipsMandatoryPhone && normalizedPhone is not null && normalizedPhone.Length != 10)
+        if (normalizedPhone is not null && normalizedPhone.Length != 10)
             throw new ApiValidationException("Mobile number must be exactly 10 digits.");
 
         // Creates the order in the "Open" state (persisted, table occupied) WITHOUT firing

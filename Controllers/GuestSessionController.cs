@@ -28,6 +28,15 @@ public class GuestSessionController(
 {
     private const int HardTtlHours = 4;
 
+    // AddCartItem does a read-then-write (find existing line, else insert) against a
+    // request-scoped DbContext with no DB-level uniqueness/locking behind it. A double-tap
+    // (or any two near-simultaneous taps on the same session — no client debounce either,
+    // see CustomerOrderPage) can race two requests past each other so both see "no existing
+    // line" and both insert, duplicating the item. Serializing per-session here closes that
+    // window cheaply without a migration; fine for this app's single-instance deployment.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> CartLocks = new();
+    private static SemaphoreSlim CartLockFor(int sessionId) => CartLocks.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
+
     private async Task<(int TenantId, string TableCode, CafeTable Table)?> ResolveAsync(string token)
     {
         var decoded = qrTokens.TryDecode(token);
@@ -147,6 +156,20 @@ public class GuestSessionController(
     public async Task<ActionResult<GuestSessionStateDto>> AddCartItem(AddCartItemRequest req)
     {
         var session = HttpContext.GetGuestSession();
+        var gate = CartLockFor(session.Id);
+        await gate.WaitAsync();
+        try
+        {
+            return await AddCartItemLocked(session, req);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<ActionResult<GuestSessionStateDto>> AddCartItemLocked(GuestSession session, AddCartItemRequest req)
+    {
         var table = await db.Tables.IgnoreQueryFilters().FirstAsync(t => t.Id == session.TableId);
 
         if (session.OrderId is null)

@@ -397,6 +397,44 @@ public static class CustomerOrderPage
     vegOnly: false,
   };
   var pollTimer = null;
+  // One entry per cart line while its cart/items POST is in flight — see changeLineQty.
+  // Guards against a fast double-tap (or any tap fired again before the previous request for
+  // the SAME line finished) sending two independent requests and duplicating the line
+  // server-side.
+  var pendingLineRequests = {};
+
+  function lineKey(menuItemId, variantId, modifierOptionIds) {
+    return menuItemId + '|' + (variantId || '') + '|' + (modifierOptionIds || []).slice().sort(function (a, b) { return a - b; }).join(',');
+  }
+
+  // Each cart/items response gets a sequence number. If a later response for a different
+  // item arrives before an earlier one, we don't want the old response to overwrite it.
+  // Instead, only accept responses that are newer than what we already have.
+  var lastResponseSequence = 0;
+  var responseSequenceCounter = 0;
+
+  // A server response only reflects the taps it had seen when its request was SENT. Any
+  // line still in pendingLineRequests is ahead of that snapshot — re-applying those targets
+  // on top of the fresh server order keeps the displayed qty/total at the newest tapped
+  // value, instead of falling back and "counting up" (200, 300, ... 1000) as each older
+  // response lands.
+  function reapplyPendingOptimistic() {
+    Object.keys(pendingLineRequests).forEach(function (k) {
+      var p = pendingLineRequests[k];
+      applyLocalQty(p.menuItemId, p.variantId, p.modifierOptionIds, p.target);
+    });
+  }
+
+  // Debounce the cart bar render so adding 3 items in quick succession updates the
+  // total price once (after all responses land) instead of 3 times (flickering/slow).
+  var cartBarRenderTimer = null;
+  function scheduleCartBarRender() {
+    if (cartBarRenderTimer) return; // Already scheduled, don't reschedule
+    cartBarRenderTimer = setTimeout(function () {
+      cartBarRenderTimer = null;
+      renderCartBar();
+    }, 50); // Wait 50ms for more responses to come in, then render once
+  }
 
   function el(tag, cls, html) {
     var e = document.createElement(tag);
@@ -454,6 +492,11 @@ public static class CustomerOrderPage
   }
 
   function handleStateUpdate(s) {
+    // A poll tick's /state fetch can resolve mid-tap: it was requested before this line's
+    // own optimistic update, so applying it now would stomp that update and force a full
+    // renderMenu() rebuild for no reason. The in-flight request's own .then() carries the
+    // authoritative post-tap state anyway, so just skip this tick.
+    if (Object.keys(pendingLineRequests).length > 0) return;
     var previousFingerprint = unfiredFingerprint(state.order);
     state.order = s.order;
     // A cancelled order normally also closes the session (the poll then gets a 410), but
@@ -846,7 +889,19 @@ public static class CustomerOrderPage
   function changeLineQty(menuItemId, variantId, modifierOptionIds, nextQty) {
     clearError();
     var next = Math.max(0, nextQty);
-    var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
+    var key = lineKey(menuItemId, variantId, modifierOptionIds);
+    var pending = pendingLineRequests[key];
+
+    if (pending) {
+      // A cart/items POST for this exact line is already in flight — firing another one
+      // here is what let a fast double-tap race two requests past each other and insert
+      // the item twice server-side. Apply this tap's effect locally for instant feedback
+      // and let the in-flight request notice the newer target once it resolves.
+      pending.target = next;
+      var patched = applyLocalQty(menuItemId, variantId, modifierOptionIds, next);
+      if (patched) { patchItemCard(menuItemId); patchBestSellerCard(menuItemId); renderCartBar(); }
+      return;
+    }
 
     var previousCartQty = state.cart[menuItemId];
     var previousOrderSnapshot = state.order ? JSON.parse(JSON.stringify(state.order)) : null;
@@ -857,12 +912,20 @@ public static class CustomerOrderPage
       renderCartBar();
     }
 
+    var requestSeq = ++responseSequenceCounter;
+    pendingLineRequests[key] = { target: next, menuItemId: menuItemId, variantId: variantId, modifierOptionIds: modifierOptionIds };
+    sendCartRequest(menuItemId, variantId, modifierOptionIds, key, next, requestSeq, previousCartQty, previousOrderSnapshot, patchedOptimistically);
+  }
+
+  function sendCartRequest(menuItemId, variantId, modifierOptionIds, key, sentQty, requestSeq, previousCartQty, previousOrderSnapshot, patchedOptimistically) {
+    var phoneDigits = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
+
     fetchJson(sessionBase + '/cart/items', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         menuItemId: menuItemId,
-        qty: next,
+        qty: sentQty,
         modifier: null,
         variantId: variantId || null,
         modifierOptionIds: (modifierOptionIds && modifierOptionIds.length) ? modifierOptionIds : null,
@@ -870,19 +933,40 @@ public static class CustomerOrderPage
         guestPhone: phoneDigits || null,
       }),
     }).then(function (s) {
+      var stillPending = pendingLineRequests[key];
+      if (stillPending && stillPending.target !== sentQty) {
+        // A newer tap changed the target for this line while the request was in flight —
+        // send one more request (with a fresh sequence number, so its response counts as
+        // the newest) instead of leaving the cart out of sync.
+        sendCartRequest(menuItemId, variantId, modifierOptionIds, key, stillPending.target, ++responseSequenceCounter, previousCartQty, previousOrderSnapshot, patchedOptimistically);
+      } else {
+        delete pendingLineRequests[key];
+      }
+
+      // Only accept this response if it's newer than what we've already processed —
+      // a slow response for an early tap must not overwrite a fast response for a
+      // later tap. Stale responses render nothing at all.
+      if (requestSeq < lastResponseSequence) return;
+      lastResponseSequence = requestSeq;
       state.order = s.order;
+      // This snapshot only reflects the taps the server had seen when THIS request was
+      // sent — any line still pending (including this one, if it's being re-sent above)
+      // is ahead of it. Re-apply those targets on top so the displayed total never falls
+      // backwards and then "counts up" as older responses trickle in.
+      reapplyPendingOptimistic();
       syncCartFromOrder();
       if (state.order) document.getElementById('guest-card').style.display = 'none';
       patchItemCard(menuItemId);
       patchBestSellerCard(menuItemId);
-      renderCartBar();
+      scheduleCartBarRender(); // Debounced: batches updates when multiple items added quickly
     }).catch(function (err) {
+      delete pendingLineRequests[key];
       if (patchedOptimistically) {
         state.order = previousOrderSnapshot;
         if (previousCartQty === undefined) delete state.cart[menuItemId]; else state.cart[menuItemId] = previousCartQty;
         patchItemCard(menuItemId);
         patchBestSellerCard(menuItemId);
-        renderCartBar();
+        scheduleCartBarRender();
       }
       if (err.status === 410) { showEnded(err.message || 'This session has ended.'); return; }
       if (err.status === 423) { showBillScreen({ order: state.order }); return; }
