@@ -882,6 +882,8 @@ public class OrdersController(
         if (coupon is null) throw new ApiValidationException("Coupon code is invalid or expired.");
         if (coupon.IsUsed) throw new ApiConflictException("Coupon has already been used.");
         if (coupon.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Coupon has expired.");
+        if (coupon.CustomerId is int couponCustomerId && couponCustomerId != order.CustomerId)
+            throw new ApiValidationException("This coupon was issued to a different customer.");
         if (order.Subtotal < coupon.MinOrderValue) throw new ApiValidationException($"Minimum order value for this coupon is {coupon.MinOrderValue:C}.");
 
         order.CouponDiscountAmount = coupon.Type switch
@@ -913,6 +915,8 @@ public class OrdersController(
         if (giftCard is null) throw new ApiValidationException("Gift card code not found.");
         if (giftCard.Status != GiftCardStatus.Active) throw new ApiConflictException("Gift card is not active.");
         if (giftCard.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Gift card has expired.");
+        if (giftCard.CustomerId is int giftCardCustomerId && giftCardCustomerId != order.CustomerId)
+            throw new ApiValidationException("This gift card was issued to a different customer.");
 
         var owedBeforeGiftCard = Math.Max(0, order.Subtotal - order.DiscountAmount - order.BillDiscountAmount - order.CouponDiscountAmount - order.LoyaltyDiscountAmount);
         var redeem = Math.Min(giftCard.Balance, owedBeforeGiftCard);

@@ -484,6 +484,31 @@ public record RecipeItemCostDto(int InventoryItemId, string Name, double Quantit
 
 public record RecipeCostDto(int MenuItemId, string MenuItemName, decimal IngredientCost, decimal MenuPrice, decimal FoodCostPct, List<RecipeItemCostDto> Items);
 
+// ---------- Recipe + Inventory bulk import ----------
+
+/// <summary>One row of a bulk CSV/Excel import — always resolves to (menu item,
+/// ingredient, quantity per serving). CurrentStock/UnitCost are optional: when present
+/// they seed a new ingredient's opening stock, or add a restock batch to an existing one
+/// — see RecipeImportController. Repeated appearances of the same ingredient across
+/// several menu items' rows are expected (e.g. "Butter" in ten recipes); only the first
+/// row for a given ingredient name is used for its stock/cost.</summary>
+public record RecipeImportRowRequest(
+    string MenuItemName,
+    string IngredientName,
+    double Quantity,
+    string Unit,
+    double? CurrentStock = null,
+    decimal? UnitCost = null);
+
+public record RecipeImportRowError(int RowNumber, string MenuItemName, string IngredientName, string Reason);
+
+public record RecipeImportResultDto(
+    int MenuItemsUpdated,
+    int IngredientsCreated,
+    int IngredientsRestocked,
+    int RowsWithErrors,
+    List<RecipeImportRowError> Errors);
+
 // ---------- Stock Take ----------
 
 public record CreateStockTakeRequest(int? BranchId, string? Note);
