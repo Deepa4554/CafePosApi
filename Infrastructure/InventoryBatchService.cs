@@ -173,6 +173,93 @@ public static class InventoryBatchService
         return batch;
     }
 
+    /// <summary>Sets stock to an exact figure — a physical count correction, or a bulk
+    /// import stating what's actually on the shelf. Unlike CreateBatch/ConsumeFifoAsync
+    /// (which move stock BY an amount), this moves it TO one, writing a single consolidated
+    /// ManualAdjustment ledger row for the difference rather than one row per batch: the
+    /// user counted once, so the ledger should read as one correction. Batches are squared
+    /// up to match — FIFO-drained when the count came in lower, one new batch at the item's
+    /// current cost when it came in higher. No-ops when the figure already matches.</summary>
+    public static async Task SetStockToAsync(
+        CafePosDbContext db, InventoryItem item, double newQuantity, string? reason,
+        int? userId, string userName)
+    {
+        var delta = newQuantity - item.Current;
+        if (delta == 0) return;
+
+        var wasAboveReorder = item.Current > item.ReorderLevel;
+        var previous = item.Current;
+        item.Current = newQuantity;
+
+        if (delta < 0)
+        {
+            var batches = await db.InventoryBatches
+                .Where(b => b.InventoryItemId == item.Id && b.Quantity > 0)
+                .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
+                .ThenBy(b => b.ReceivedAt)
+                .ThenBy(b => b.Id)
+                .ToListAsync();
+
+            var remaining = -delta;
+            foreach (var batch in batches)
+            {
+                if (remaining <= 0) break;
+                var take = Math.Min(remaining, batch.Quantity);
+                batch.Quantity -= take;
+                remaining -= take;
+            }
+
+            // Counted lower than every lot on record put together — the shortfall lands on
+            // the last lot, letting it go negative (same negative-stock-allowed policy as
+            // ConsumeFifoAsync).
+            if (remaining > 0 && batches.Count > 0)
+                batches[^1].Quantity -= remaining;
+        }
+        else
+        {
+            db.InventoryBatches.Add(new InventoryBatch
+            {
+                TenantId = item.TenantId,
+                InventoryItemId = item.Id,
+                Quantity = delta,
+                UnitCost = item.UnitCost,
+            });
+        }
+
+        db.InventoryTransactions.Add(new InventoryTransaction
+        {
+            TenantId = item.TenantId,
+            InventoryItemId = item.Id,
+            Type = InventoryTransactionType.ManualAdjustment,
+            PreviousStock = previous,
+            ChangedQuantity = delta,
+            RemainingStock = item.Current,
+            Reason = reason,
+            UserId = userId,
+            UserName = userName,
+        });
+
+        if (wasAboveReorder && item.Current <= item.ReorderLevel && !item.LowStockNotified)
+        {
+            item.LowStockNotified = true;
+            db.Notifications.Add(new AppNotification
+            {
+                TenantId = item.TenantId,
+                Title = "Low stock",
+                Body = $"{item.Name} is down to {item.Current:0.##}{item.Unit} (reorder at {item.ReorderLevel:0.##}{item.Unit}).",
+                Category = NotificationCategory.Inventory,
+                Channel = NotificationChannel.InApp,
+                ActionUrl = "/inventory",
+            });
+        }
+        // Counted back above the reorder line — re-arm so a later drop raises a fresh alert,
+        // matching what CreateBatch and InventoryController.Update already do.
+        else if (item.LowStockNotified && item.Current > item.ReorderLevel)
+        {
+            item.LowStockNotified = false;
+        }
+    }
+
     /// <summary>Precisely reverses one earlier ledger row (void-before-prep) — credits the
     /// SAME batch back via <paramref name="original"/>'s InventoryBatchId, not a floating
     /// new batch. Falls back to a fresh no-expiry batch if the original batch is somehow

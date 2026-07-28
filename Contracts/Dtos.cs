@@ -410,6 +410,27 @@ public record CreateInventoryItemRequest(string Name, string Category, double Ma
 /// absent too: the item's batches and transactions are already booked against its branch.</summary>
 public record UpdateInventoryItemRequest(string Name, string Category, double Max, string? Unit, decimal? UnitCost, double? MinStock = null, double? ReorderLevel = null);
 
+/// <summary>One row of a bulk stock/rate sheet — see InventoryController.BulkImport.
+/// CurrentStock is a physical count (it sets the figure, it doesn't add to it) and UnitCost
+/// is the rate per <see cref="Unit"/>; both are converted when the row's unit differs from
+/// the item's stored one.</summary>
+public record InventoryImportRowRequest(
+    string Name,
+    string Unit,
+    double CurrentStock,
+    decimal UnitCost,
+    string? Category = null,
+    double? MaxStock = null,
+    double? ReorderLevel = null);
+
+public record InventoryImportRowError(int RowNumber, string Name, string Reason);
+
+public record InventoryImportResultDto(
+    int ItemsCreated,
+    int ItemsUpdated,
+    int RowsWithErrors,
+    List<InventoryImportRowError> Errors);
+
 /// <summary>InventoryItem plus a server-computed LowStock flag (Current &lt;= ReorderLevel)
 /// — replaces the frontend's old hardcoded current/max &lt;= 0.25 ratio guess.</summary>
 public record InventoryItemDto(
@@ -486,26 +507,24 @@ public record RecipeCostDto(int MenuItemId, string MenuItemName, decimal Ingredi
 
 // ---------- Recipe + Inventory bulk import ----------
 
-/// <summary>One row of a bulk CSV/Excel import — always resolves to (menu item,
-/// ingredient, quantity per serving). CurrentStock/UnitCost are optional: when present
-/// they seed a new ingredient's opening stock, or add a restock batch to an existing one
-/// — see RecipeImportController. Repeated appearances of the same ingredient across
-/// several menu items' rows are expected (e.g. "Butter" in ten recipes); only the first
-/// row for a given ingredient name is used for its stock/cost.</summary>
+/// <summary>One row of a bulk CSV/Excel import — the recipe (bill of materials) only:
+/// which menu item uses which ingredient, and how much per serving. Deliberately carries
+/// no stock quantity or cost: those stay owned by the Inventory screen (where stock only
+/// moves via Restock/Waste/Adjust so every change keeps a ledger entry), and per-dish
+/// costing then falls out of recipe quantity × the ingredient's own UnitCost — see
+/// RecipesController.GetCost. Repeated appearances of the same ingredient across several
+/// menu items' rows are expected (e.g. "Butter" in ten recipes).</summary>
 public record RecipeImportRowRequest(
     string MenuItemName,
     string IngredientName,
     double Quantity,
-    string Unit,
-    double? CurrentStock = null,
-    decimal? UnitCost = null);
+    string Unit);
 
 public record RecipeImportRowError(int RowNumber, string MenuItemName, string IngredientName, string Reason);
 
 public record RecipeImportResultDto(
     int MenuItemsUpdated,
     int IngredientsCreated,
-    int IngredientsRestocked,
     int RowsWithErrors,
     List<RecipeImportRowError> Errors);
 

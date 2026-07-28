@@ -157,76 +157,140 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
         if (req.NewQuantity < 0)
             throw new ApiValidationException("Stock cannot be adjusted below zero.");
 
-        var delta = req.NewQuantity - item.Current;
-        if (delta == 0) return InventoryItemDto.From(item);
-
-        var reason = req.Reason?.Trim();
-        var wasAboveReorder = item.Current > item.ReorderLevel;
-        var previous = item.Current;
-        item.Current = req.NewQuantity;
-
-        if (delta < 0)
-        {
-            var batches = await db.InventoryBatches
-                .Where(b => b.InventoryItemId == item.Id && b.Quantity > 0)
-                .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
-                .ThenBy(b => b.ReceivedAt)
-                .ThenBy(b => b.Id)
-                .ToListAsync();
-
-            var remaining = -delta;
-            foreach (var batch in batches)
-            {
-                if (remaining <= 0) break;
-                var take = Math.Min(remaining, batch.Quantity);
-                batch.Quantity -= take;
-                remaining -= take;
-            }
-
-            if (remaining > 0 && batches.Count > 0)
-                batches.Last().Quantity -= remaining;
-        }
-        else
-        {
-            var batch = new InventoryBatch
-            {
-                TenantId = item.TenantId,
-                InventoryItemId = item.Id,
-                Quantity = delta,
-                UnitCost = item.UnitCost,
-            };
-            db.InventoryBatches.Add(batch);
-        }
-
-        db.InventoryTransactions.Add(new InventoryTransaction
-        {
-            TenantId = item.TenantId,
-            InventoryItemId = item.Id,
-            Type = InventoryTransactionType.ManualAdjustment,
-            PreviousStock = previous,
-            ChangedQuantity = delta,
-            RemainingStock = item.Current,
-            Reason = reason,
-            UserId = CurrentUserId(),
-            UserName = CurrentUserName(),
-        });
-
-        if (wasAboveReorder && item.Current <= item.ReorderLevel && !item.LowStockNotified)
-        {
-            item.LowStockNotified = true;
-            db.Notifications.Add(new AppNotification
-            {
-                TenantId = item.TenantId,
-                Title = "Low stock",
-                Body = $"{item.Name} is down to {item.Current:0.##}{item.Unit} (reorder at {item.ReorderLevel:0.##}{item.Unit}).",
-                Category = NotificationCategory.Inventory,
-                Channel = NotificationChannel.InApp,
-                ActionUrl = "/inventory",
-            });
-        }
+        await InventoryBatchService.SetStockToAsync(db, item, req.NewQuantity, req.Reason?.Trim(),
+            CurrentUserId(), CurrentUserName());
 
         await db.SaveChangesAsync();
         return InventoryItemDto.From(item);
+    }
+
+    /// <summary>Bulk stock/rate import from a CSV/Excel sheet, parsed client-side (see
+    /// csvInventoryImport.ts) and posted as JSON — the counterpart to the recipe import:
+    /// that file says what a dish consumes, this one says what's on the shelf and what it
+    /// costs, and per-dish food cost falls out of the two together.
+    ///
+    /// CurrentStock is treated as a physical count — it SETS the figure (via
+    /// InventoryBatchService.SetStockToAsync, so the difference still lands in the ledger),
+    /// it doesn't add to what's already there. Re-uploading the same file is therefore
+    /// idempotent rather than doubling stock. A row whose unit differs from the item's
+    /// stored unit is converted (500/kg on a gm-based item becomes 0.5/gm); one that can't
+    /// convert is reported instead of guessed.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("bulk-import")]
+    public async Task<ActionResult<InventoryImportResultDto>> BulkImport(
+        List<InventoryImportRowRequest> rows, [FromQuery] int? branchId = null)
+    {
+        if (rows is null || rows.Count == 0)
+            throw new ApiValidationException("No rows to import.");
+        if (rows.Count > 2000)
+            throw new ApiValidationException("Cannot import more than 2000 rows at once.");
+
+        var errors = new List<InventoryImportRowError>();
+        // +2: row 1 is the header, and file rows are 1-based for a person reading them in Excel.
+        var numbered = rows.Select((r, i) => (Row: r, RowNumber: i + 2)).ToList();
+
+        var existingByName = (await db.InventoryItems.Where(i => i.IsActive).ToListAsync())
+            .GroupBy(i => i.Name.Trim().ToLowerInvariant())
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var created = 0;
+        var updated = 0;
+
+        foreach (var group in numbered
+            .Where(x => !string.IsNullOrWhiteSpace(x.Row.Name))
+            .GroupBy(x => x.Row.Name.Trim(), StringComparer.OrdinalIgnoreCase))
+        {
+            var first = group.First();
+            var row = first.Row;
+            var name = row.Name.Trim();
+
+            // The same ingredient listed twice in one sheet is a data-entry slip, not two
+            // stocktakes — say so rather than silently letting the last row win.
+            if (group.Count() > 1)
+            {
+                foreach (var x in group.Skip(1))
+                    errors.Add(new InventoryImportRowError(x.RowNumber, name, $"'{name}' appears more than once in this file — combine it into a single row. Only the first row was applied."));
+            }
+
+            if (string.IsNullOrWhiteSpace(row.Unit))
+            {
+                errors.Add(new InventoryImportRowError(first.RowNumber, name, "Unit is required (gm, kg, ml, litre, pcs)."));
+                continue;
+            }
+            if (row.CurrentStock < 0)
+            {
+                errors.Add(new InventoryImportRowError(first.RowNumber, name, "Current stock cannot be negative."));
+                continue;
+            }
+            if (row.UnitCost < 0)
+            {
+                errors.Add(new InventoryImportRowError(first.RowNumber, name, "Unit cost cannot be negative."));
+                continue;
+            }
+
+            var fileUnit = row.Unit.Trim();
+
+            if (!existingByName.TryGetValue(name.ToLowerInvariant(), out var matches))
+            {
+                var max = row.MaxStock is double m && m > 0 ? m : row.CurrentStock;
+                db.InventoryItems.Add(new InventoryItem
+                {
+                    BranchId = branchId,
+                    Name = name,
+                    Category = string.IsNullOrWhiteSpace(row.Category) ? "General" : row.Category.Trim(),
+                    Unit = fileUnit,
+                    Current = row.CurrentStock,
+                    Max = max,
+                    UnitCost = row.UnitCost,
+                    MinStock = 0,
+                    ReorderLevel = row.ReorderLevel ?? Math.Round(max * 0.25, 2),
+                    LastRestockAt = DateTime.UtcNow,
+                });
+                created++;
+                continue;
+            }
+
+            if (matches.Count > 1)
+            {
+                errors.Add(new InventoryImportRowError(first.RowNumber, name, "Multiple inventory items share this name — rename one so it's unique, then re-import."));
+                continue;
+            }
+
+            var item = matches[0];
+
+            // How many of the item's stored units one file unit is worth: 1 for an exact
+            // match (covers custom units like "packet" that the converter doesn't model),
+            // 1000 for kg→gm, and so on. Quantities multiply by it; a per-unit RATE divides.
+            double factor;
+            if (string.Equals(fileUnit, item.Unit, StringComparison.OrdinalIgnoreCase))
+            {
+                factor = 1;
+            }
+            else if (UnitConverter.AreCompatible(fileUnit, item.Unit))
+            {
+                factor = UnitConverter.Convert(1, fileUnit, item.Unit);
+            }
+            else
+            {
+                errors.Add(new InventoryImportRowError(first.RowNumber, name, $"'{fileUnit}' can't convert to this item's stored unit ('{item.Unit}') — fix the sheet, or change the item's unit on the Inventory screen first."));
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(row.Category)) item.Category = row.Category.Trim();
+            item.UnitCost = factor == 1 ? row.UnitCost : Math.Round(row.UnitCost / (decimal)factor, 4);
+            if (row.MaxStock is double maxStock && maxStock > 0) item.Max = maxStock * factor;
+            if (row.ReorderLevel is double reorder) item.ReorderLevel = reorder * factor;
+
+            // Cost is assigned above on purpose: a positive correction opens its batch at the
+            // rate this same sheet just declared, not the stale one.
+            await InventoryBatchService.SetStockToAsync(db, item, row.CurrentStock * factor,
+                "Bulk inventory import", CurrentUserId(), CurrentUserName());
+            item.LastRestockAt = DateTime.UtcNow;
+            updated++;
+        }
+
+        await db.SaveChangesAsync();
+        return new InventoryImportResultDto(created, updated, errors.Count, errors);
     }
 
     [HttpGet("transactions")]

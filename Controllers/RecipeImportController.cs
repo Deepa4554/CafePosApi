@@ -8,12 +8,18 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CafePOS.Api.Controllers;
 
-/// <summary>Bulk CSV/Excel import — one row per (menu item, ingredient) pair, parsed
-/// client-side (see csvRecipeImport.ts) and posted here as JSON, same shape as
-/// MenuController.BulkCreate. Wires up Inventory + Recipe together from a single file:
-/// missing ingredients are created, existing ones optionally get a restock batch, and
-/// each menu item's recipe is fully replaced with whatever rows the file has for it —
-/// so a re-upload should list every ingredient for that item, not just the changed ones.</summary>
+/// <summary>Bulk recipe (bill-of-materials) import — one row per (menu item, ingredient)
+/// pair, parsed client-side (see csvRecipeImport.ts) and posted here as JSON, same shape
+/// as MenuController.BulkCreate.
+///
+/// The file defines recipes only. Stock levels and rates stay owned by the Inventory
+/// screen; an ingredient the file names but Inventory doesn't have yet is created empty
+/// (zero stock/cost) so the recipe has something to point at, and the user fills in the
+/// real numbers there. Per-dish food cost then computes itself from recipe quantity ×
+/// the ingredient's UnitCost (RecipesController.GetCost), no cost column needed here.
+///
+/// Each menu item's recipe is fully replaced with whatever rows the file has for it — so
+/// a re-upload should list every ingredient for that item, not just the changed ones.</summary>
 [ApiController]
 [Route("api/recipe-import")]
 [Authorize(Policy = Policies.OwnerOrManager)]
@@ -34,19 +40,67 @@ public class RecipeImportController(CafePosDbContext db, IAuditService audit) : 
         // +2: row 1 is the header, and file rows are 1-based for a person reading them in Excel.
         var numbered = rows.Select((r, i) => (Row: r, RowNumber: i + 2)).ToList();
 
-        // ---- Phase A: resolve every distinct ingredient name exactly once. Ingredients
-        // are usually repeated across several menu items' rows ("Butter" in ten recipes) —
-        // resolving/restocking per unique name (not per row) is what keeps a repeated
-        // CurrentStock column from silently double- or triple-counting the same stock. ----
+        // ---- Phase A: resolve menu items first, and keep only the rows belonging to one
+        // that actually resolved. Ingredient creation (Phase B) runs off those rows alone:
+        // resolving menu items later would mean a file with a mistyped dish name still
+        // left brand-new junk ingredients sitting in Inventory for rows that all failed. ----
+        var menuItemsByName = (await db.MenuItems.ToListAsync())
+            .GroupBy(m => m.Name.Trim().ToLowerInvariant())
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var resolvedMenuItems = new Dictionary<string, MenuItem>();
+        var usableRows = new List<(RecipeImportRowRequest Row, int RowNumber)>();
+
+        var menuGroups = numbered
+            .Where(x => !string.IsNullOrWhiteSpace(x.Row.MenuItemName))
+            .GroupBy(x => x.Row.MenuItemName.Trim(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in menuGroups)
+        {
+            var menuItemName = group.Key;
+            var nameLower = menuItemName.ToLowerInvariant();
+
+            if (!menuItemsByName.TryGetValue(nameLower, out var menuMatches))
+            {
+                foreach (var x in group)
+                    errors.Add(new RecipeImportRowError(x.RowNumber, menuItemName, x.Row.IngredientName, "Menu item not found — create it on the Menu screen first, then re-import."));
+                continue;
+            }
+            if (menuMatches.Count > 1)
+            {
+                foreach (var x in group)
+                    errors.Add(new RecipeImportRowError(x.RowNumber, menuItemName, x.Row.IngredientName, "Multiple menu items share this name — rename one so it's unique, then re-import."));
+                continue;
+            }
+            if (menuMatches[0].ProductType != ProductType.Prepared)
+            {
+                foreach (var x in group)
+                    errors.Add(new RecipeImportRowError(x.RowNumber, menuItemName, x.Row.IngredientName, "Only Prepared menu items can have a recipe."));
+                continue;
+            }
+
+            resolvedMenuItems[nameLower] = menuMatches[0];
+            usableRows.AddRange(group);
+        }
+
+        // ---- Phase B: resolve every distinct ingredient name exactly once. Ingredients are
+        // usually repeated across several menu items' rows ("Butter" in ten recipes), so
+        // working per unique name rather than per row keeps one ingredient from being
+        // created twice off the same file.
+        //
+        // Existing ingredients are read, never written: stock and cost belong to the
+        // Inventory screen. A name that isn't there yet is created as an empty shell (zero
+        // stock, zero cost, zero max) purely so the recipe has something to point at — the
+        // user then fills in the real quantity and rate on the Inventory screen, and the
+        // dish's food cost starts computing from there. ----
         var inventoryByName = (await db.InventoryItems.Where(i => i.IsActive).ToListAsync())
             .GroupBy(i => i.Name.Trim().ToLowerInvariant())
             .ToDictionary(g => g.Key, g => g.ToList());
 
         var resolvedIngredients = new Dictionary<string, InventoryItem>();
         var ingredientsCreated = 0;
-        var ingredientsRestocked = 0;
 
-        var ingredientGroups = numbered
+        var ingredientGroups = usableRows
             .Where(x => !string.IsNullOrWhiteSpace(x.Row.IngredientName))
             .GroupBy(x => x.Row.IngredientName.Trim(), StringComparer.OrdinalIgnoreCase);
 
@@ -69,19 +123,15 @@ public class RecipeImportController(CafePosDbContext db, IAuditService audit) : 
                     Name = first.Row.IngredientName.Trim(),
                     Category = "Imported",
                     Unit = first.Row.Unit.Trim(),
-                    UnitCost = first.Row.UnitCost ?? 0,
-                    Max = first.Row.CurrentStock is double c && c > 0 ? c : 1,
-                    LastRestockAt = DateTime.UtcNow,
+                    // Zeros, not guesses. Max 0 keeps the stock bar/reorder-% empty rather
+                    // than inventing a capacity the user never set (both the list and the
+                    // edit modal already guard against a zero Max).
+                    Current = 0,
+                    Max = 0,
+                    UnitCost = 0,
+                    ReorderLevel = 0,
                 };
-                newItem.ReorderLevel = Math.Round(newItem.Max * 0.25, 2);
                 db.InventoryItems.Add(newItem);
-                await db.SaveChangesAsync(); // assigns Id, needed as the new batch's FK below
-
-                if (first.Row.CurrentStock is double initial && initial > 0)
-                {
-                    InventoryBatchService.CreateBatch(db, newItem, initial, newItem.UnitCost, expiryDate: null,
-                        InventoryTransactionType.Purchase, referenceId: "bulk-import", CurrentUserId(), CurrentUserName());
-                }
                 ingredientsCreated++;
                 resolvedIngredients[nameLower] = newItem;
                 continue;
@@ -94,67 +144,22 @@ public class RecipeImportController(CafePosDbContext db, IAuditService audit) : 
                 continue;
             }
 
-            var item = matches[0];
-            if (first.Row.CurrentStock is double qty && qty > 0)
-            {
-                if (!UnitConverter.AreCompatible(first.Row.Unit, item.Unit))
-                {
-                    errors.Add(new RecipeImportRowError(first.RowNumber, first.Row.MenuItemName, first.Row.IngredientName,
-                        $"'{first.Row.Unit}' can't convert to this ingredient's stored unit ('{item.Unit}') — stock was not changed."));
-                }
-                else
-                {
-                    var converted = UnitConverter.Convert(qty, first.Row.Unit, item.Unit);
-                    var cost = first.Row.UnitCost ?? item.UnitCost;
-                    InventoryBatchService.CreateBatch(db, item, converted, cost, expiryDate: null,
-                        InventoryTransactionType.Purchase, referenceId: "bulk-import", CurrentUserId(), CurrentUserName());
-                    if (first.Row.UnitCost is decimal) item.UnitCost = cost;
-                    item.LastRestockAt = DateTime.UtcNow;
-                    ingredientsRestocked++;
-                }
-            }
-            resolvedIngredients[nameLower] = item;
+            resolvedIngredients[nameLower] = matches[0];
         }
 
+        // Assigns Ids to the newly-created ingredients — RecipeItem.InventoryItemId below
+        // needs them before the recipe rows can be built.
         await db.SaveChangesAsync();
 
-        // ---- Phase B: wire each menu item's recipe from the ingredients Phase A resolved.
+        // ---- Phase C: wire each menu item's recipe from the ingredients Phase B resolved.
         // Full replace, same as RecipesController.Upsert — a re-uploaded file is assumed to
         // list a menu item's complete ingredient set, not a diff. ----
-        var menuItemsByName = (await db.MenuItems.ToListAsync())
-            .GroupBy(m => m.Name.Trim().ToLowerInvariant())
-            .ToDictionary(g => g.Key, g => g.ToList());
-
         var menuItemsUpdated = 0;
-        var menuGroups = numbered
-            .Where(x => !string.IsNullOrWhiteSpace(x.Row.MenuItemName))
-            .GroupBy(x => x.Row.MenuItemName.Trim(), StringComparer.OrdinalIgnoreCase);
 
-        foreach (var group in menuGroups)
+        foreach (var group in usableRows.GroupBy(x => x.Row.MenuItemName.Trim(), StringComparer.OrdinalIgnoreCase))
         {
             var menuItemName = group.Key;
-            var nameLower = menuItemName.ToLowerInvariant();
-
-            if (!menuItemsByName.TryGetValue(nameLower, out var menuMatches))
-            {
-                foreach (var x in group)
-                    errors.Add(new RecipeImportRowError(x.RowNumber, menuItemName, x.Row.IngredientName, "Menu item not found — create it on the Menu screen first, then re-import."));
-                continue;
-            }
-            if (menuMatches.Count > 1)
-            {
-                foreach (var x in group)
-                    errors.Add(new RecipeImportRowError(x.RowNumber, menuItemName, x.Row.IngredientName, "Multiple menu items share this name — rename one so it's unique, then re-import."));
-                continue;
-            }
-
-            var menuItem = menuMatches[0];
-            if (menuItem.ProductType != ProductType.Prepared)
-            {
-                foreach (var x in group)
-                    errors.Add(new RecipeImportRowError(x.RowNumber, menuItemName, x.Row.IngredientName, "Only Prepared menu items can have a recipe."));
-                continue;
-            }
+            var menuItem = resolvedMenuItems[menuItemName.ToLowerInvariant()];
 
             var lines = new List<RecipeItem>();
             var seenIngredientIds = new HashSet<int>();
@@ -219,14 +224,6 @@ public class RecipeImportController(CafePosDbContext db, IAuditService audit) : 
 
         await db.SaveChangesAsync();
 
-        return new RecipeImportResultDto(menuItemsUpdated, ingredientsCreated, ingredientsRestocked, errors.Count, errors);
+        return new RecipeImportResultDto(menuItemsUpdated, ingredientsCreated, errors.Count, errors);
     }
-
-    private int? CurrentUserId()
-    {
-        var claim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
-        return int.TryParse(claim, out var id) ? id : null;
-    }
-
-    private string CurrentUserName() => User.Identity?.Name ?? "Cafe Staff";
 }
