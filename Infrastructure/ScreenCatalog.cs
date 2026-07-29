@@ -54,6 +54,8 @@ public static class ScreenCatalog
         ["SalesReport"] = PlanCategory.Plus,
         ["TaxGstReport"] = PlanCategory.Plus,
         ["ExpenseReport"] = PlanCategory.Plus,
+        ["CrmReport"] = PlanCategory.Plus,
+        ["OrderDetailReport"] = PlanCategory.Plus,
         ["SaaS"] = PlanCategory.Normal,
         ["Profile"] = PlanCategory.Normal,
         ["PrinterSettings"] = PlanCategory.Normal,

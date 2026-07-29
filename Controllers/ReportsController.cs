@@ -358,7 +358,130 @@ public class ReportsController(CafePosDbContext db) : ControllerBase
             .OrderByDescending(x => x.RatePct)
             .ToList();
 
-        return new TaxGstReportDto(byRate.Sum(x => x.TaxableAmount), byRate.Sum(x => x.TaxAmount), byRate);
+        var bills = orders
+            .Select(o => new TaxBillLineDto(
+                o.Id, o.Title, o.CreatedAt,
+                o.Items.Where(i => !i.Voided).Sum(i => i.TaxableAmount),
+                o.Items.Where(i => !i.Voided).Sum(i => i.TaxAmount)))
+            .Where(b => b.TaxAmount > 0)
+            .OrderByDescending(b => b.CreatedAt)
+            .ToList();
+
+        return new TaxGstReportDto(byRate.Sum(x => x.TaxableAmount), byRate.Sum(x => x.TaxAmount), byRate, bills);
+    }
+
+    /// <summary>Bill-wise register — one row per order with its line items, the transaction-level
+    /// counterpart to Sales()'s aggregates. Unpaid orders are included (an owner auditing a day
+    /// wants to see what's still open), which is why the caller gets Paid/Refunded flags rather
+    /// than a pre-filtered list.</summary>
+    [HttpGet("orders")]
+    public async Task<OrdersReportDto> Orders(
+        [FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null,
+        [FromQuery] int days = 30, [FromQuery] string? orderType = null, [FromQuery] string? paymentMethod = null)
+    {
+        var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, days);
+
+        var query = db.Orders.Include(o => o.Items).Include(o => o.Customer)
+            .Where(o => o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
+        if (branchId is int bid) query = query.Where(o => o.BranchId == bid);
+        if (!string.IsNullOrWhiteSpace(orderType)) query = query.Where(o => o.OrderType == orderType);
+        if (!string.IsNullOrWhiteSpace(paymentMethod)) query = query.Where(o => o.PaymentMethod == paymentMethod);
+
+        var totalCount = await query.CountAsync();
+        var orders = await query
+            .OrderByDescending(o => o.CreatedAt)
+            .Take(OrdersReportDto.MaxRows)
+            .ToListAsync();
+
+        var lines = orders.Select(o =>
+        {
+            var discountTotal = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount
+                              + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount;
+            return new OrderDetailLineDto(
+                o.Id, o.Title, o.CreatedAt, o.OrderType, o.TableCode, o.TokenNumber,
+                o.Customer?.Name ?? o.GuestName, o.Customer?.Phone ?? o.GuestPhone,
+                o.Subtotal, discountTotal, o.Tax, o.Total,
+                o.PaymentMethod, o.Paid, o.Refunded, o.RefundedAmount,
+                o.Items.Count(i => !i.Voided),
+                o.Items.Select(i => new OrderDetailItemDto(
+                    i.Name, i.VariantName, i.Qty, i.Price, i.Price * i.Qty, i.TaxAmount, i.Voided)).ToList());
+        }).ToList();
+
+        return new OrdersReportDto(
+            totalCount,
+            lines.Sum(l => l.Subtotal),
+            lines.Sum(l => l.DiscountTotal),
+            lines.Sum(l => l.Tax),
+            lines.Sum(l => l.Total),
+            lines.Where(l => l.Refunded).Sum(l => l.RefundedAmount ?? 0m),
+            totalCount > OrdersReportDto.MaxRows,
+            lines);
+    }
+
+    /// <summary>Who the cafe's customers are and what they're worth. The headline split is
+    /// identified (Order.CustomerId set) vs walk-in — an owner can only market to the former,
+    /// so the ratio matters more than either total alone. Lapsed = no visit in 60+ days, a
+    /// win-back list rather than a period metric. Customer has no BranchId, so `branchId`
+    /// narrows the period figures (which come from Orders) but never the lifetime ones.</summary>
+    [HttpGet("crm")]
+    public async Task<CrmReportDto> Crm([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null, [FromQuery] int days = 30)
+    {
+        var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, days);
+
+        var ordersQuery = db.Orders.Where(o => o.Paid && o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
+        if (branchId is int bid) ordersQuery = ordersQuery.Where(o => o.BranchId == bid);
+        var orders = await ordersQuery
+            .Select(o => new { o.CustomerId, o.Total, o.LoyaltyPointsRedeemed })
+            .ToListAsync();
+
+        var identified = orders.Where(o => o.CustomerId != null).ToList();
+        var revenueFromCustomers = identified.Sum(o => o.Total);
+        var revenueFromWalkIns = orders.Where(o => o.CustomerId == null).Sum(o => o.Total);
+        var totalRevenue = revenueFromCustomers + revenueFromWalkIns;
+
+        var perCustomer = identified
+            .GroupBy(o => o.CustomerId!.Value)
+            .ToDictionary(g => g.Key, g => new { Visits = g.Count(), Spent = g.Sum(o => o.Total) });
+
+        // Every customer row is materialised because AvailablePoints and the tier are computed
+        // properties (see Customer.AvailablePoints) — neither can be translated to SQL.
+        var allCustomers = await db.Customers.ToListAsync();
+        var pointsOutstanding = allCustomers.Sum(c => c.AvailablePoints);
+
+        var nowIst = IstClock.NowIst;
+        var lapsedCutoffUtc = (nowIst - TimeSpan.FromDays(60)) - IstClock.Offset;
+        var lapsedCustomers = allCustomers.Count(c => c.LastVisitAt < lapsedCutoffUtc);
+
+        var activeIds = perCustomer.Keys.ToHashSet();
+        var activeCustomers = allCustomers.Where(c => activeIds.Contains(c.Id)).ToList();
+        var newCustomers = activeCustomers.Count(c => c.JoinedAt >= periodStartUtc && c.JoinedAt < periodEndExclusiveUtc);
+        var returningCustomers = activeCustomers.Count - newCustomers;
+
+        var lines = activeCustomers.Select(c =>
+        {
+            var stats = perCustomer[c.Id];
+            return new CrmReportCustomerLineDto(
+                c.Id, c.Name, c.Phone,
+                CustomerSummaryDto.TierFor(c.TotalPoints).ToString().ToUpperInvariant(),
+                stats.Visits, stats.Spent,
+                stats.Visits > 0 ? Math.Round(stats.Spent / stats.Visits, 2) : 0m,
+                c.VisitCount, c.TotalSpent, c.AvailablePoints,
+                c.LastVisitAt, c.JoinedAt,
+                c.JoinedAt >= periodStartUtc && c.JoinedAt < periodEndExclusiveUtc);
+        })
+        .OrderByDescending(l => l.SpentInPeriod)
+        .ToList();
+
+        return new CrmReportDto(
+            activeCustomers.Count, newCustomers, returningCustomers,
+            activeCustomers.Count > 0 ? Math.Round(returningCustomers * 100.0 / activeCustomers.Count, 1) : 0,
+            lapsedCustomers,
+            revenueFromCustomers, revenueFromWalkIns,
+            totalRevenue > 0 ? Math.Round((double)(revenueFromCustomers / totalRevenue) * 100, 1) : 0,
+            activeCustomers.Count > 0 ? Math.Round(revenueFromCustomers / activeCustomers.Count, 2) : 0m,
+            activeCustomers.Count > 0 ? Math.Round((double)identified.Count / activeCustomers.Count, 2) : 0,
+            identified.Sum(o => o.LoyaltyPointsRedeemed), pointsOutstanding,
+            lines);
     }
 
     // ---------- HR Reports ----------
