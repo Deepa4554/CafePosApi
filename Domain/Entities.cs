@@ -552,6 +552,12 @@ public class CafeSettings : ITenantScoped
     public bool OrderPendingConfirmationAlertsEnabled { get; set; } = true;
     /// <summary>"Order ready to serve" alert — see OrderBuildingService.RecomputeBatchStatus.</summary>
     public bool OrderReadyAlertsEnabled { get; set; } = true;
+    /// <summary>Gates the WhatsApp order-tracking module's automatic status-update/bill-PDF
+    /// sends for this tenant — see CafePosDbContext.SaveChangesAsync's WhatsApp event hook.
+    /// Independent of whether a WhatsAppSession is actually Connected (that's a separate,
+    /// harder gate); this is just the same "Owner can turn a notification category off"
+    /// pattern as the alerts above, applied to the WhatsApp channel.</summary>
+    public bool WhatsAppOrderUpdatesEnabled { get; set; } = true;
 
     // QR Ordering
     /// <summary>When on, a guest QR session's first fire (Place Order) doesn't reach the

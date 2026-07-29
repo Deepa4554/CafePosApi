@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CafePOS.Api.Data;
 
-public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime, IPushNotificationSender pushSender) : DbContext(options)
+public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime, IPushNotificationSender pushSender, IWhatsAppEventPublisher whatsAppEvents) : DbContext(options)
 {
     private readonly ITenantContext _tenant = tenant;
 
@@ -85,6 +85,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<Subscription> Subscriptions => Set<Subscription>();
     public DbSet<Integration> Integrations => Set<Integration>();
+    public DbSet<WhatsAppSession> WhatsAppSessions => Set<WhatsAppSession>();
+    public DbSet<WhatsAppOrderTracking> WhatsAppTracking => Set<WhatsAppOrderTracking>();
+    public DbSet<WhatsAppMessageLog> WhatsAppMessageLogs => Set<WhatsAppMessageLog>();
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
     public DbSet<SupportTicketMessage> SupportTicketMessages => Set<SupportTicketMessage>();
     public DbSet<AttendanceLog> AttendanceLogs => Set<AttendanceLog>();
@@ -233,6 +236,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<StaffMember>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<Subscription>().Property(s => s.Plan).HasConversion<string>();
         modelBuilder.Entity<Integration>().Property(i => i.Status).HasConversion<string>();
+        modelBuilder.Entity<WhatsAppSession>().Property(s => s.Status).HasConversion<string>();
+        modelBuilder.Entity<WhatsAppMessageLog>().Property(m => m.Direction).HasConversion<string>();
+        modelBuilder.Entity<WhatsAppMessageLog>().Property(m => m.Type).HasConversion<string>();
+        modelBuilder.Entity<WhatsAppMessageLog>().Property(m => m.Status).HasConversion<string>();
         modelBuilder.Entity<SupportTicket>().Property(t => t.Status).HasConversion<string>();
         modelBuilder.Entity<MenuItem>().Property(m => m.ProductType).HasConversion<string>();
         modelBuilder.Entity<MenuItem>().Property(m => m.ItemType).HasConversion<string>();
@@ -354,6 +361,20 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<PayrollRun>().HasIndex(r => new { r.TenantId, r.PeriodStart, r.PeriodEnd }).IsUnique();
         modelBuilder.Entity<PayrollLine>().HasIndex(l => new { l.PayrollRunId, l.StaffId });
 
+        // One Baileys session per tenant.
+        modelBuilder.Entity<WhatsAppSession>().HasIndex(s => s.TenantId).IsUnique();
+        // TrackingId is the QR payload — must resolve unambiguously on an inbound message with
+        // no tenant context yet, so it's globally unique, not just per-tenant. OrderId is unique
+        // too: one tracking row per order, a reprint just reuses the existing row (see
+        // OrdersController.GetOrCreateWhatsAppTracking).
+        modelBuilder.Entity<WhatsAppOrderTracking>().HasIndex(t => t.TrackingId).IsUnique();
+        modelBuilder.Entity<WhatsAppOrderTracking>().HasIndex(t => t.OrderId).IsUnique();
+
+        // The queue poll (WhatsAppInternalController.GetPendingQueueJobs) runs every few
+        // seconds per connected tenant and filters on exactly these columns — without this
+        // it degrades into a full scan of an append-only audit table that only ever grows.
+        modelBuilder.Entity<WhatsAppMessageLog>().HasIndex(m => new { m.TenantId, m.Direction, m.Status, m.NextAttemptAt });
+
         ApplyTenantIsolation(modelBuilder);
     }
 
@@ -467,12 +488,44 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         }
     }
 
+    // Only these two QSR/token-order transitions ever push a WhatsApp update — New (shown to
+    // the customer as "Pending") is answered by the inbound TRACK reply instead, since no
+    // WhatsApp number is linked yet at order-creation time, and Served is explicitly excluded
+    // per product decision (see docs/plans — "never send on Served").
+    private static readonly HashSet<OrderStatus> WhatsAppNotifiableStatuses = [OrderStatus.Preparing, OrderStatus.Ready];
+
+    /// <summary>Same "read before SaveChanges, act after" shape as
+    /// CollectRealtimeAffectedTenantIds — scoped to QSR/token orders only (this module's
+    /// current pass) and to the two statuses that ever trigger an automatic WhatsApp push.
+    /// Purely observational over the ChangeTracker: no existing call site of
+    /// OrderBuildingService.RecomputeOrderStatus changes.</summary>
+    private List<(int TenantId, int OrderId, OrderStatus NewStatus)> CollectWhatsAppStatusTransitions() =>
+        ChangeTracker.Entries<Order>()
+            .Where(e => e.State == EntityState.Modified && e.Entity.OrderType == "QSR"
+                && e.Property(nameof(Order.Status)).IsModified
+                && WhatsAppNotifiableStatuses.Contains(e.Entity.Status)
+                && (OrderStatus)e.OriginalValues[nameof(Order.Status)]! != e.Entity.Status)
+            .Select(e => (e.Entity.TenantId, e.Entity.Id, e.Entity.Status))
+            .ToList();
+
+    /// <summary>Fires once a QSR order flips Paid false -> true (see OrdersController.
+    /// CloseOrderAsync) — the trigger for the automatic bill-PDF WhatsApp send.</summary>
+    private List<(int TenantId, int OrderId)> CollectWhatsAppBillGeneratedOrders() =>
+        ChangeTracker.Entries<Order>()
+            .Where(e => e.State == EntityState.Modified && e.Entity.OrderType == "QSR"
+                && e.Property(nameof(Order.Paid)).IsModified
+                && (bool)e.OriginalValues[nameof(Order.Paid)]! == false && e.Entity.Paid)
+            .Select(e => (e.Entity.TenantId, e.Entity.Id))
+            .ToList();
+
     public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
     {
         StampTenantIds();
         var affectedTenantIds = CollectRealtimeAffectedTenantIds();
         await SuppressDisabledNotificationsAsync(cancellationToken);
         var newNotifications = CollectNewNotifications();
+        var whatsAppStatusTransitions = CollectWhatsAppStatusTransitions();
+        var whatsAppBillGenerated = CollectWhatsAppBillGeneratedOrders();
         var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
         // Fire-and-forget: the save already succeeded, a slow/failed push must never make the
         // caller's request slower or fail because of it (see RealtimeNotifier).
@@ -488,6 +541,14 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // request scope (and its RequestAborted token) is gone, same as the realtime notify above.
         foreach (var n in newNotifications)
             _ = pushSender.NotifyTenantAsync(n.TenantId, n.Category, n.Title, n.Body, n.ActionUrl, n.TargetUserId, CancellationToken.None);
+        // WhatsApp order-tracking module (see docs/plans — "WhatsApp Order Tracking Module").
+        // IWhatsAppEventPublisher is a thin, swappable HTTP push into the standalone Node
+        // whatsapp-service — CafePosApi has no idea whether Baileys, WhatsApp Cloud API, or
+        // nothing is listening; same fire-and-forget/never-throw contract as the pushes above.
+        foreach (var (tenantId, orderId, newStatus) in whatsAppStatusTransitions)
+            _ = whatsAppEvents.NotifyOrderStatusChangedAsync(tenantId, orderId, newStatus, CancellationToken.None);
+        foreach (var (tenantId, orderId) in whatsAppBillGenerated)
+            _ = whatsAppEvents.NotifyBillGeneratedAsync(tenantId, orderId, CancellationToken.None);
         return result;
     }
 }

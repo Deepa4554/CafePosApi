@@ -135,6 +135,232 @@ public class ReportsController(CafePosDbContext db) : ControllerBase
         return NoContent();
     }
 
+    // ---------- Owner Daily-Audit Reports ----------
+
+    /// <summary>Same "explicit from/to wins, else a rolling N-day window ending now" shape
+    /// as DashboardController.Analytics — kept IST-bounded (unlike this controller's own
+    /// Variance(), which does raw-UTC math) since every caller of this helper is a money
+    /// report, where a UTC-midnight boundary would silently start "today" at 5:30am IST.</summary>
+    private static (DateTime StartUtc, DateTime EndExclusiveUtc) ResolveIstRange(DateOnly? from, DateOnly? to, int days)
+    {
+        DateTime startIst, endExclusiveIst;
+        if (from is not null || to is not null)
+        {
+            startIst = (from ?? to!.Value).ToDateTime(TimeOnly.MinValue);
+            endExclusiveIst = (to ?? from!.Value).ToDateTime(TimeOnly.MinValue).AddDays(1);
+        }
+        else
+        {
+            if (days <= 0) days = 30;
+            var nowIst = IstClock.NowIst;
+            startIst = nowIst.AddDays(-days);
+            endExclusiveIst = nowIst;
+        }
+        return (startIst - IstClock.Offset, endExclusiveIst - IstClock.Offset);
+    }
+
+    /// <summary>Current valuation (Current × UnitCost per ingredient) is always "as of
+    /// now" — it does not shift with a past `to` date, since those are live fields, not
+    /// historical snapshots. Movement columns (Opening..Closing) only populate when a date
+    /// range is given, reusing the same InventoryTransactions aggregation Variance() does,
+    /// plus a proper opening/closing balance lookup off each transaction's own
+    /// PreviousStock/RemainingStock instead of just summing signed deltas.</summary>
+    [HttpGet("stock")]
+    public async Task<IEnumerable<StockReportLineDto>> Stock([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null)
+    {
+        var itemsQuery = db.InventoryItems.AsQueryable();
+        if (branchId is int bid) itemsQuery = itemsQuery.Where(i => i.BranchId == bid);
+        var items = await itemsQuery.OrderBy(i => i.Name).ToListAsync();
+
+        if (from is null && to is null)
+        {
+            return items.Select(i => new StockReportLineDto(
+                i.Id, i.Name, i.Category, i.Unit, i.Current, i.UnitCost, Math.Round((decimal)i.Current * i.UnitCost, 2),
+                null, null, null, null, null, null));
+        }
+
+        var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, 30);
+        var itemIds = items.Select(i => i.Id).ToList();
+        var txns = await db.InventoryTransactions
+            .Where(t => itemIds.Contains(t.InventoryItemId) && t.CreatedAt < periodEndExclusiveUtc)
+            .OrderBy(t => t.CreatedAt)
+            .ToListAsync();
+
+        return items.Select(i =>
+        {
+            var mine = txns.Where(t => t.InventoryItemId == i.Id).ToList();
+            var beforeStart = mine.Where(t => t.CreatedAt < periodStartUtc).ToList();
+            var inWindow = mine.Where(t => t.CreatedAt >= periodStartUtc).ToList();
+
+            var opening = beforeStart.Count > 0 ? beforeStart[^1].RemainingStock
+                : inWindow.Count > 0 ? inWindow[0].PreviousStock
+                : i.Current;
+            var purchased = inWindow.Where(t => t.Type == InventoryTransactionType.Purchase).Sum(t => t.ChangedQuantity);
+            var sold = inWindow.Where(t => t.Type == InventoryTransactionType.Sale).Sum(t => Math.Abs(t.ChangedQuantity));
+            var wasted = inWindow.Where(t => t.Type is InventoryTransactionType.Waste or InventoryTransactionType.Expired).Sum(t => Math.Abs(t.ChangedQuantity));
+            var other = inWindow.Where(t => t.Type is InventoryTransactionType.ManualAdjustment or InventoryTransactionType.Return or InventoryTransactionType.Transfer).Sum(t => t.ChangedQuantity);
+            var closing = mine.Count > 0 ? mine[^1].RemainingStock : i.Current;
+
+            return new StockReportLineDto(i.Id, i.Name, i.Category, i.Unit, i.Current, i.UnitCost, Math.Round((decimal)i.Current * i.UnitCost, 2),
+                opening, purchased, sold, wasted, other, closing);
+        });
+    }
+
+    /// <summary>Revenue − COGS − Expenses for a period. COGS reuses FoodCost()'s exact
+    /// per-menu-item ingredient-cost derivation (walk Recipe.Items → InventoryItem.UnitCost,
+    /// handle ProductType.Independent via LinkedInventoryItemId) multiplied by quantity
+    /// actually sold. A menu item with no recipe on file contributes zero COGS — silently
+    /// understating cost — so OrdersWithoutRecipeCost surfaces that blind spot rather than
+    /// hiding it (see MissingRecipeAlerts for the fix). Expenses have no BranchId column,
+    /// so `branchId` only narrows the Revenue/COGS side — Expenses is always whole-tenant.</summary>
+    [HttpGet("profit")]
+    public async Task<ProfitReportDto> Profit([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null, [FromQuery] int days = 30)
+    {
+        var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, days);
+
+        var ordersQuery = db.Orders.Include(o => o.Items)
+            .Where(o => o.Paid && o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
+        if (branchId is int bid) ordersQuery = ordersQuery.Where(o => o.BranchId == bid);
+        var orders = await ordersQuery.ToListAsync();
+        var revenue = orders.Sum(o => o.Total);
+
+        var menuItems = await db.MenuItems.Where(m => m.ProductType == ProductType.Prepared || m.ProductType == ProductType.Independent).ToListAsync();
+        var recipes = await db.Recipes.Include(r => r.Items).ToListAsync();
+        var recipeByMenuItem = recipes.ToDictionary(r => r.MenuItemId);
+        var inventoryIds = recipes.SelectMany(r => r.Items).Select(ri => ri.InventoryItemId).ToHashSet();
+        foreach (var m in menuItems)
+            if (m.ProductType == ProductType.Independent && m.LinkedInventoryItemId is int linkedId)
+                inventoryIds.Add(linkedId);
+        var inventory = await db.InventoryItems.Where(i => inventoryIds.Contains(i.Id)).ToDictionaryAsync(i => i.Id);
+
+        var unitCostByMenuItem = new Dictionary<int, decimal>();
+        foreach (var menuItem in menuItems)
+        {
+            decimal cost;
+            if (menuItem.ProductType == ProductType.Independent)
+            {
+                if (menuItem.LinkedInventoryItemId is not int linkedId || !inventory.TryGetValue(linkedId, out var linked)) continue;
+                cost = linked.UnitCost;
+            }
+            else
+            {
+                if (!recipeByMenuItem.TryGetValue(menuItem.Id, out var recipe)) continue;
+                cost = recipe.Items.Where(ri => inventory.ContainsKey(ri.InventoryItemId)).Sum(ri =>
+                {
+                    var ingredient = inventory[ri.InventoryItemId];
+                    var qtyInIngredientUnit = UnitConverter.Convert(ri.Quantity, ri.Unit, ingredient.Unit);
+                    return Math.Round((decimal)qtyInIngredientUnit * ingredient.UnitCost, 2);
+                });
+            }
+            unitCostByMenuItem[menuItem.Id] = cost;
+        }
+
+        decimal cogs = 0;
+        var ordersWithoutRecipeCost = 0;
+        foreach (var order in orders)
+        {
+            var missing = false;
+            foreach (var item in order.Items.Where(i => !i.Voided))
+            {
+                if (unitCostByMenuItem.TryGetValue(item.MenuItemId, out var unitCost)) cogs += item.Qty * unitCost;
+                else missing = true;
+            }
+            if (missing) ordersWithoutRecipeCost++;
+        }
+
+        var expenseRows = await db.CafeExpenses
+            .Where(e => e.SpentAt >= periodStartUtc && e.SpentAt < periodEndExclusiveUtc)
+            .ToListAsync();
+        var expenses = expenseRows.Sum(e => e.Amount);
+
+        var grossProfit = revenue - cogs;
+        var netProfit = grossProfit - expenses;
+
+        var daySpan = Math.Max(1, (int)Math.Ceiling((periodEndExclusiveUtc - periodStartUtc).TotalDays));
+        var daily = Enumerable.Range(0, daySpan).Select(offset =>
+        {
+            var dayStartUtc = periodStartUtc.AddDays(offset);
+            var dayEndExclusiveUtc = dayStartUtc.AddDays(1);
+            var dayOrders = orders.Where(o => o.CreatedAt >= dayStartUtc && o.CreatedAt < dayEndExclusiveUtc).ToList();
+            var dayRevenue = dayOrders.Sum(o => o.Total);
+            var dayCogs = dayOrders.SelectMany(o => o.Items).Where(i => !i.Voided)
+                .Sum(i => unitCostByMenuItem.TryGetValue(i.MenuItemId, out var uc) ? i.Qty * uc : 0);
+            var dayExpenses = expenseRows.Where(e => e.SpentAt >= dayStartUtc && e.SpentAt < dayEndExclusiveUtc).Sum(e => e.Amount);
+            return new ProfitDayLineDto(IstClock.ToIst(dayStartUtc).ToString("d MMM"), dayRevenue, dayCogs, dayExpenses);
+        }).ToList();
+
+        return new ProfitReportDto(revenue, cogs, grossProfit, expenses, netProfit, ordersWithoutRecipeCost, daily);
+    }
+
+    /// <summary>Item/category/payment-mode breakdown for a period. Payment-mode-wise MUST
+    /// read Order.Payments/OrderPayment.Method+Amount (one row per tender), not the summary
+    /// Order.PaymentMethod string — that's the only correct source once a split payment
+    /// exists. Discounts/refunds are folded into this report's summary line rather than a
+    /// dedicated screen — a judgment call, not a technical limit.</summary>
+    [HttpGet("sales")]
+    public async Task<SalesReportDto> Sales([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null, [FromQuery] int days = 30)
+    {
+        var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, days);
+
+        var ordersQuery = db.Orders.Include(o => o.Items).Include(o => o.Payments)
+            .Where(o => o.Paid && o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
+        if (branchId is int bid) ordersQuery = ordersQuery.Where(o => o.BranchId == bid);
+        var orders = await ordersQuery.ToListAsync();
+
+        var grossSales = orders.Sum(o => o.Subtotal);
+        var totalDiscounts = orders.Sum(o => o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount);
+        var netSales = orders.Sum(o => o.Total);
+        var refundsTotal = orders.Where(o => o.Refunded).Sum(o => o.RefundedAmount ?? 0m);
+
+        var allItems = orders.SelectMany(o => o.Items).Where(i => !i.Voided).ToList();
+
+        var itemWise = allItems.GroupBy(i => new { i.MenuItemId, i.Name })
+            .Select(g => new SalesItemLineDto(g.Key.MenuItemId, g.Key.Name, g.Sum(i => i.Qty), g.Sum(i => i.Price * i.Qty)))
+            .OrderByDescending(x => x.NetSales)
+            .ToList();
+
+        var menuItemIds = allItems.Select(i => i.MenuItemId).Distinct().ToList();
+        var categoryByMenuItem = await db.MenuItems.Where(m => menuItemIds.Contains(m.Id)).ToDictionaryAsync(m => m.Id, m => m.Category);
+        var categoryWise = allItems.GroupBy(i => categoryByMenuItem.GetValueOrDefault(i.MenuItemId, "Uncategorized"))
+            .Select(g => new SalesCategoryLineDto(g.Key, g.Sum(i => i.Qty), g.Sum(i => i.Price * i.Qty)))
+            .OrderByDescending(x => x.NetSales)
+            .ToList();
+
+        var paymentModeWise = orders.SelectMany(o => o.Payments)
+            .GroupBy(p => p.Method)
+            .Select(g => new SalesPaymentLineDto(g.Key, g.Sum(p => p.Amount), g.Count()))
+            .OrderByDescending(x => x.Amount)
+            .ToList();
+
+        return new SalesReportDto(grossSales, totalDiscounts, netSales, refundsTotal, orders.Count, itemWise, categoryWise, paymentModeWise);
+    }
+
+    /// <summary>Rate-wise collected tax for a period — groups by OrderItem.TaxRatePct
+    /// (falling back to CafeSettings.TaxRatePct for lines with no snapshotted rate, same
+    /// resolution RecomputeTotals itself uses). TotalTaxCollected should reconcile to the
+    /// same-period sum of Order.Tax.</summary>
+    [HttpGet("tax-gst")]
+    public async Task<TaxGstReportDto> TaxGst([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null, [FromQuery] int days = 30)
+    {
+        var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, days);
+
+        var ordersQuery = db.Orders.Include(o => o.Items)
+            .Where(o => o.Paid && o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
+        if (branchId is int bid) ordersQuery = ordersQuery.Where(o => o.BranchId == bid);
+        var orders = await ordersQuery.ToListAsync();
+
+        var settings = await db.Settings.FirstOrDefaultAsync();
+        var defaultRate = settings?.TaxRatePct ?? 8;
+
+        var byRate = orders.SelectMany(o => o.Items).Where(i => !i.Voided)
+            .GroupBy(i => i.TaxRatePct ?? defaultRate)
+            .Select(g => new TaxRateLineDto(g.Key, g.Sum(i => i.TaxableAmount), g.Sum(i => i.TaxAmount), g.Count()))
+            .OrderByDescending(x => x.RatePct)
+            .ToList();
+
+        return new TaxGstReportDto(byRate.Sum(x => x.TaxableAmount), byRate.Sum(x => x.TaxAmount), byRate);
+    }
+
     // ---------- HR Reports ----------
 
     [HttpGet("daily-attendance")]

@@ -18,4 +18,7 @@ public static class Policies
     public const string RequirePlus = "RequirePlus";
     /// <summary>Tenant's subscription must be Premium — see RequirePlanHandler.</summary>
     public const string RequirePremium = "RequirePremium";
+    /// <summary>The standalone Node whatsapp-service only, authenticated via a shared secret
+    /// (see ServiceApiKeyAuthenticationHandler) — not satisfied by any user JWT.</summary>
+    public const string ServiceOnly = "ServiceOnly";
 }

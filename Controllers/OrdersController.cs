@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using CafePOS.Api.Contracts;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
@@ -135,6 +136,65 @@ public class OrdersController(
         var exists = await db.Orders.AnyAsync(o => o.Id == id);
         if (!exists) return NotFound();
         return new { token = receiptTokens.Encode(id) };
+    }
+
+    // Excludes 0/O/1/I/L — avoids misreads if a customer ever has to type a TrackingId by hand.
+    private const string TrackingIdAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+    /// <summary>
+    /// Idempotently creates (if needed) this order's WhatsApp tracking row and returns the
+    /// wa.me deep link to embed as the token slip's WhatsApp QR — called by
+    /// POSCheckoutScreen.autoPrintTokenSlip right before printing, NOT at order creation, so
+    /// OrderBuildingService.BuildOrderAsync is never touched. whatsAppDeepLink is null (client
+    /// just prints the plain slip, exactly as before this module existed) whenever no tenant
+    /// WhatsApp session is Connected yet.
+    /// </summary>
+    [HttpPost("{id:int}/whatsapp-tracking")]
+    public async Task<ActionResult<object>> GetOrCreateWhatsAppTracking(int id)
+    {
+        var order = await db.Orders.FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.OrderType != "QSR") throw new ApiValidationException("WhatsApp tracking is only available for token/counter orders.");
+
+        var tracking = await db.WhatsAppTracking.FirstOrDefaultAsync(t => t.OrderId == id);
+        if (tracking is null)
+        {
+            tracking = new WhatsAppOrderTracking { OrderId = id, TrackingId = await GenerateUniqueTrackingIdAsync() };
+            db.WhatsAppTracking.Add(tracking);
+            await db.SaveChangesAsync();
+        }
+
+        // Customer-facing text, not a raw "TRACK <code>" command — that read like a spammy
+        // bot command and made people hesitant to hit Send. The literal word TRACK is still
+        // embedded (whatsapp-service's commandParser searches for it anywhere in the message,
+        // it no longer requires the whole message to be just that), so this still round-trips
+        // correctly as a tracking request — only the wording customers actually see changed.
+        var session = await db.WhatsAppSessions.FirstOrDefaultAsync(s => s.Status == WhatsAppSessionStatus.Connected);
+        var deepLink = session?.PhoneNumberE164 is string businessNumber
+            ? $"https://wa.me/{businessNumber}?text={Uri.EscapeDataString($"Hi! I'd like to track my order.\nTRACK {tracking.TrackingId}")}"
+            : null;
+
+        return new { trackingId = tracking.TrackingId, whatsAppDeepLink = deepLink };
+    }
+
+    private async Task<string> GenerateUniqueTrackingIdAsync()
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var candidate = GenerateTrackingId();
+            if (!await db.WhatsAppTracking.IgnoreQueryFilters().AnyAsync(t => t.TrackingId == candidate))
+                return candidate;
+        }
+        throw new InvalidOperationException("Could not generate a unique WhatsApp tracking id after 5 attempts.");
+    }
+
+    private static string GenerateTrackingId()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(9);
+        var chars = new char[9];
+        for (var i = 0; i < 9; i++)
+            chars[i] = TrackingIdAlphabet[bytes[i] % TrackingIdAlphabet.Length];
+        return new string(chars);
     }
 
     /// <summary>

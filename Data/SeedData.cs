@@ -49,7 +49,15 @@ public static class SeedData
                 new Integration { Name = "DoorDash", Category = "Delivery" },
                 new Integration { Name = "Deliveroo", Category = "Delivery" },
                 new Integration { Name = "Menulog", Category = "Delivery" },
-                new Integration { Name = "Stripe", Category = "Payments" });
+                new Integration { Name = "Stripe", Category = "Payments" },
+                new Integration { Name = "WhatsApp Business", Category = "Messaging" });
+        }
+        // Separate, idempotent check (not folded into the block above) so an already-seeded
+        // deployment picks up the "WhatsApp Business" card retroactively instead of only ever
+        // getting it on a brand-new database.
+        else if (!db.Integrations.Any(i => i.Name == "WhatsApp Business"))
+        {
+            db.Integrations.Add(new Integration { Name = "WhatsApp Business", Category = "Messaging" });
         }
 
         // Starting catalog matches the old hardcoded 4-item list the Points screen used to

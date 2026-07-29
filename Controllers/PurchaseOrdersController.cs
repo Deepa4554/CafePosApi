@@ -16,10 +16,22 @@ namespace CafePOS.Api.Controllers;
 [Authorize(Policy = Policies.RequirePlus)]
 public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
 {
+    /// <summary>Additive optional filters for the Purchase Report — all default to "no
+    /// filter" so the operational Purchase Orders screen (which never passes them) keeps
+    /// working unchanged. No `branchId` param: PurchaseOrder/PurchaseItem have no BranchId
+    /// column, so a purchase order can't be scoped to a branch in this schema.</summary>
     [HttpGet]
-    public async Task<IEnumerable<PurchaseOrderDto>> List()
+    public async Task<IEnumerable<PurchaseOrderDto>> List(
+        [FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null,
+        [FromQuery] PurchaseOrderStatus? status = null, [FromQuery] int? vendorId = null)
     {
-        var orders = await db.PurchaseOrders.Include(p => p.Items).OrderByDescending(p => p.CreatedAt).ToListAsync();
+        var query = db.PurchaseOrders.AsQueryable();
+        if (from is DateOnly f) query = query.Where(p => p.CreatedAt >= f.ToDateTime(TimeOnly.MinValue) - IstClock.Offset);
+        if (to is DateOnly t) query = query.Where(p => p.CreatedAt < t.ToDateTime(TimeOnly.MinValue).AddDays(1) - IstClock.Offset);
+        if (status is PurchaseOrderStatus st) query = query.Where(p => p.Status == st);
+        if (vendorId is int vid) query = query.Where(p => p.VendorId == vid);
+
+        var orders = await query.Include(p => p.Items).OrderByDescending(p => p.CreatedAt).ToListAsync();
         return await ToDtos(orders);
     }
 

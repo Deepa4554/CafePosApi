@@ -37,6 +37,31 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
             all.Select(CafeExpenseDto.From).ToList());
     }
 
+    /// <summary>Date-ranged view for the Expense Report — a separate action (not new params
+    /// on List() above) so it can carry its own [Authorize(RequirePlus)] on top of this
+    /// controller's Normal-plan List()/Create()/Delete(), the same method-level layering
+    /// trick DashboardController.Forecast() uses (ASP.NET Core [Authorize] policies are
+    /// additive-only — List() can't be "downgraded" back off Plus per-action, so gating just
+    /// the reporting view means a new action, not new params on the existing one). No
+    /// BranchId column on CafeExpense — always a whole-tenant total, no branch filter.</summary>
+    [HttpGet("report")]
+    [Authorize(Policy = Policies.RequirePlus)]
+    public async Task<CafeExpenseReportDto> Report([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null)
+    {
+        var query = db.CafeExpenses.AsQueryable();
+        if (from is DateOnly f) query = query.Where(e => e.SpentAt >= f.ToDateTime(TimeOnly.MinValue) - IstClock.Offset);
+        if (to is DateOnly t) query = query.Where(e => e.SpentAt < t.ToDateTime(TimeOnly.MinValue).AddDays(1) - IstClock.Offset);
+        var rows = await query.OrderByDescending(e => e.SpentAt).ToListAsync();
+
+        var byCategory = rows
+            .GroupBy(e => e.Category)
+            .Select(g => new CategoryTotalDto(g.Key.ToString(), g.Sum(e => e.Amount)))
+            .OrderByDescending(c => c.Total)
+            .ToList();
+
+        return new CafeExpenseReportDto(rows.Sum(e => e.Amount), byCategory, rows.Select(CafeExpenseDto.From).ToList());
+    }
+
     [HttpPost]
     public async Task<ActionResult<CafeExpenseDto>> Create(CreateCafeExpenseRequest req)
     {

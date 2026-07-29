@@ -129,6 +129,9 @@ public record CafeExpenseDto(int Id, decimal Amount, string Category, string Pur
 public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt);
 public record CategoryTotalDto(string Category, decimal Total);
 public record CafeExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth, List<CategoryTotalDto> ByCategoryThisMonth, List<CafeExpenseDto> Recent);
+/// <summary>Not branch-scoped — CafeExpense has no BranchId column, so this is always a
+/// whole-tenant total regardless of any branch filter elsewhere in the Reports hub.</summary>
+public record CafeExpenseReportDto(decimal Total, List<CategoryTotalDto> ByCategory, List<CafeExpenseDto> Lines);
 
 // ---------- Branches ----------
 public record BranchDto(int Id, string Name, string Address, bool IsActive)

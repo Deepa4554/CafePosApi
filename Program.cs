@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
@@ -158,12 +159,28 @@ if (!string.IsNullOrWhiteSpace(fcmCredentialsPath) && File.Exists(fcmCredentials
 }
 builder.Services.AddSingleton<IPushNotificationSender, FcmPushNotificationSender>();
 
+// ---------- WhatsApp order-tracking module (Baileys, standalone Node service) ----------
+// Queue jobs directly into Postgres (WhatsAppMessageLog) — the standalone whatsapp-service
+// polls the queue table every 2–5 seconds. See WhatsAppEventPublisher (writes Postgres),
+// WhatsAppInternalController (queue polling endpoints), WhatsAppController (staff pairing UI
+// proxy). Left unconfigured, the module is a no-op — zero impact on order/billing/print flows.
+builder.Services.Configure<WhatsAppServiceOptions>(builder.Configuration.GetSection("WhatsAppService"));
+builder.Services.AddScoped<IWhatsAppEventPublisher, WhatsAppEventPublisher>();
+builder.Services.AddHttpClient<WhatsAppNodeClient>((sp, client) =>
+{
+    var opts = sp.GetRequiredService<IOptions<WhatsAppServiceOptions>>().Value;
+    if (!string.IsNullOrWhiteSpace(opts.BaseUrl)) client.BaseAddress = new Uri(opts.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
+
 builder.Services
     .AddAuthentication(options =>
     {
         options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
         options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
     })
+    .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, ServiceApiKeyAuthenticationHandler>(
+        ServiceApiKeyDefaults.AuthenticationScheme, _ => { })
     .AddJwtBearer(options =>
     {
         options.TokenValidationParameters = new TokenValidationParameters
@@ -206,7 +223,8 @@ builder.Services.AddAuthorizationBuilder()
     .AddPolicy(Policies.PlatformAdminOnly, p => p.RequireAuthenticatedUser().RequireAssertion(ctx =>
         ctx.User.FindFirst("isPlatformAdmin")?.Value == "true"))
     .AddPolicy(Policies.RequirePlus, p => p.RequireAuthenticatedUser().AddRequirements(new RequirePlanRequirement(PlanCategory.Plus)))
-    .AddPolicy(Policies.RequirePremium, p => p.RequireAuthenticatedUser().AddRequirements(new RequirePlanRequirement(PlanCategory.Premium)));
+    .AddPolicy(Policies.RequirePremium, p => p.RequireAuthenticatedUser().AddRequirements(new RequirePlanRequirement(PlanCategory.Premium)))
+    .AddPolicy(Policies.ServiceOnly, p => p.AddAuthenticationSchemes(ServiceApiKeyDefaults.AuthenticationScheme).RequireAuthenticatedUser());
 
 builder.Services.AddScoped<IAuthorizationHandler, RequirePlanHandler>();
 

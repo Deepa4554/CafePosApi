@@ -29,7 +29,7 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
     /// take priority over `days` when present.
     /// </summary>
     [HttpGet("analytics")]
-    public async Task<DashboardAnalyticsDto> Analytics([FromQuery] int days = 7, [FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null)
+    public async Task<DashboardAnalyticsDto> Analytics([FromQuery] int days = 7, [FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null)
     {
         // Period bounds are computed in IST (a from/to date or "today" means the cafe's
         // calendar day, see IstClock) and converted to UTC only for the SQL comparison
@@ -57,10 +57,11 @@ public class DashboardController(CafePosDbContext db) : ControllerBase
 
         var previousPeriodStartUtc = previousPeriodStartIst - IstClock.Offset;
         var periodEndExclusiveUtc = periodEndExclusiveIst - IstClock.Offset;
-        var orders = await db.Orders
+        var ordersQuery = db.Orders
             .Include(o => o.Items)
-            .Where(o => o.CreatedAt >= previousPeriodStartUtc && o.CreatedAt < periodEndExclusiveUtc)
-            .ToListAsync();
+            .Where(o => o.CreatedAt >= previousPeriodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
+        if (branchId is int bid) ordersQuery = ordersQuery.Where(o => o.BranchId == bid);
+        var orders = await ordersQuery.ToListAsync();
 
         var currentPaid = orders.Where(o => o.Paid && IstClock.ToIst(o.CreatedAt) >= periodStartIst).ToList();
         var previousPaid = orders.Where(o => o.Paid && IstClock.ToIst(o.CreatedAt) >= previousPeriodStartIst && IstClock.ToIst(o.CreatedAt) < periodStartIst).ToList();
