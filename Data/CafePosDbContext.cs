@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using CafePOS.Api.Domain;
 using CafePOS.Api.Infrastructure;
+using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -9,9 +10,23 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CafePOS.Api.Data;
 
-public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime, IPushNotificationSender pushSender, IWhatsAppEventPublisher whatsAppEvents) : DbContext(options)
+public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime, IPushNotificationSender pushSender, IWhatsAppEventPublisher whatsAppEvents) : DbContext(options), IDataProtectionKeyContext
 {
     private readonly ITenantContext _tenant = tenant;
+
+    /// <summary>Where ASP.NET's Data Protection key ring lives — required by
+    /// IDataProtectionKeyContext, and the reason QR codes survive a redeploy. The keys used to
+    /// be written to a `keys/` folder next to the binary, which quietly meant "regenerate every
+    /// deploy" on Render: that folder is gitignored, never makes it into the Docker image, and
+    /// the container filesystem is thrown away each release anyway. So every deploy minted a
+    /// fresh key, every previously-issued QR token failed to decrypt, and the codes already
+    /// printed and taped to tables started resolving to "table not found".
+    ///
+    /// Not ITenantScoped on purpose: the key ring is infrastructure shared by every cafe, not
+    /// tenant data, so ApplyTenantIsolation skips it (no TenantId column, no query filter) —
+    /// which is exactly what we want, since Data Protection reads these rows at startup with no
+    /// request and therefore no tenant in scope.</summary>
+    public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     // ---------- Stock-movement serialization ----------
     // Every InventoryItem.Current / InventoryBatch.Quantity move is a read-modify-write, and

@@ -62,11 +62,20 @@ builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<ITaxRateCache, TaxRateCache>();
 
 // ---------- QR token encryption ----------
-// Keys persisted to disk so already-printed QR codes keep working across restarts
-// (the default is in-memory-only keys, which would invalidate every QR code on every
-// deploy/restart — unacceptable for something printed and taped to a table).
+// Keys live in the database so already-printed QR codes keep working across restarts AND
+// redeploys. Disk was the obvious place and it was wrong: `keys/` is gitignored, never
+// lands in the Docker image, and Render throws the container filesystem away every
+// release — so each deploy minted a fresh key and silently invalidated every QR code
+// already printed and taped to a table. The database is the only thing here that outlives
+// a deploy (and it's shared, so this keeps working if we ever run more than one instance).
+//
+// SetApplicationName pins the key-derivation isolation to a constant. Left unset it
+// defaults to the content root path, which would make keys stop matching the moment the
+// app runs from a different directory — the same class of "works locally, breaks in the
+// container" bug this whole change is fixing.
 builder.Services.AddDataProtection()
-    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "keys")));
+    .SetApplicationName("CafePOS")
+    .PersistKeysToDbContext<CafePosDbContext>();
 builder.Services.AddSingleton<QrTokenService>();
 builder.Services.AddSingleton<ReceiptTokenService>();
 
