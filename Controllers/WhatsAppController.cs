@@ -17,7 +17,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/whatsapp")]
 [Authorize(Policy = Policies.OwnerOrManager)]
-[Authorize(Policy = Policies.RequirePremium)]
+[Authorize(Policy = Policies.RequirePlus)]
 public class WhatsAppController(CafePosDbContext db, ITenantContext tenantContext, WhatsAppNodeClient nodeClient) : ControllerBase
 {
     [HttpGet("status")]

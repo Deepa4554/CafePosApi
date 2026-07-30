@@ -11,8 +11,9 @@ public static class PlanCategoryMapper
     private static readonly Dictionary<SubscriptionTier, PlanCategory> TierToCategory = new()
     {
         // The 7-day free trial defaults to Plus (not the full Premium/Integrations
-        // tier) — enough for a new cafe to explore CRM/Dashboard/Staff/Inventory, but
-        // Integrations stays a paid-only feature even during the trial.
+        // tier) — enough for a new cafe to explore CRM/Dashboard/Staff/Inventory plus
+        // WhatsApp Business, but the Integrations hub itself stays a paid-only Premium
+        // feature even during the trial.
         [SubscriptionTier.FreeTrial] = PlanCategory.Plus,
         [SubscriptionTier.Starter] = PlanCategory.Normal,
         [SubscriptionTier.Professional] = PlanCategory.Plus,

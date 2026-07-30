@@ -43,7 +43,9 @@ public static class ScreenCatalog
         ["Approvals"] = PlanCategory.Plus,
         ["Tasks"] = PlanCategory.Plus,
         ["Integrations"] = PlanCategory.Premium,
-        ["WhatsAppSetup"] = PlanCategory.Premium,
+        // Plus, unlike the Integrations hub above it — see the matching note in
+        // CafePOS/src/core/auth/screenCatalog.ts.
+        ["WhatsAppSetup"] = PlanCategory.Plus,
         ["Branches"] = PlanCategory.Plus,
         ["Expenses"] = PlanCategory.Normal,
         ["Reports"] = PlanCategory.Normal,
