@@ -2,6 +2,7 @@ using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CafePOS.Api.Infrastructure;
@@ -30,6 +31,14 @@ public class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logger, ISer
             ApiValidationException => (StatusCodes.Status400BadRequest, exception.Message),
             ApiConflictException => (StatusCodes.Status409Conflict, exception.Message),
             KeyNotFoundException => (StatusCodes.Status404NotFound, exception.Message),
+            // A lost optimistic-concurrency race is by definition a conflict, never a bug —
+            // "someone else changed this row first". Order.PaymentVersion is the only
+            // concurrency token in the model today, and OrdersController.SavePaymentStateAsync
+            // already converts its own misses into a specific ApiConflictException; this is
+            // the catch-all so any other path that touches a settled order gets a usable 409
+            // instead of a 500 with a stack trace.
+            DbUpdateConcurrencyException => (StatusCodes.Status409Conflict,
+                "This record was changed on another device while you were working on it — reload it and try again."),
             // The message here is already deliberately generic where it needs to be
             // (e.g. AuthController's "Invalid email or password." never says which
             // part was wrong) — no reason to further flatten it to "Unauthorized."

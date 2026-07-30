@@ -260,6 +260,19 @@ public class Order : ITenantScoped
     /// <summary>How the bill was settled — Cash / Card / UPI / Multiple. Set when the order
     /// is marked paid; null until then.</summary>
     public string? PaymentMethod { get; set; }
+    /// <summary>Optimistic-concurrency token over this order's money state, bumped by exactly
+    /// one on every Pay / Close / Refund (see OrdersController.SavePaymentStateAsync). Two
+    /// staff devices settling the same table in the same instant both read Paid == false and
+    /// used to both record a full payment row — the bill went down as paid twice and the
+    /// cash-drawer/revenue reports stopped matching. Now both carry the same original value
+    /// into their UPDATE, so the second one matches zero rows and comes back as a 409 with
+    /// its payment rows rolled back rather than a silent duplicate settle.
+    ///
+    /// Deliberately scoped to the money paths only: AddItem/Fire/status changes never touch
+    /// it, so two waiters editing the same order concurrently behave exactly as they did
+    /// before. The one new conflict is an edit that races a settle — which is a conflict
+    /// worth surfacing, since the bill it was editing is now closed.</summary>
+    public int PaymentVersion { get; set; }
     public OrderStatus Status { get; set; } = OrderStatus.New;
     /// <summary>Increments by 1 each time at least one previously-unfired item is fired to
     /// the kitchen (see OrdersController.Fire). An item's FireBatch == this value means it
@@ -322,6 +335,13 @@ public class OrderPayment : ITenantScoped
     public int OrderId { get; set; }
     public required string Method { get; set; } // Cash / Card / UPI
     public decimal Amount { get; set; }
+    /// <summary>This tender's 0-based slot in its order's payment ledger, assigned from
+    /// however many rows already exist (a 3-way split in one Pay call takes slots n, n+1,
+    /// n+2). Unique per order at the DB level — see CafePosDbContext — which is the backstop
+    /// underneath Order.PaymentVersion's concurrency check: two racing Pay calls read the
+    /// same ledger and compute the same next slot, so even if the token check were ever
+    /// bypassed Postgres still refuses the duplicate tender outright.</summary>
+    public int LedgerIndex { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 

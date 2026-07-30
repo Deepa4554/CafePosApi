@@ -12,6 +12,61 @@ namespace CafePOS.Api.Infrastructure;
 /// </summary>
 public static class InventoryBatchService
 {
+    /// <summary>Takes Postgres row-level write locks (<c>SELECT … FOR UPDATE</c>) on the given
+    /// ingredients, so concurrent stock movements on the same ingredient run one after another
+    /// instead of both reading the same starting balance and the loser's deduction being
+    /// overwritten at save time (see CafePosDbContext's stock-scope comment for what that
+    /// silently did to InventoryItem.Current).
+    ///
+    /// Call this BEFORE the InventoryItem rows are read into the change tracker — the read is
+    /// then guaranteed to see the latest committed balance, and the per-ingredient
+    /// lock-and-refresh inside ConsumeFifoAsync/CreateBatchAsync/SetStockToAsync/ReverseAsync
+    /// steps aside for anything already locked here. Ids are locked in one statement in
+    /// ascending order so two requests holding overlapping sets can't deadlock by grabbing the
+    /// same rows in opposite orders.</summary>
+    public static async Task LockIngredientsAsync(CafePosDbContext db, IEnumerable<int> inventoryItemIds)
+    {
+        var ids = inventoryItemIds.Where(id => id != 0 && !db.HoldsStockLock(id)).Distinct().Order().ToArray();
+        if (ids.Length == 0) return;
+        if (!await db.BeginStockScopeAsync()) return;
+
+        await db.Database.ExecuteSqlRawAsync(
+            @"SELECT ""Id"" FROM ""InventoryItems"" WHERE ""Id"" = ANY({0}) ORDER BY ""Id"" FOR UPDATE",
+            new object[] { ids });
+        db.MarkStockLocked(ids);
+    }
+
+    /// <summary>Serializes one ingredient the way <see cref="LockIngredientsAsync"/> does, then —
+    /// because the caller loaded the row before any lock existed — re-reads the balance that lock
+    /// now protects. Only Current/LowStockNotified are refreshed rather than reloading the whole
+    /// entry, so a caller that edited other fields first (PurchaseOrdersController.Receive's
+    /// weighted-average UnitCost, InventoryController's bulk import rewriting cost/thresholds)
+    /// doesn't silently lose them.
+    ///
+    /// No-ops once this unit of work already holds the ingredient's lock: whatever it has
+    /// deducted in memory since is then the authoritative figure — nobody else could have moved
+    /// the row — and re-reading would undo it.</summary>
+    private static async Task LockAndRefreshAsync(CafePosDbContext db, InventoryItem ingredient)
+    {
+        if (ingredient.Id == 0 || db.HoldsStockLock(ingredient.Id)) return;
+        if (!await db.BeginStockScopeAsync()) return;
+
+        await db.Database.ExecuteSqlRawAsync(
+            @"SELECT ""Id"" FROM ""InventoryItems"" WHERE ""Id"" = {0} FOR UPDATE", ingredient.Id);
+        db.MarkStockLocked([ingredient.Id]);
+
+        // IgnoreQueryFilters for the same reason ConsumeFifoAsync's batch query uses it: this
+        // runs inside anonymous guest flows where the ambient JWT-derived tenant filter resolves
+        // to the DEFAULT tenant and would hide the real cafe's row.
+        var fresh = await db.InventoryItems.IgnoreQueryFilters().AsNoTracking()
+            .Where(i => i.Id == ingredient.Id)
+            .Select(i => new { i.Current, i.LowStockNotified })
+            .FirstOrDefaultAsync();
+        if (fresh is null) return;
+        ingredient.Current = fresh.Current;
+        ingredient.LowStockNotified = fresh.LowStockNotified;
+    }
+
     /// <summary>Consumes <paramref name="amount"/> from <paramref name="ingredient"/>'s
     /// batches in FIFO order (soonest ExpiryDate first, nulls last, then oldest ReceivedAt,
     /// then Id) — one InventoryTransaction row per batch touched, so a single sale/waste/
@@ -27,6 +82,11 @@ public static class InventoryBatchService
         int? userId, string userName)
     {
         if (amount <= 0) return;
+
+        // Before ingredient.Current is read below: everything from here to SaveChanges now runs
+        // with this ingredient's row locked, so a concurrent deduction of the same ingredient
+        // waits its turn and starts from the balance this one leaves behind.
+        await LockAndRefreshAsync(db, ingredient);
 
         // Captured before any mutation below, so the low-stock check at the bottom only
         // fires on the crossing itself (above → at-or-below), not on every subsequent
@@ -134,12 +194,16 @@ public static class InventoryBatchService
 
     /// <summary>Creates a new batch (purchase, or a positive stock-take/manual-adjustment
     /// correction) and writes one Purchase/ManualAdjustment ledger row. Updates
-    /// ingredient.Current by +quantity.</summary>
-    public static InventoryBatch CreateBatch(
+    /// ingredient.Current by +quantity. Async purely so it can take the ingredient's row lock
+    /// before reading the balance it adds to — a restock racing a sale used to lose whichever
+    /// of the two saved first.</summary>
+    public static async Task<InventoryBatch> CreateBatchAsync(
         CafePosDbContext db, InventoryItem ingredient, double quantity, decimal unitCost,
         DateOnly? expiryDate, InventoryTransactionType type, string? referenceId,
         int? userId, string userName)
     {
+        await LockAndRefreshAsync(db, ingredient);
+
         var batch = new InventoryBatch
         {
             TenantId = ingredient.TenantId,
@@ -174,7 +238,7 @@ public static class InventoryBatchService
     }
 
     /// <summary>Sets stock to an exact figure — a physical count correction, or a bulk
-    /// import stating what's actually on the shelf. Unlike CreateBatch/ConsumeFifoAsync
+    /// import stating what's actually on the shelf. Unlike CreateBatchAsync/ConsumeFifoAsync
     /// (which move stock BY an amount), this moves it TO one, writing a single consolidated
     /// ManualAdjustment ledger row for the difference rather than one row per batch: the
     /// user counted once, so the ledger should read as one correction. Batches are squared
@@ -184,6 +248,10 @@ public static class InventoryBatchService
         CafePosDbContext db, InventoryItem item, double newQuantity, string? reason,
         int? userId, string userName)
     {
+        // Before the delta is computed: the count is absolute, but the ledger row and the FIFO
+        // drain below are both sized from Current, so it has to be the locked, latest balance.
+        await LockAndRefreshAsync(db, item);
+
         var delta = newQuantity - item.Current;
         if (delta == 0) return;
 
@@ -253,7 +321,7 @@ public static class InventoryBatchService
             });
         }
         // Counted back above the reorder line — re-arm so a later drop raises a fresh alert,
-        // matching what CreateBatch and InventoryController.Update already do.
+        // matching what CreateBatchAsync and InventoryController.Update already do.
         else if (item.LowStockNotified && item.Current > item.ReorderLevel)
         {
             item.LowStockNotified = false;
@@ -269,6 +337,8 @@ public static class InventoryBatchService
         CafePosDbContext db, InventoryTransaction original, InventoryItem ingredient, string reason,
         int? userId, string userName)
     {
+        await LockAndRefreshAsync(db, ingredient);
+
         // Same ambient-filter bypass as ConsumeFifoAsync above — Find/queries here must
         // resolve the batch by the ingredient's tenant, not the request's JWT tenant.
         var batch = original.InventoryBatchId is int batchId

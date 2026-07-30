@@ -824,6 +824,11 @@ public class OrdersController(
             var deductions = await db.InventoryTransactions
                 .Where(t => t.OrderItemId == item.Id && t.Type == InventoryTransactionType.Sale)
                 .ToListAsync();
+            // One ordered lock for every ingredient being credited back, taken before the
+            // FindAsync below reads any of their balances — a reversal racing a sale of the
+            // same ingredient would otherwise lose one of the two movements. See
+            // InventoryBatchService.LockIngredientsAsync.
+            await InventoryBatchService.LockIngredientsAsync(db, deductions.Select(d => d.InventoryItemId));
             foreach (var d in deductions)
             {
                 var ingredient = await db.InventoryItems.FindAsync(d.InventoryItemId);
@@ -927,6 +932,34 @@ public class OrdersController(
         return OrderDto.From(order);
     }
 
+    /// <summary>
+    /// Turns "0 rows matched" from one of the bill-time redemption UPDATEs below into a 409.
+    ///
+    /// Every one of those three endpoints (coupon / gift card / loyalty) used to read a shared
+    /// balance, decide what to spend, and write the result back — with nothing between the read
+    /// and the write. Two bills redeeming the same card, coupon or customer at the same moment
+    /// both saw the pre-spend balance and both wrote their own answer, so the second write
+    /// silently erased the first and the value was spent twice for free. Same for a
+    /// double-tapped "Apply" button on a single order.
+    ///
+    /// The fix is to let the database, not the request, decide who wins: each redemption is a
+    /// single conditional UPDATE that restates the precondition in its WHERE clause ("this
+    /// order still has no gift card", "this card still has at least this much on it"). Postgres
+    /// re-evaluates that clause against the newest committed row, so exactly one of two racing
+    /// requests matches a row; the other matches none and lands here. The redemption and the
+    /// order's discount are wrapped in one transaction, so a card can never be debited without
+    /// the bill it paid for being updated too.
+    ///
+    /// Only the relational path does this. The in-memory provider Program.cs falls back to for
+    /// zero-config local dev can't run raw SQL, and never runs multi-process — the same
+    /// read-modify-write it always did is fine there (same split as
+    /// OrderBuildingService.NextTokenNumberAsync).
+    /// </summary>
+    private static void ClaimOrThrow(int rowsAffected, string message)
+    {
+        if (rowsAffected == 0) throw new ApiConflictException(message);
+    }
+
     /// <summary>Redeems a coupon at billing time (any time before Paid — not gated on
     /// Served, see ApplyBillDiscount). Only one coupon per order.</summary>
     [HttpPatch("{id:int}/bill-coupon")]
@@ -952,10 +985,29 @@ public class OrdersController(
             CouponType.Flat => coupon.Value,
             _ => 0,
         };
+
+        await using var txn = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync() : null;
+        if (txn is not null)
+        {
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "Orders" SET "CouponCode" = {coupon.Code}
+                WHERE "Id" = {order.Id} AND "CouponCode" IS NULL
+                """), "A coupon has already been applied to this order.");
+
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "Coupons" SET "IsUsed" = true
+                WHERE "Id" = {coupon.Id} AND "IsUsed" = false
+                """), "Coupon has already been used.");
+        }
+        else
+        {
+            coupon.IsUsed = true;
+        }
+
         order.CouponCode = coupon.Code;
-        coupon.IsUsed = true;
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
+        if (txn is not null) await txn.CommitAsync();
         return OrderDto.From(order);
     }
 
@@ -980,12 +1032,37 @@ public class OrdersController(
 
         var owedBeforeGiftCard = Math.Max(0, order.Subtotal - order.DiscountAmount - order.BillDiscountAmount - order.CouponDiscountAmount - order.LoyaltyDiscountAmount);
         var redeem = Math.Min(giftCard.Balance, owedBeforeGiftCard);
+
+        await using var txn = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync() : null;
+        if (txn is not null)
+        {
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "Orders" SET "GiftCardCode" = {giftCard.Code}
+                WHERE "Id" = {order.Id} AND "GiftCardCode" IS NULL
+                """), "A gift card has already been applied to this order.");
+
+            // Compare-and-swap on the balance we read, not a blind decrement: "Balance" >= the
+            // amount we're taking is re-evaluated by Postgres against the newest committed row,
+            // so the same card redeemed on two bills at once can't pay for both or go negative.
+            // The loser gets a 409 and reapplies against the balance that's actually left.
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "GiftCards"
+                SET "Balance" = "Balance" - {redeem},
+                    "Status" = CASE WHEN "Balance" - {redeem} <= 0 THEN 'Used' ELSE "Status" END
+                WHERE "Id" = {giftCard.Id} AND "Status" = 'Active' AND "Balance" >= {redeem}
+                """), "This gift card's balance just changed — reapply it to redeem what's left.");
+        }
+        else
+        {
+            giftCard.Balance -= redeem;
+            if (giftCard.Balance <= 0) giftCard.Status = GiftCardStatus.Used;
+        }
+
         order.GiftCardCode = giftCard.Code;
         order.GiftCardAmountApplied = redeem;
-        giftCard.Balance -= redeem;
-        if (giftCard.Balance <= 0) giftCard.Status = GiftCardStatus.Used;
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
+        if (txn is not null) await txn.CommitAsync();
         return OrderDto.From(order);
     }
 
@@ -1013,11 +1090,33 @@ public class OrdersController(
         var redeemedPoints = Math.Min(req.Points, (int)Math.Floor(owedBeforeLoyalty));
         if (redeemedPoints <= 0) throw new ApiConflictException("Nothing left on this bill for points to cover.");
 
-        customer.RedeemedPoints += redeemedPoints;
+        await using var txn = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync() : null;
+        if (txn is not null)
+        {
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "Orders" SET "LoyaltyPointsRedeemed" = {redeemedPoints}
+                WHERE "Id" = {order.Id} AND "LoyaltyPointsRedeemed" = 0
+                """), "Loyalty points have already been redeemed on this order.");
+
+            // Same compare-and-swap as the gift card: AvailablePoints is a computed property
+            // (TotalPoints - RedeemedPoints) with no column of its own, so the affordability
+            // check has to be re-run in SQL against the newest committed row. Two bills
+            // redeeming the same customer's points at once can no longer both succeed.
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "Customers" SET "RedeemedPoints" = "RedeemedPoints" + {redeemedPoints}
+                WHERE "Id" = {customer.Id} AND "TotalPoints" - "RedeemedPoints" >= {redeemedPoints}
+                """), "This customer's point balance just changed — recheck the available points and try again.");
+        }
+        else
+        {
+            customer.RedeemedPoints += redeemedPoints;
+        }
+
         order.LoyaltyPointsRedeemed = redeemedPoints;
         order.LoyaltyDiscountAmount = redeemedPoints;
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
+        if (txn is not null) await txn.CommitAsync();
         return OrderDto.From(order);
     }
 
@@ -1055,6 +1154,44 @@ public class OrdersController(
     private async Task<decimal> GetTaxRatePctAsync() =>
         await taxRateCache.GetTaxRatePctAsync(tenantContext.TenantIdOrDefault,
             async () => (await db.Settings.FirstAsync()).TaxRatePct);
+
+    /// <summary>
+    /// The single way every money-mutating endpoint here (Pay / Close / Refund) commits.
+    ///
+    /// Bumps Order.PaymentVersion — the optimistic-concurrency token — so the UPDATE this
+    /// save issues is conditional on nobody else having touched the order's money state
+    /// since it was read. Two staff devices settling the same table at once (rush hour, or
+    /// one cashier double-tapping through a slow response) both pass the `order.Paid` check
+    /// at the top of Pay, because both read the row before either committed; before this,
+    /// both then inserted a full payment row and both flipped Paid, so the bill was recorded
+    /// as settled twice and every revenue/cash-drawer report ran over by one bill.
+    ///
+    /// Now the loser's UPDATE matches zero rows. EF wraps SaveChanges in a transaction, so
+    /// its OrderPayment INSERTs roll back with it — the bill is never left half-settled, and
+    /// the caller gets a 409 telling it to reload rather than a phantom success.
+    /// </summary>
+    private async Task SavePaymentStateAsync(Order order)
+    {
+        order.PaymentVersion++;
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ApiConflictException("This bill was just updated on another device — reload the order and check what's already been paid before trying again.");
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "23505" } pg
+            && pg.ConstraintName == "IX_OrderPayments_TenantId_OrderId_LedgerIndex")
+        {
+            // The DB-level half of the same guard (see OrderPayment.LedgerIndex): both racers
+            // computed the same next ledger slot. Reaching here means the token check above
+            // somehow didn't fire, so treat it as the same conflict rather than a 500.
+            // Narrowed to this exact constraint so an unrelated save failure still surfaces as
+            // a real 500 with its stack trace logged, same as ConfirmGuestOrder's 23505 catch.
+            throw new ApiConflictException("This bill was just updated on another device — reload the order and check what's already been paid before trying again.");
+        }
+    }
 
     /// <summary>Inline Owner/Manager check for per-item conditional gating (mirrors the
     /// role check NotificationsController does in a method body).</summary>
@@ -1102,8 +1239,11 @@ public class OrdersController(
             if (!req.AllowPartial && Math.Abs(splitTotal - remaining) > 0.01m)
                 throw new ApiValidationException($"Split amounts (₹{splitTotal:0.00}) must add up to the remaining balance (₹{remaining:0.00}).");
 
+            // LedgerIndex counts up from whatever's already on the order, so a split takes
+            // consecutive slots and a later top-up continues the sequence — see
+            // OrderPayment.LedgerIndex for why the slots have to be unique per order.
             foreach (var split in splits)
-                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = split.Method.Trim(), Amount = split.Amount });
+                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = split.Method.Trim(), Amount = split.Amount, LedgerIndex = order.Payments.Count });
             order.PaymentMethod = order.Payments.Count > 1 ? "Multiple" : order.Payments[0].Method;
 
             // Balance fully covered (allowing for rounding) — settle for real. Otherwise this
@@ -1112,7 +1252,7 @@ public class OrdersController(
             // OrderDto.From) and a later Pay call collects the rest.
             if (order.Total - newTotalPaid > 0.01m)
             {
-                await db.SaveChangesAsync();
+                await SavePaymentStateAsync(order);
                 return OrderDto.From(order);
             }
         }
@@ -1132,7 +1272,7 @@ public class OrdersController(
             // again would make the ledger exceed the bill.
             var owed = order.Total - order.Payments.Sum(p => p.Amount);
             if (owed > 0)
-                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = method, Amount = owed });
+                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = method, Amount = owed, LedgerIndex = order.Payments.Count });
             order.PaymentMethod = order.Payments.Count > 1 ? "Multiple" : method;
         }
 
@@ -1143,12 +1283,12 @@ public class OrdersController(
         // doesn't); if not, Close finalizes it without a further payment.
         if (req?.KeepOpen == true)
         {
-            await db.SaveChangesAsync();
+            await SavePaymentStateAsync(order);
             return OrderDto.From(order);
         }
 
         await CloseOrderAsync(order);
-        await db.SaveChangesAsync();
+        await SavePaymentStateAsync(order);
         return OrderDto.From(order);
     }
 
@@ -1192,7 +1332,7 @@ public class OrdersController(
             throw new ApiValidationException($"₹{remaining:0.00} is still due — collect that before closing.");
 
         await CloseOrderAsync(order);
-        await db.SaveChangesAsync();
+        await SavePaymentStateAsync(order);
         return OrderDto.From(order);
     }
 
@@ -1295,7 +1435,11 @@ public class OrdersController(
         order.RefundedAmount = amount;
         order.RefundReason = req.Reason;
         order.RefundedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
+        // Same money-state commit as Pay/Close: two managers refunding the same bill at once
+        // is the mirror image of the double-settle race — both pass the `order.Refunded`
+        // check above, and the loser would otherwise overwrite the winner's row and put a
+        // second refund through the day's numbers.
+        await SavePaymentStateAsync(order);
 
         await audit.LogAsync(AuditAction.Refund, AuditResource.Order, order.Id.ToString(),
             $"Refunded {amount:C} for order {order.Id}. Reason: {req.Reason ?? "not specified"}.", AuditSeverity.High);

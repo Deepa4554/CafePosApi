@@ -760,6 +760,14 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (m.ProductType == ProductType.Independent && m.LinkedInventoryItemId is int linkedId)
                 inventoryIds.Add(linkedId);
 
+        // Lock every ingredient this fire touches BEFORE their balances are read below — see
+        // InventoryBatchService.LockIngredientsAsync. Two orders sharing an ingredient would
+        // otherwise both start from the same balance and the second save would overwrite the
+        // first's deduction. Taking the whole set in one ordered statement (rather than one
+        // lock per Deduct call) also stops two concurrent fires with overlapping ingredients
+        // from grabbing them in opposite orders and deadlocking.
+        await InventoryBatchService.LockIngredientsAsync(db, inventoryIds);
+
         var inventory = await TenantScoped(db.InventoryItems, explicitTenantId)
             .Where(i => inventoryIds.Contains(i.Id))
             .ToDictionaryAsync(i => i.Id);

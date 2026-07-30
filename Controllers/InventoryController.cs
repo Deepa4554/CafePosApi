@@ -63,7 +63,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
         // Initial stock becomes the item's first batch — everything traces back to a lot
         // from here on, same as a restock/GRN.
-        InventoryBatchService.CreateBatch(db, item, req.Max, item.UnitCost, req.ExpiryDate,
+        await InventoryBatchService.CreateBatchAsync(db, item, req.Max, item.UnitCost, req.ExpiryDate,
             InventoryTransactionType.Purchase, referenceId: null, CurrentUserId(), CurrentUserName());
         await db.SaveChangesAsync();
         return CreatedAtAction(nameof(List), new { id = item.Id }, InventoryItemDto.From(item));
@@ -119,7 +119,10 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
             throw new ApiValidationException("Restock quantity must be greater than zero.");
 
         var cost = req.UnitCost ?? item.UnitCost;
-        InventoryBatchService.CreateBatch(db, item, req.Quantity, cost, req.ExpiryDate,
+        // Assigning UnitCost/LastRestockAt AFTER this call is deliberate: CreateBatchAsync
+        // refreshes the locked balance, and doing it the other way round would be reading the
+        // cost off a row this request hadn't locked yet.
+        await InventoryBatchService.CreateBatchAsync(db, item, req.Quantity, cost, req.ExpiryDate,
             InventoryTransactionType.Purchase, referenceId: null, CurrentUserId(), CurrentUserName());
         if (req.UnitCost is decimal) item.UnitCost = cost;
         item.LastRestockAt = DateTime.UtcNow;

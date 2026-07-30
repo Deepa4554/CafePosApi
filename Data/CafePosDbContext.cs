@@ -4,6 +4,7 @@ using CafePOS.Api.Domain;
 using CafePOS.Api.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CafePOS.Api.Data;
@@ -11,6 +12,76 @@ namespace CafePOS.Api.Data;
 public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenantContext tenant, IRealtimeNotifier realtime, IPushNotificationSender pushSender, IWhatsAppEventPublisher whatsAppEvents) : DbContext(options)
 {
     private readonly ITenantContext _tenant = tenant;
+
+    // ---------- Stock-movement serialization ----------
+    // Every InventoryItem.Current / InventoryBatch.Quantity move is a read-modify-write, and
+    // EF writes the absolute result (SET "Current" = 87), not a delta. Two orders firing the
+    // same ingredient at once therefore both read the same starting balance and whichever
+    // SaveChanges commits last silently overwrites the other's deduction — the
+    // InventoryTransaction ledger stays correct while Current drifts upward, so staff keep
+    // selling stock that's already gone and the low-stock alert never fires. The fix is a
+    // Postgres row lock taken before the balance is read; these three members are the plumbing
+    // that lets InventoryBatchService hold that lock until SaveChanges commits.
+
+    /// <summary>The transaction the row locks live inside — opened lazily by
+    /// <see cref="BeginStockScopeAsync"/>, committed (or rolled back) by
+    /// <see cref="SaveChangesAsync"/>. Null when this unit of work hasn't moved stock, or when
+    /// the caller already had a transaction of its own: the locks then ride along inside theirs
+    /// and it stays theirs to commit.</summary>
+    private IDbContextTransaction? _stockTxn;
+
+    /// <summary>InventoryItem ids this unit of work already holds a row lock on. Nobody else can
+    /// have moved those rows since, so a second movement on the same ingredient must reuse the
+    /// in-memory figure rather than re-reading the (now older) database one.</summary>
+    private readonly HashSet<int> _lockedInventoryItemIds = [];
+
+    public bool HoldsStockLock(int inventoryItemId) => _lockedInventoryItemIds.Contains(inventoryItemId);
+
+    public void MarkStockLocked(IEnumerable<int> inventoryItemIds) => _lockedInventoryItemIds.UnionWith(inventoryItemIds);
+
+    /// <summary>Ensures this unit of work is inside a transaction, so a <c>SELECT … FOR UPDATE</c>
+    /// issued next actually holds until the deduction commits — outside one, Postgres releases
+    /// the lock the instant the statement returns and it's silently useless. Returns false on the
+    /// non-relational in-memory provider used for local dev/tests, which only ever runs
+    /// single-process and so has no race to guard against.</summary>
+    public async Task<bool> BeginStockScopeAsync(CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational()) return false;
+        // Somebody else's transaction (OrderBuildingService.BuildOrderAsync opens one around
+        // order creation) — the locks are held for its lifetime and it commits them.
+        if (Database.CurrentTransaction is not null) return true;
+        _stockTxn ??= await Database.BeginTransactionAsync(cancellationToken);
+        return true;
+    }
+
+    /// <summary>Ends the stock scope opened above: commit releases the row locks with the
+    /// deduction durably written, rollback drops them along with everything else the failed save
+    /// wrote. Called on both exits of <see cref="SaveChangesAsync"/> so the rows are never held
+    /// hostage until the request scope disposes — callers that catch DbUpdateException and turn
+    /// it into a 409 (OrdersController.Fire/ConfirmGuestOrder) depend on that.</summary>
+    private async Task EndStockScopeAsync(bool commit)
+    {
+        _lockedInventoryItemIds.Clear();
+        if (_stockTxn is null) return;
+        var txn = _stockTxn;
+        _stockTxn = null;
+        try
+        {
+            // CancellationToken.None: a cancelled request still has to unwind its transaction,
+            // and a throw from here would mask the save failure that sent us down this path.
+            if (commit) await txn.CommitAsync(CancellationToken.None);
+            else await txn.RollbackAsync(CancellationToken.None);
+        }
+        catch when (!commit)
+        {
+            // A broken connection is usually what failed the save in the first place; the
+            // dispose below still cleans up, and rethrowing would mask that real exception.
+        }
+        finally
+        {
+            await txn.DisposeAsync();
+        }
+    }
 
     // Npgsql only accepts Kind=Utc DateTimes for "timestamp with time zone"
     // columns. Client JSON (e.g. Task.DueDate, Shift times, Coupon.ExpiresAt)
@@ -284,6 +355,17 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
                 v => v == null ? 0 : v.Aggregate(0, (h, s) => HashCode.Combine(h, s.GetHashCode())),
                 v => v == null ? null : v.ToList()));
 
+        // ---- Double-settle guard (two halves of one rule) ----
+        // 1. Every UPDATE to an Order carries its PaymentVersion in the WHERE clause, so a
+        //    Pay/Close/Refund that raced another one and lost matches zero rows and throws
+        //    DbUpdateConcurrencyException instead of overwriting the winner's settle.
+        modelBuilder.Entity<Order>().Property(o => o.PaymentVersion).IsConcurrencyToken();
+        // 2. One tender per ledger slot per order, enforced by Postgres. The token above is
+        //    what actually stops the race; this is the constraint that makes a duplicate
+        //    tender unrepresentable even if some future code path forgets to go through
+        //    SavePaymentStateAsync. Tenant-prefixed like every other index here.
+        modelBuilder.Entity<OrderPayment>().HasIndex(p => new { p.TenantId, p.OrderId, p.LedgerIndex }).IsUnique();
+
         // Codes only need to be unique within a cafe — two different tenants can
         // both have a table "T1" or a coupon "WELCOME10" without colliding.
         modelBuilder.Entity<CafeTable>().HasIndex(t => new { t.TenantId, t.Code }).IsUnique();
@@ -526,7 +608,20 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         var newNotifications = CollectNewNotifications();
         var whatsAppStatusTransitions = CollectWhatsAppStatusTransitions();
         var whatsAppBillGenerated = CollectWhatsAppBillGeneratedOrders();
-        var result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        int result;
+        try
+        {
+            result = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+        catch
+        {
+            await EndStockScopeAsync(commit: false);
+            throw;
+        }
+        // Commits the stock scope (if one was opened) in the same breath as the save it
+        // protects — this is the point the ingredient row locks are released, so no concurrent
+        // deduction can have read a balance between this save and the lock being taken.
+        await EndStockScopeAsync(commit: true);
         // Fire-and-forget: the save already succeeded, a slow/failed push must never make the
         // caller's request slower or fail because of it (see RealtimeNotifier).
         if (affectedTenantIds.Count > 0)

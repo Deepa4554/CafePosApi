@@ -89,6 +89,11 @@ public class StockTakesController(CafePosDbContext db) : ControllerBase
         if (counted.Count == 0) throw new ApiValidationException("Count at least one item before finalizing.");
 
         var inventoryIds = counted.Select(l => l.InventoryItemId).ToList();
+        // Locked before the read below because `liveBalance` is what every delta on this
+        // finalize is measured against — computing it from a balance another request is
+        // concurrently moving would post an adjustment that lands nowhere near the counted
+        // figure. See InventoryBatchService.LockIngredientsAsync.
+        await InventoryBatchService.LockIngredientsAsync(db, inventoryIds);
         var inventory = await db.InventoryItems.Where(i => inventoryIds.Contains(i.Id)).ToDictionaryAsync(i => i.Id);
 
         foreach (var line in counted)
@@ -106,7 +111,7 @@ public class StockTakesController(CafePosDbContext db) : ControllerBase
                 await InventoryBatchService.ConsumeFifoAsync(db, ingredient, -delta, InventoryTransactionType.ManualAdjustment,
                     referenceId, orderItemId: null, reason, wasteReasonCode: null, CurrentUserId(), CurrentUserName());
             else
-                InventoryBatchService.CreateBatch(db, ingredient, delta, ingredient.UnitCost, expiryDate: null,
+                await InventoryBatchService.CreateBatchAsync(db, ingredient, delta, ingredient.UnitCost, expiryDate: null,
                     InventoryTransactionType.ManualAdjustment, referenceId, CurrentUserId(), CurrentUserName());
         }
 

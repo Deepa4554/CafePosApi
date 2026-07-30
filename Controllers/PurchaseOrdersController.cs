@@ -105,6 +105,11 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
         }
 
         var inventoryIds = order.Items.Select(i => i.InventoryItemId).ToList();
+        // Locked before the balances are read, so the weighted-average cost below and the
+        // additions themselves both work off the latest committed figures and can't be
+        // overwritten by a sale firing the same ingredient mid-receive — see
+        // InventoryBatchService.LockIngredientsAsync.
+        await InventoryBatchService.LockIngredientsAsync(db, inventoryIds);
         var inventory = await db.InventoryItems.Where(i => inventoryIds.Contains(i.Id)).ToDictionaryAsync(i => i.Id);
 
         foreach (var received in req.Items)
@@ -133,7 +138,7 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
                 : received.UnitCost;
             ingredient.LastRestockAt = DateTime.UtcNow;
 
-            InventoryBatchService.CreateBatch(db, ingredient, addedInIngredientUnit, received.UnitCost, received.ExpiryDate,
+            await InventoryBatchService.CreateBatchAsync(db, ingredient, addedInIngredientUnit, received.UnitCost, received.ExpiryDate,
                 InventoryTransactionType.Purchase, order.Id.ToString(), CurrentUserId(), CurrentUserName());
         }
 

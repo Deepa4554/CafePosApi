@@ -111,6 +111,11 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
                 order.RefundedAmount = request.Amount ?? 0;
                 order.RefundReason = request.Description;
                 order.RefundedAt = DateTime.UtcNow;
+                // Joins the same optimistic-concurrency guard OrdersController.Refund uses —
+                // see Order.PaymentVersion. Without the bump, two Owners approving the same
+                // request in the same instant both pass the Refunded check above and both
+                // commit, putting the refund through the day's numbers twice.
+                order.PaymentVersion++;
                 break;
             }
             case ApprovalType.Discount when request.LinkedEntityId is int discountOrderId:
