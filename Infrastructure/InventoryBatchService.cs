@@ -188,6 +188,7 @@ public static class InventoryBatchService
                 Category = NotificationCategory.Inventory,
                 Channel = NotificationChannel.InApp,
                 ActionUrl = "/inventory",
+                TargetRolesCsv = NotificationAudience.Management,
             });
         }
     }
@@ -318,6 +319,7 @@ public static class InventoryBatchService
                 Category = NotificationCategory.Inventory,
                 Channel = NotificationChannel.InApp,
                 ActionUrl = "/inventory",
+                TargetRolesCsv = NotificationAudience.Management,
             });
         }
         // Counted back above the reorder line — re-arm so a later drop raises a fresh alert,

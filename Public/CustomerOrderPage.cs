@@ -353,7 +353,11 @@ public static class CustomerOrderPage
       <div class="order-total" id="placed-total"></div>
       <div class="action-row">
         <button class="secondary-btn" id="add-more-btn">Add more items</button>
-        <button class="place-btn" id="request-bill-btn">Request Bill</button>
+        <!-- Request Bill is hidden for now (product decision), not deleted: the whole flow
+             behind it still works end to end — /session/request-bill, the LOCKED status, and
+             the bill screen — so re-enabling it later is just dropping this style back off.
+             Guests settle at the counter meanwhile. -->
+        <button class="place-btn" id="request-bill-btn" style="display:none">Request Bill</button>
       </div>
     </div>
   </div>
@@ -395,6 +399,15 @@ public static class CustomerOrderPage
     table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {}, browseOnly: false,
     order: null, // last known OrderDto from the server (session-scoped), or null
     vegOnly: false,
+    // True while the guest is deliberately on the menu building a follow-up round after an
+    // earlier round already fired. Without it, handleStateUpdate's "already fired -> show the
+    // placed screen" rule ran on every 5s poll tick and yanked the guest off the menu the
+    // moment they added anything: the item landed in the cart unfired (correct), the next tick
+    // bounced them to "Order sent to the kitchen!", and because that screen listed unfired
+    // lines too it looked like each tap had fired its own KOT. Nothing had fired at all — the
+    // items sat in the cart and the kitchen never saw them. Cleared once the round is actually
+    // placed, or when the guest leaves the menu.
+    addingMore: false,
   };
   var pollTimer = null;
   // One entry per cart line while its cart/items POST is in flight — see changeLineQty.
@@ -504,7 +517,10 @@ public static class CustomerOrderPage
     if (s.order && s.order.cancelled) { showEnded('The cafe couldn\'t accept your order. Please speak to a staff member.'); return; }
     if (s.status === 'LOCKED') { showBillScreen(s); return; }
     if (s.order && s.order.pendingStaffConfirmation) { showWaitingScreen(); return; }
-    if (s.order && s.order.currentFireBatch > 0) { showPlacedScreen(s); return; }
+    // state.addingMore is what keeps a guest mid-round on the menu — see its declaration.
+    // Everything above this line still wins over it: a cancelled order, a bill requested from
+    // another device, or a round awaiting staff confirmation all outrank "was picking items".
+    if (s.order && s.order.currentFireBatch > 0 && !state.addingMore) { showPlacedScreen(s); return; }
 
     // Most poll ticks bring back an unchanged cart — nothing on this session changed since
     // the last tick. Skip the render entirely rather than tearing down and re-decoding every
@@ -559,7 +575,16 @@ public static class CustomerOrderPage
     document.getElementById('placed-table-line').textContent = document.getElementById('table-line').textContent;
     var itemsEl = document.getElementById('placed-items');
     itemsEl.innerHTML = '';
-    (s.order.items || []).forEach(function (item) {
+    var allItems = (s.order.items || []).filter(function (i) { return !i.voided; });
+    // Split by fireBatch, because this screen says "Order sent to the kitchen!" and that has
+    // to be true of everything under it. It used to list every line regardless, so an item
+    // still sitting unfired in the cart appeared here with a status pill as though the kitchen
+    // had it — the guest stopped waiting for a Place Order that never happened, and the food
+    // was never made. Anything unfired now shows separately, as the cart it actually is.
+    var sentItems = allItems.filter(function (i) { return i.fireBatch > 0; });
+    var pendingItems = allItems.filter(function (i) { return i.fireBatch === 0; });
+
+    sentItems.forEach(function (item) {
       var row = el('div', null);
       row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;text-align:left';
       var desc = lineDescriptor(item);
@@ -569,6 +594,21 @@ public static class CustomerOrderPage
       row.appendChild(badge);
       itemsEl.appendChild(row);
     });
+
+    if (pendingItems.length > 0) {
+      var note = el('div', null, 'Not sent yet — tap "Add more items" to review and send');
+      note.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px dashed #d8cfc4;font-size:13px;color:#8a7a68;text-align:left';
+      itemsEl.appendChild(note);
+      pendingItems.forEach(function (item) {
+        var row = el('div', null);
+        row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;text-align:left;opacity:.75';
+        var desc = lineDescriptor(item);
+        row.appendChild(el('span', null, item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : '')));
+        row.appendChild(el('span', 'status-pill', 'IN CART'));
+        itemsEl.appendChild(row);
+      });
+    }
+
     document.getElementById('placed-total').textContent = money(s.order.total);
     document.getElementById('placed-screen').style.display = 'block';
     startPolling();
@@ -676,10 +716,10 @@ public static class CustomerOrderPage
           row.appendChild(el('span', 'line-label', line.qty + '× ' + (lineDescriptor(line) || 'Regular')));
           var stepper = el('div', 'stepper');
           var minus = el('button', null, '−');
-          minus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty - 1); };
+          minus.onclick = function (e) { e.stopPropagation(); changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty - 1); };
           var qtyEl = el('span', 'qty', String(line.qty));
           var plus = el('button', null, '+');
-          plus.onclick = function () { changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty + 1); };
+          plus.onclick = function (e) { e.stopPropagation(); changeLineQty(item.id, line.variantId, lineOptionIds(line), line.qty + 1); };
           stepper.appendChild(minus);
           stepper.appendChild(qtyEl);
           stepper.appendChild(plus);
@@ -697,22 +737,22 @@ public static class CustomerOrderPage
     if (state.browseOnly) return;
     if (hasOptions) {
       var customize = el('button', 'customize-btn', 'Customize');
-      customize.onclick = function () { openItemOptions(item); };
+      customize.onclick = function (e) { e.stopPropagation(); openItemOptions(item); };
       actionsSlot.appendChild(customize);
     } else {
       var stepper2 = el('div', 'stepper');
       if (qty > 0) {
         var minus2 = el('button', null, '−');
-        minus2.onclick = function () { changeQty(item.id, -1); };
+        minus2.onclick = function (e) { e.stopPropagation(); changeQty(item.id, -1); };
         var qtyEl2 = el('span', 'qty', String(qty));
         var plus2 = el('button', null, '+');
-        plus2.onclick = function () { changeQty(item.id, 1); };
+        plus2.onclick = function (e) { e.stopPropagation(); changeQty(item.id, 1); };
         stepper2.appendChild(minus2);
         stepper2.appendChild(qtyEl2);
         stepper2.appendChild(plus2);
       } else {
         var add = el('button', 'add', 'Add');
-        add.onclick = function () { changeQty(item.id, 1); };
+        add.onclick = function (e) { e.stopPropagation(); changeQty(item.id, 1); };
         stepper2.appendChild(add);
       }
       actionsSlot.appendChild(stepper2);
@@ -774,6 +814,34 @@ public static class CustomerOrderPage
         card.appendChild(actionsSlot);
 
         fillItemActions(item, linesSlot, actionsSlot);
+
+        // The whole card is the tap target, not just the small "Add" button in the corner —
+        // a thumb on a phone is nowhere near as precise as a mouse on the POS, and hunting for
+        // that button is what made ordering feel clumsy.
+        //
+        // The stepper/Customize/per-line buttons (see fillItemActions) each call
+        // e.stopPropagation() in their own handler — that's the ONLY thing that reliably keeps
+        // a button tap from also being read as a card tap. An e.target.closest('.item-actions-
+        // slot') check here looked like it should do the same job and doesn't: tapping "Add"
+        // runs the button's own handler first, which calls changeQty -> patchItemCard, which
+        // synchronously replaces actionsSlot's innerHTML (new qty, new stepper) WHILE this
+        // click event is still bubbling. That detaches the original button from the DOM before
+        // the event reaches here, so e.target (still that now-parentless button) no longer has
+        // '.item-actions-slot' as an ancestor and closest() finds nothing — the guard silently
+        // fails and this handler adds a second unit on top of the one the button just added.
+        // Same failure, opposite direction, is why "−" looked like it did nothing: −1 from the
+        // button immediately followed by +1 from this handler net out to zero. stopPropagation
+        // stops the event before any of that DOM-mutation timing can matter; the closest()
+        // check stays as harmless defense-in-depth, not the actual guard.
+        if (!state.browseOnly && item.available) {
+          card.style.cursor = 'pointer';
+          card.onclick = function (e) {
+            if (e.target.closest('.item-actions-slot') || e.target.closest('.item-lines-slot')) return;
+            if (hasOptions) { openItemOptions(item); return; }
+            changeQty(item.id, 1);
+          };
+        }
+
         root.appendChild(card);
       });
     });
@@ -1139,13 +1207,39 @@ public static class CustomerOrderPage
 
   function renderCartBar() {
     var bar = document.getElementById('cart-bar');
+    var placeBtn = document.getElementById('place-btn');
     var count = cartCount();
-    if (count === 0) { bar.style.display = 'none'; return; }
+
+    if (count === 0) {
+      // Mid-round with nothing picked yet: the poll no longer drags the guest back to the
+      // placed screen (that's the whole point of state.addingMore), so without this there'd be
+      // no way off the menu for someone who changed their mind. Same bar, different job.
+      if (state.addingMore) {
+        bar.style.display = 'flex';
+        document.getElementById('cart-count').textContent = 'Nothing added yet';
+        document.getElementById('cart-total').textContent = '';
+        placeBtn.textContent = 'Back to your order';
+        placeBtn.disabled = false;
+        placeBtn.onclick = function () {
+          state.addingMore = false;
+          if (state.order) showPlacedScreen({ order: state.order });
+        };
+        return;
+      }
+      bar.style.display = 'none';
+      return;
+    }
+
     bar.style.display = 'flex';
     var subtotal = cartSubtotal();
     var tax = subtotal * (state.taxRatePct / 100);
     document.getElementById('cart-count').textContent = count + (count === 1 ? ' item' : ' items') + ' · incl. tax';
     document.getElementById('cart-total').textContent = money(subtotal + tax);
+    // Reclaim the button from the empty-cart branch above — it may still be wired to "Back to
+    // your order" from a moment ago, and the label has to say what this round actually does.
+    placeBtn.textContent = state.addingMore ? 'Send to Kitchen' : 'Place Order';
+    placeBtn.disabled = false;
+    placeBtn.onclick = placeOrder;
   }
 
   function placeOrder() {
@@ -1160,12 +1254,26 @@ public static class CustomerOrderPage
     fetchJson(sessionBase + '/order', { method: 'POST' }).then(function (s) {
       document.getElementById('processing-overlay').classList.remove('show');
       state.order = s.order;
+      // Every line that was in state.cart just fired and is no longer an unfired (fireBatch:0)
+      // line — but state.cart itself was never told that. Left unsynced, a later trip to
+      // "Add more items" reads the SAME stale quantities off it and renders already-fired
+      // items as if they still had an editable stepper. Tapping "−" on one of those doesn't
+      // touch the fired line at all (applyLocalQty only ever matches an unfired line for that
+      // menu item) — finding none, it silently creates a BRAND NEW unfired line instead, so a
+      // guest trying to correct "4 Ice Teas" down to 3 actually orders 3 MORE. Resyncing here,
+      // right after the fire, means every card starts the next round at zero, which is what
+      // "already sent to the kitchen" actually means.
+      syncCartFromOrder();
+      // The round the guest was building is now a real KOT of its own (the server fires
+      // everything unfired as a fresh batch — see GuestSessionController.PlaceOrder), so this
+      // is where "still picking items" ends.
+      state.addingMore = false;
       if (s.order && s.order.pendingStaffConfirmation) { showWaitingScreen(); return; }
       showPlacedScreen(s);
     }).catch(function (err) {
       document.getElementById('processing-overlay').classList.remove('show');
       btn.disabled = false;
-      btn.textContent = 'Place Order';
+      btn.textContent = state.addingMore ? 'Send to Kitchen' : 'Place Order';
       if (err.status === 410) { showEnded(err.message || 'This session has ended.'); return; }
       showError(err.message);
     });
@@ -1238,7 +1346,14 @@ public static class CustomerOrderPage
         : 'Browsing the menu';
       document.getElementById('place-btn').onclick = placeOrder;
       document.getElementById('join-btn').onclick = joinSession;
-      document.getElementById('add-more-btn').onclick = showMenuScreen;
+      document.getElementById('add-more-btn').onclick = function () {
+        state.addingMore = true;
+        // Belt-and-suspenders alongside placeOrder's own resync: whatever's in state.order
+        // right now is authoritative for what's actually still unfired, so re-derive
+        // state.cart from it before the menu renders off that map.
+        syncCartFromOrder();
+        showMenuScreen();
+      };
       document.getElementById('request-bill-btn').onclick = requestBill;
       document.getElementById('veg-only-toggle').onclick = function () {
         state.vegOnly = !state.vegOnly;

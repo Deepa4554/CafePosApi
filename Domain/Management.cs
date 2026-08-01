@@ -25,7 +25,9 @@ public enum NotificationChannel { Push, Email, Sms, WhatsApp, InApp }
 // OrderPendingConfirmation is deliberately its own category (not OrderPlaced) — kitchen
 // roles (Chef/KitchenStaff) are filtered to only NotificationCategory.OrderPlaced
 // (NotificationsController.List), and they can't act on a confirmation prompt anyway.
-public enum NotificationCategory { Order, OrderPlaced, OrderPendingConfirmation, Inventory, Billing, Staff, System, Marketing, AiInsight, Task }
+// Persisted as its own name, not an ordinal (see CafePosDbContext.OnModelCreating's
+// HasConversion<string>), so new members are safe to append without rewriting existing rows.
+public enum NotificationCategory { Order, OrderPlaced, OrderPendingConfirmation, Inventory, Billing, Staff, System, Marketing, AiInsight, Task, Approval }
 public enum DeliveryStatus { Pending, Sent, Delivered, Failed, Retrying }
 
 public class AppNotification : ITenantScoped
@@ -48,6 +50,49 @@ public class AppNotification : ITenantScoped
     /// hidden from every other user's Notification Center and only that user's devices get
     /// the push, regardless of category.</summary>
     public int? TargetUserId { get; set; }
+    /// <summary>Null = every user the category already reaches (existing tenant-wide behavior).
+    /// Set = comma-separated AppRole names, and only users holding one of them see this in their
+    /// Notification Center or get the push — the middle ground between tenant-wide and
+    /// TargetUserId, for categories that are management's business but not one named person's
+    /// (Billing, Approval, Payroll). Matching is always done on comma-wrapped values so that
+    /// "Staff" can never match "KitchenStaff" — see FcmPushNotificationSender.ParseRoles and
+    /// NotificationsController.List.</summary>
+    public string? TargetRolesCsv { get; set; }
+}
+
+/// <summary>
+/// One staff member's personal mute for a notification category — the per-USER tier, sitting
+/// under the per-TENANT one in NotificationPreferences (a category the Owner has switched off
+/// for the cafe never reaches anybody, regardless of these rows).
+///
+/// Absence means enabled: a row only ever exists once someone has deliberately turned a
+/// category off (or back on again), so "default on" needs no backfill for existing users and no
+/// row at all for the overwhelmingly common case of a user who never touches these settings.
+///
+/// Only ever consulted for BROADCAST notifications — anything addressed to one person via
+/// AppNotification.TargetUserId (a task assigned to you, your own approval's outcome) is always
+/// delivered, since that's direct correspondence rather than a feed someone can opt out of.
+/// See FcmPushNotificationSender for the push side and NotificationsController.List for in-app.
+/// </summary>
+public class UserNotificationPreference : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int UserId { get; set; }
+    public NotificationCategory Category { get; set; }
+    public bool Enabled { get; set; } = true;
+}
+
+/// <summary>Named audiences for AppNotification.TargetRolesCsv, built from the AppRole members
+/// themselves rather than hand-typed strings so a role rename can't silently turn into a CSV
+/// entry that matches nobody (an audience that quietly reaches zero people is invisible until
+/// someone notices a notification never arrived).</summary>
+public static class NotificationAudience
+{
+    /// <summary>Notices only whoever runs the cafe can act on — low stock, shift reports.
+    /// A waiter has no screen to do anything about either, so broadcasting them tenant-wide
+    /// just trains everyone to ignore the bell.</summary>
+    public static readonly string Management = string.Join(',', new[] { AppRole.Owner, AppRole.Manager });
 }
 
 // ---------- Approvals ----------

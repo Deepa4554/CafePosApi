@@ -79,7 +79,8 @@ public class StockTakesController(CafePosDbContext db) : ControllerBase
     /// counted value and writes a ManualAdjustment ledger row for the delta. Variance is
     /// stored against the original SystemQty snapshot, for reporting.</summary>
     [HttpPost("{id:int}/finalize")]
-    public async Task<ActionResult<StockTakeDto>> Finalize(int id)
+    public Task<ActionResult<StockTakeDto>> Finalize(int id) =>
+        DbConcurrency.InTransactionAsync<ActionResult<StockTakeDto>>(db, async () =>
     {
         var stockTake = await db.StockTakes.Include(s => s.Lines).FirstOrDefaultAsync(s => s.Id == id);
         if (stockTake is null) return NotFound();
@@ -94,6 +95,9 @@ public class StockTakesController(CafePosDbContext db) : ControllerBase
         // concurrently moving would post an adjustment that lands nowhere near the counted
         // figure. See InventoryBatchService.LockIngredientsAsync.
         await InventoryBatchService.LockIngredientsAsync(db, inventoryIds);
+        // Read only after the lock above, so liveBalance below reflects the latest committed
+        // figure. A sale committing between the read and the save used to be silently erased:
+        // this finalize wrote back a figure computed from the balance as it stood before it.
         var inventory = await db.InventoryItems.Where(i => inventoryIds.Contains(i.Id)).ToDictionaryAsync(i => i.Id);
 
         foreach (var line in counted)
@@ -122,7 +126,7 @@ public class StockTakesController(CafePosDbContext db) : ControllerBase
 
         await db.SaveChangesAsync();
         return (await ToDtos([stockTake]))[0];
-    }
+    });
 
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)

@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260801064523_AddTrigramSearchIndexes")]
+    partial class AddTrigramSearchIndexes
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -111,9 +114,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<DateTime?>("ScheduledAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("TargetRolesCsv")
-                        .HasColumnType("text");
 
                     b.Property<int?>("TargetUserId")
                         .HasColumnType("integer");
@@ -522,9 +522,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<string>("Address")
                         .HasColumnType("text");
 
-                    b.Property<bool>("ApprovalAlertsEnabled")
-                        .HasColumnType("boolean");
-
                     b.Property<string>("BusinessName")
                         .IsRequired()
                         .HasColumnType("text");
@@ -587,9 +584,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<decimal?>("Longitude")
                         .HasColumnType("numeric");
-
-                    b.Property<string>("NotificationCategoryOverridesJson")
-                        .HasColumnType("text");
 
                     b.Property<bool>("OrderPendingConfirmationAlertsEnabled")
                         .HasColumnType("boolean");
@@ -1697,10 +1691,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<string>("PaymentMethod")
                         .HasColumnType("text");
 
-                    b.Property<int>("PaymentVersion")
-                        .IsConcurrencyToken()
-                        .HasColumnType("integer");
-
                     b.Property<bool>("PendingStaffConfirmation")
                         .HasColumnType("boolean");
 
@@ -1993,9 +1983,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int>("LedgerIndex")
-                        .HasColumnType("integer");
-
                     b.Property<string>("Method")
                         .IsRequired()
                         .HasColumnType("text");
@@ -2013,9 +2000,6 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("OrderId");
 
                     b.HasIndex("TenantId");
-
-                    b.HasIndex("TenantId", "OrderId", "LedgerIndex")
-                        .IsUnique();
 
                     b.ToTable("OrderPayments");
                 });
@@ -3048,39 +3032,6 @@ namespace CafePOS.Api.Migrations
                     b.ToTable("TokenCounters");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.UserNotificationPreference", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("Category")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<bool>("Enabled")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.HasIndex("UserId", "Category")
-                        .IsUnique();
-
-                    b.ToTable("UserNotificationPreferences");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.Variant", b =>
                 {
                     b.Property<int>("Id")
@@ -3311,25 +3262,6 @@ namespace CafePOS.Api.Migrations
                         .IsUnique();
 
                     b.ToTable("WhatsAppSessions");
-                });
-
-            modelBuilder.Entity("Microsoft.AspNetCore.DataProtection.EntityFrameworkCore.DataProtectionKey", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("FriendlyName")
-                        .HasColumnType("text");
-
-                    b.Property<string>("Xml")
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("DataProtectionKeys");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.Coupon", b =>

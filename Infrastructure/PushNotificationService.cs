@@ -19,10 +19,11 @@ public interface IPushNotificationSender
     /// <summary>Fans a push out to every device token belonging to an active user of this
     /// tenant, mirroring NotificationsController.List's role filter (kitchen roles only ever
     /// get OrderPlaced) — unless <paramref name="targetUserId"/> is set, in which case only
-    /// that one user's own devices get it (see AppNotification.TargetUserId). Never throws —
-    /// a push failure must never surface as an API error to whatever save triggered it (see
-    /// CafePosDbContext.SaveChangesAsync).</summary>
-    Task NotifyTenantAsync(int tenantId, NotificationCategory category, string title, string body, string? actionUrl, int? targetUserId = null, CancellationToken ct = default);
+    /// that one user's own devices get it (see AppNotification.TargetUserId), or
+    /// <paramref name="targetRolesCsv"/> narrows the fan-out to just the roles named in it
+    /// (see AppNotification.TargetRolesCsv). Never throws — a push failure must never surface
+    /// as an API error to whatever save triggered it (see CafePosDbContext.SaveChangesAsync).</summary>
+    Task NotifyTenantAsync(int tenantId, NotificationCategory category, string title, string body, string? actionUrl, int? targetUserId = null, string? targetRolesCsv = null, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -37,7 +38,22 @@ public interface IPushNotificationSender
 /// </summary>
 public class FcmPushNotificationSender(IServiceScopeFactory scopeFactory, ILogger<FcmPushNotificationSender> logger) : IPushNotificationSender
 {
-    public async Task NotifyTenantAsync(int tenantId, NotificationCategory category, string title, string body, string? actionUrl, int? targetUserId = null, CancellationToken ct = default)
+    /// <summary>Null when nothing was asked for (fan out to everyone the category already
+    /// reaches). An explicit-but-unparseable value yields an EMPTY list, not null — that fails
+    /// closed to zero recipients rather than silently widening a management-only notice into a
+    /// tenant-wide broadcast, which is the far worse of the two failure modes here.</summary>
+    private static List<AppRole>? ParseRoles(string? csv)
+    {
+        if (string.IsNullOrWhiteSpace(csv)) return null;
+        return csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(s => Enum.TryParse<AppRole>(s, ignoreCase: true, out var role) ? role : (AppRole?)null)
+            .Where(r => r is not null)
+            .Select(r => r!.Value)
+            .Distinct()
+            .ToList();
+    }
+
+    public async Task NotifyTenantAsync(int tenantId, NotificationCategory category, string title, string body, string? actionUrl, int? targetUserId = null, string? targetRolesCsv = null, CancellationToken ct = default)
     {
         if (FirebaseApp.DefaultInstance is null) return;
 
@@ -67,9 +83,25 @@ public class FcmPushNotificationSender(IServiceScopeFactory scopeFactory, ILogge
                 // AppUser is deliberately not ITenantScoped (see its own doc comment), and this
                 // runs detached from any request — IgnoreQueryFilters on DeviceToken so it isn't
                 // at the mercy of whatever ambient tenant a background task happens to inherit.
-                tokens = await db.Users
+                var recipients = db.Users
                     .Where(u => u.TenantId == tenantId && u.IsActive)
-                    .Where(u => !kitchenOnlyOrderPlaced || (u.Role != AppRole.Chef && u.Role != AppRole.KitchenStaff))
+                    .Where(u => !kitchenOnlyOrderPlaced || (u.Role != AppRole.Chef && u.Role != AppRole.KitchenStaff));
+
+                // Applied on top of (not instead of) the kitchen-role rule above, so a role-scoped
+                // notification can only ever narrow the audience, never smuggle a non-OrderPlaced
+                // category onto a KDS tablet by naming Chef explicitly.
+                if (ParseRoles(targetRolesCsv) is { } roles)
+                    recipients = recipients.Where(u => roles.Contains(u.Role));
+
+                // Each recipient's own mute for this category (see UserNotificationPreference).
+                // Written as "no disabled row exists" rather than "an enabled row exists" so the
+                // default is ON with zero rows — a user who has never opened these settings keeps
+                // getting everything. Only reachable on this broadcast branch: the targetUserId
+                // branch above is direct correspondence and is never muted.
+                recipients = recipients.Where(u => !db.UserNotificationPreferences.IgnoreQueryFilters()
+                    .Any(p => p.UserId == u.Id && p.Category == category && !p.Enabled));
+
+                tokens = await recipients
                     .Join(
                         db.DeviceTokens.IgnoreQueryFilters().Where(t => t.TenantId == tenantId),
                         u => u.Id, t => t.UserId, (u, t) => t.Token)

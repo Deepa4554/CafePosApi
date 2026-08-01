@@ -13,6 +13,10 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/ai")]
 [Authorize(Policy = Policies.RequirePlus)]
+// Every call here holds a request slot open while a third-party model thinks, and costs
+// real money per call. Matches the literal string Program.cs's AiLimiterPolicy const uses —
+// attribute arguments must be compile-time constants, so it can't share the const directly.
+[Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("AiLimiter")]
 public class AIController(IGeminiService gemini, CafePosDbContext db) : ControllerBase
 {
     [HttpPost("chat")]

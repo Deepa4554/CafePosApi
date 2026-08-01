@@ -8,9 +8,19 @@ public record SearchResultDto(string Category, string Id, string Title, string S
 
 [ApiController]
 [Route("api/search")]
-public class SearchController(CafePosDbContext db) : ControllerBase
+public class SearchController : ControllerBase
 {
     private const int PerCategoryLimit = 5;
+
+    private readonly CafePosDbContext db;
+
+    public SearchController(CafePosDbContext db)
+    {
+        this.db = db;
+        // Fires on (almost) every keystroke in the header search box and never writes —
+        // tracking five rows per category per keystroke is pure overhead.
+        db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+    }
 
     /// <summary>Aggregates across menu, tables, orders, customers, and inventory — powers the header search dropdown.</summary>
     [HttpGet]
@@ -24,6 +34,12 @@ public class SearchController(CafePosDbContext db) : ControllerBase
         // is Title Case, so almost every query silently returned zero results).
         // .ToLower() on both sides translates to SQL on Npgsql and evaluates fine on the
         // InMemory dev provider, unlike EF.Functions.ILike which only Npgsql supports.
+        //
+        // Contains() becomes LIKE '%term%', which no ordinary B-tree index can serve — so
+        // each of these was a full table scan, per keystroke, growing with the catalog. The
+        // AddTrigramSearchIndexes migration adds pg_trgm GIN indexes over lower(Name) etc,
+        // which Postgres CAN use for a leading wildcard, so the shape of this query is
+        // deliberately left alone: it's the index that changed, not the predicate.
         var term = q.Trim().ToLower();
         var results = new List<SearchResultDto>();
 

@@ -88,7 +88,8 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
     /// <summary>Confirms goods actually arrived — the point stock/batches/cost update. Every
     /// line on the order must be covered in one call (no partial receipt yet).</summary>
     [HttpPost("{id:int}/receive")]
-    public async Task<ActionResult<PurchaseOrderDto>> Receive(int id, ReceivePurchaseOrderRequest req)
+    public Task<ActionResult<PurchaseOrderDto>> Receive(int id, ReceivePurchaseOrderRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<PurchaseOrderDto>>(db, async () =>
     {
         var order = await db.PurchaseOrders.Include(p => p.Items).FirstOrDefaultAsync(p => p.Id == id);
         if (order is null) return NotFound();
@@ -110,6 +111,10 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
         // overwritten by a sale firing the same ingredient mid-receive — see
         // InventoryBatchService.LockIngredientsAsync.
         await InventoryBatchService.LockIngredientsAsync(db, inventoryIds);
+        // Read only after the lock above: the weighted-average cost below is computed from the
+        // pre-addition balance, so two GRNs received back-to-back for the same commonly-used
+        // ingredient used to both average against the same stale baseline — and the loser's
+        // contribution to Current and UnitCost simply vanished.
         var inventory = await db.InventoryItems.Where(i => inventoryIds.Contains(i.Id)).ToDictionaryAsync(i => i.Id);
 
         foreach (var received in req.Items)
@@ -149,7 +154,7 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
 
         await db.SaveChangesAsync();
         return await ToDto(order);
-    }
+    });
 
     /// <summary>Drops an order that never arrived. Ordered never touched stock, so there's
     /// nothing to reverse.</summary>

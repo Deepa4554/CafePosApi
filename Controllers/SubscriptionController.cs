@@ -10,7 +10,8 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/subscription")]
-public class SubscriptionController(CafePosDbContext db, IAuditService audit) : ControllerBase
+public class SubscriptionController(
+    CafePosDbContext db, IAuditService audit, ITenantContext tenantContext, ISubscriptionCache subscriptions) : ControllerBase
 {
     [HttpGet]
     public async Task<SubscriptionDto> Get()
@@ -61,6 +62,9 @@ public class SubscriptionController(CafePosDbContext db, IAuditService audit) : 
             : DateTime.UtcNow.AddMonths(1);
 
         await db.SaveChangesAsync();
+        // The plan gates read through a short-TTL cache (see ISubscriptionCache) — drop the
+        // entry so an upgrade unlocks its screens on the very next request, not a minute later.
+        subscriptions.Invalidate(tenantContext.TenantIdOrDefault);
         await audit.LogAsync(AuditAction.SubscriptionChange, AuditResource.Subscription, sub.Id.ToString(),
             $"Changed plan from {oldPlan} to {req.Plan}.", AuditSeverity.High);
 

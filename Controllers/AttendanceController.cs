@@ -124,6 +124,7 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
             Category = NotificationCategory.Staff,
             Channel = NotificationChannel.InApp,
             ActionUrl = "/attendance",
+            TargetRolesCsv = NotificationAudience.Management,
         });
 
         await db.SaveChangesAsync();

@@ -19,7 +19,23 @@ public record NotificationDto(int Id, string Title, string Body, string Category
         n.Id, n.Title, n.Body, n.Category.ToString().ToUpperInvariant(), n.Channel.ToString().ToUpperInvariant(),
         n.IsRead, n.IsArchived, n.DeliveryStatus.ToString().ToUpperInvariant(), n.CreatedAt, n.ActionUrl);
 }
-public record CreateNotificationRequest(string Title, string Body, NotificationCategory Category, NotificationChannel Channel = NotificationChannel.InApp, string? ActionUrl = null);
+/// <summary>TargetRoles/TargetUserId mirror AppNotification's own TargetUserId/TargetRolesCsv
+/// (see that entity's doc comments) — null on both means today's existing tenant-wide
+/// behavior; set TargetRoles to reach only e.g. ["Owner","Manager"] instead of everyone,
+/// or TargetUserId to reach one specific staff member's devices. See
+/// NotificationsController.Create for the validation each one gets.</summary>
+public record CreateNotificationRequest(string Title, string Body, NotificationCategory Category, NotificationChannel Channel = NotificationChannel.InApp, string? ActionUrl = null, List<AppRole>? TargetRoles = null, int? TargetUserId = null);
+
+// ---------- Notification Category Preferences (generic, non-NamedGates categories) ----------
+public record NotificationCategoryPreferenceDto(NotificationCategory Category, bool Enabled);
+public record UpdateNotificationCategoryPreferenceRequest(NotificationCategory Category, bool Enabled);
+
+/// <summary><paramref name="EnabledForCafe"/> is the tenant-level switch (Owner/Manager only,
+/// see SettingsController) shown alongside the user's own so the UI can explain a category the
+/// cafe has switched off entirely — muting it personally would otherwise look like it did
+/// nothing. <paramref name="Enabled"/> is this user's own choice, defaulting to true.</summary>
+public record MyNotificationPreferenceDto(NotificationCategory Category, bool Enabled, bool EnabledForCafe);
+public record UpdateMyNotificationPreferenceRequest(NotificationCategory Category, bool Enabled);
 
 public record RegisterDeviceTokenRequest(string Token, DevicePlatform Platform);
 public record UnregisterDeviceTokenRequest(string Token);
@@ -41,17 +57,23 @@ public record AuditEntryDto(int Id, DateTime Timestamp, int? UserId, string User
 }
 
 // ---------- Staff ----------
-// Bank/Aadhaar/PAN are deliberately absent here — any authenticated role can call
-// GET /staff, so those live only behind StaffFinancialDetailsDto below.
+// Bank/Aadhaar/PAN are deliberately absent here — those live only behind
+// StaffFinancialDetailsDto below. Compensation fields (HourlyRate/BasicSalary) and
+// Department/Designation ARE part of this shape, but StaffController.List/Get only ever
+// populate them when the caller is Owner/Manager (includeCompensation: false otherwise) —
+// GET /staff and GET /staff/{id} are reachable by every authenticated role, and a
+// Waiter/Cashier has no business seeing a coworker's pay (SECURITY_AUDIT_2026-07-30
+// finding #4).
 public record StaffDto(
     int Id, string Name, string Role, string? Email, string? Phone, string Status, DateTime JoinedAt,
     decimal? HourlyRate, int? BranchId, bool HasLogin, string? PhotoUrl,
     string? Department, string? Designation, string SalaryType, decimal? BasicSalary)
 {
-    public static StaffDto From(StaffMember s) => new(
+    public static StaffDto From(StaffMember s, bool includeCompensation = true) => new(
         s.Id, s.Name, s.Role, s.Email, s.Phone, s.Status.ToString().ToUpperInvariant(), s.JoinedAt,
-        s.HourlyRate, s.BranchId, s.UserId is not null, s.PhotoUrl,
-        s.Department, s.Designation, s.SalaryType.ToString().ToUpperInvariant(), s.BasicSalary);
+        includeCompensation ? s.HourlyRate : null, s.BranchId, s.UserId is not null, s.PhotoUrl,
+        includeCompensation ? s.Department : null, includeCompensation ? s.Designation : null,
+        s.SalaryType.ToString().ToUpperInvariant(), includeCompensation ? s.BasicSalary : null);
 }
 
 /// <summary>

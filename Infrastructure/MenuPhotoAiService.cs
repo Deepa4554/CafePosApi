@@ -116,11 +116,36 @@ public class MenuPhotoAiService(HttpClient http, IConfiguration configuration, I
         }
     }
 
+    // Same cap as ImageStorageService — bounds both the in-memory base64 decode and, since
+    // this payload also gets forwarded whole to paid Claude/Vision APIs, the per-request
+    // API cost a low-privilege authenticated user could otherwise run up by repeatedly
+    // posting near-max-size photos (SECURITY_AUDIT_2026-07-30 finding #5).
+    private const int MaxImageBytes = 8 * 1024 * 1024; // 8 MB
+
+    private static readonly HashSet<string> AllowedMimeTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "image/jpeg", "image/png", "image/webp", "image/gif",
+    };
+
     private static (string MediaType, string Base64) ParseDataUri(string dataUri)
     {
+        if (dataUri.Length > MaxImageBytes / 3 * 4 + 256)
+            throw new ApiValidationException($"Image is too large — max {MaxImageBytes / (1024 * 1024)} MB.");
+
         var match = DataUriPattern.Match(dataUri);
         if (!match.Success) throw new ApiValidationException("Expected a base64 image data URI.");
-        return (match.Groups[1].Value, match.Groups[2].Value);
+
+        var mediaType = match.Groups[1].Value;
+        if (!AllowedMimeTypes.Contains(mediaType))
+            throw new ApiValidationException("Only JPEG, PNG, WEBP, and GIF images are allowed.");
+
+        var base64 = match.Groups[2].Value;
+        // Rough byte-length check straight off the base64 string (no full decode needed
+        // just to bound size) — every 4 base64 chars encode 3 bytes.
+        if (base64.Length / 4.0 * 3 > MaxImageBytes)
+            throw new ApiValidationException($"Image is too large — max {MaxImageBytes / (1024 * 1024)} MB.");
+
+        return (mediaType, base64);
     }
 
     private async Task<List<CreateMenuItemRequest>> CallClaudeAsync(string apiKey, string mediaType, string base64, CancellationToken ct)

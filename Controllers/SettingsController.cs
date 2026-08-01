@@ -69,6 +69,7 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.OrderPlacedAlertsEnabled is not null) settings.OrderPlacedAlertsEnabled = req.OrderPlacedAlertsEnabled.Value;
         if (req.OrderPendingConfirmationAlertsEnabled is not null) settings.OrderPendingConfirmationAlertsEnabled = req.OrderPendingConfirmationAlertsEnabled.Value;
         if (req.OrderReadyAlertsEnabled is not null) settings.OrderReadyAlertsEnabled = req.OrderReadyAlertsEnabled.Value;
+        if (req.ApprovalAlertsEnabled is not null) settings.ApprovalAlertsEnabled = req.ApprovalAlertsEnabled.Value;
         if (req.RequireStaffOrderConfirmation is not null) settings.RequireStaffOrderConfirmation = req.RequireStaffOrderConfirmation.Value;
         if (req.Phone is not null) settings.Phone = req.Phone.Trim();
         if (req.Address is not null) settings.Address = req.Address.Trim();
@@ -128,6 +129,39 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         taxRateCache.Invalidate(settings.TenantId);
         await audit.LogAsync(AuditAction.SettingsChange, AuditResource.Settings, null, "Cafe settings updated.", AuditSeverity.Medium);
         return settings;
+    }
+
+    /// <summary>Every NotificationCategory that does NOT have a dedicated CafeSettings column
+    /// (see NotificationPreferences.NamedGates) — computed off the enum itself, so a category
+    /// added after this endpoint was written shows up here automatically, with no code change.
+    /// This is what closes "a new notification category has no enable/disable option": as soon
+    /// as any producer creates an AppNotification of that category, it's already gate-able
+    /// through this same list.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpGet("notification-preferences")]
+    public async Task<IEnumerable<NotificationCategoryPreferenceDto>> GetNotificationPreferences()
+    {
+        var settings = await db.Settings.FirstAsync();
+        return NotificationPreferences.GenericCategories(settings)
+            .Select(kv => new NotificationCategoryPreferenceDto(kv.Key, kv.Value));
+    }
+
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPut("notification-preferences")]
+    public async Task<IActionResult> UpdateNotificationPreference(UpdateNotificationCategoryPreferenceRequest req)
+    {
+        // A NamedGates category already has its own dedicated field on this same controller's
+        // main Update (e.g. InventoryAlertsEnabled) — rejecting here instead of silently
+        // no-op-ing/double-writing keeps exactly one source of truth per category.
+        if (NotificationPreferences.NamedGates.ContainsKey(req.Category))
+            throw new ApiValidationException($"{req.Category} has its own dedicated setting — update it via PUT /api/settings instead.");
+
+        var settings = await db.Settings.FirstAsync();
+        NotificationPreferences.SetOverride(settings, req.Category, req.Enabled);
+        await db.SaveChangesAsync();
+        await audit.LogAsync(AuditAction.SettingsChange, AuditResource.Settings, null,
+            $"Notification category '{req.Category}' {(req.Enabled ? "enabled" : "disabled")}.", AuditSeverity.Medium);
+        return NoContent();
     }
 
     [Authorize]

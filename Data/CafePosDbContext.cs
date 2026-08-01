@@ -161,6 +161,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     // Management
     public DbSet<StaffTask> Tasks => Set<StaffTask>();
     public DbSet<AppNotification> Notifications => Set<AppNotification>();
+    public DbSet<UserNotificationPreference> UserNotificationPreferences => Set<UserNotificationPreference>();
     public DbSet<ApprovalRequest> Approvals => Set<ApprovalRequest>();
     public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
     public DbSet<ApiFailureLog> ApiFailureLogs => Set<ApiFailureLog>();
@@ -312,6 +313,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<StaffTask>().Property(t => t.Priority).HasConversion<string>();
         modelBuilder.Entity<StaffTask>().Property(t => t.Status).HasConversion<string>();
         modelBuilder.Entity<AppNotification>().Property(n => n.Category).HasConversion<string>();
+        modelBuilder.Entity<UserNotificationPreference>().Property(p => p.Category).HasConversion<string>();
         modelBuilder.Entity<AppNotification>().Property(n => n.Channel).HasConversion<string>();
         modelBuilder.Entity<AppNotification>().Property(n => n.DeliveryStatus).HasConversion<string>();
         modelBuilder.Entity<ApprovalRequest>().Property(a => a.Type).HasConversion<string>();
@@ -389,6 +391,11 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // login, and login must resolve it before any tenant is known.
         modelBuilder.Entity<AppUser>().HasIndex(u => u.Email).IsUnique();
         modelBuilder.Entity<Coupon>().HasIndex(c => new { c.TenantId, c.Code }).IsUnique();
+        // One row per (user, category) at most — the upsert in NotificationsController's
+        // my-preferences PUT relies on this to stay a single row rather than accumulating a
+        // fresh "muted"/"unmuted" row on every toggle. Also the index the push fan-out's
+        // per-user mute check probes on every broadcast.
+        modelBuilder.Entity<UserNotificationPreference>().HasIndex(p => new { p.UserId, p.Category }).IsUnique();
         modelBuilder.Entity<GiftCard>().HasIndex(g => new { g.TenantId, g.Code }).IsUnique();
         modelBuilder.Entity<Tenant>().HasIndex(t => t.Slug).IsUnique();
         modelBuilder.Entity<EmailOtp>().HasIndex(o => o.Email);
@@ -467,6 +474,25 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<WhatsAppOrderTracking>().HasIndex(t => t.TrackingId).IsUnique();
         modelBuilder.Entity<WhatsAppOrderTracking>().HasIndex(t => t.OrderId).IsUnique();
 
+        // Orders is the table every report, dashboard, KDS board and table-occupancy check
+        // reads, and it's the one that grows fastest — but the only index it had was the
+        // per-tenant one ApplyTenantIsolation adds for everything. Filtering a tenant's
+        // whole order history by date/status in memory is fine on day one and quietly turns
+        // into a sequential scan that gets slower every week the cafe stays open.
+        //
+        // TenantId leads all four because the global query filter puts it in every single
+        // WHERE clause; the second column is whatever that call site actually narrows by.
+        modelBuilder.Entity<Order>().HasIndex(o => new { o.TenantId, o.CreatedAt });
+        // The "still needs attention" predicate shared by OrdersController.List(activeOnly),
+        // the KDS board, and the table-occupancy check: !Cancelled && (!Paid || Status != Served).
+        modelBuilder.Entity<Order>().HasIndex(o => new { o.TenantId, o.Paid, o.Status });
+        // "Does this table already have an open order?" — runs on every dine-in order
+        // creation and every Tables screen refresh.
+        modelBuilder.Entity<Order>().HasIndex(o => new { o.TenantId, o.TableCode });
+        modelBuilder.Entity<Order>().HasIndex(o => new { o.TenantId, o.BranchId, o.CreatedAt });
+        // KDS "advance N of this dish across every open KOT" scans lines by menu item.
+        modelBuilder.Entity<OrderItem>().HasIndex(i => new { i.TenantId, i.MenuItemId });
+
         // The queue poll (WhatsAppInternalController.GetPendingQueueJobs) runs every few
         // seconds per connected tenant and filters on exactly these columns — without this
         // it degrades into a full scan of an append-only audit table that only ever grows.
@@ -521,9 +547,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     }
 
     // The entity types Orders/KDS/Tables screens actually poll for — see useOrders.ts /
-    // useTables.ts on the client. Anything else changing (menu, inventory, staff, ...) keeps
-    // its existing on-demand-refetch behaviour; only these are latency-sensitive enough to
-    // warrant a push.
+    // useTables.ts on the client. These keep their own dedicated "ordersChanged" event
+    // (rather than folding into the scope map below) because app builds already installed on
+    // staff phones only know that event name; everything else pushes via RealtimeScopeByEntityType.
     private static readonly HashSet<Type> RealtimeEntityTypes =
         [typeof(Order), typeof(OrderItem), typeof(OrderItemModifier), typeof(OrderFireBatch), typeof(CafeTable)];
 
@@ -539,6 +565,89 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .Where(id => id != 0)
             .ToHashSet();
 
+    /// <summary>Everything outside the order/table family above, grouped into the coarse
+    /// scopes the client knows how to invalidate (see RealtimeScopes). Before this, none of
+    /// these pushed at all — a menu price edit on one till reached the next one only on
+    /// useMenu's refetchInterval, which is an hour.
+    ///
+    /// Types absent from this map are absent on purpose, not by oversight: AuditLogEntry and
+    /// WhatsAppMessageLog are written as a side effect of half the operations in the app, so
+    /// including them would fire a push on nearly every save while no open screen is waiting
+    /// on them.</summary>
+    private static readonly Dictionary<Type, string> RealtimeScopeByEntityType = new()
+    {
+        [typeof(MenuItem)] = RealtimeScopes.Menu,
+        [typeof(MenuCategory)] = RealtimeScopes.Menu,
+        [typeof(MenuItemImage)] = RealtimeScopes.Menu,
+        [typeof(Variant)] = RealtimeScopes.Menu,
+        [typeof(Modifier)] = RealtimeScopes.Menu,
+        [typeof(ModifierOption)] = RealtimeScopes.Menu,
+        [typeof(Station)] = RealtimeScopes.Menu,
+        [typeof(TaxGroup)] = RealtimeScopes.Menu,
+        [typeof(OrderNoteSuggestion)] = RealtimeScopes.Menu,
+        [typeof(Recipe)] = RealtimeScopes.Menu,
+        [typeof(RecipeItem)] = RealtimeScopes.Menu,
+
+        [typeof(InventoryItem)] = RealtimeScopes.Inventory,
+        [typeof(InventoryTransaction)] = RealtimeScopes.Inventory,
+        [typeof(InventoryBatch)] = RealtimeScopes.Inventory,
+        [typeof(StockTake)] = RealtimeScopes.Inventory,
+        [typeof(StockTakeLine)] = RealtimeScopes.Inventory,
+        [typeof(MissingRecipeAlert)] = RealtimeScopes.Inventory,
+        [typeof(Vendor)] = RealtimeScopes.Inventory,
+        [typeof(PurchaseOrder)] = RealtimeScopes.Inventory,
+        [typeof(PurchaseItem)] = RealtimeScopes.Inventory,
+
+        [typeof(Customer)] = RealtimeScopes.Customers,
+        [typeof(Coupon)] = RealtimeScopes.Customers,
+        [typeof(GiftCard)] = RealtimeScopes.Customers,
+        [typeof(Reward)] = RealtimeScopes.Customers,
+        [typeof(FavoriteItem)] = RealtimeScopes.Customers,
+
+        [typeof(StaffMember)] = RealtimeScopes.Staff,
+        [typeof(Shift)] = RealtimeScopes.Staff,
+        [typeof(LeaveRequest)] = RealtimeScopes.Staff,
+        [typeof(AttendanceLog)] = RealtimeScopes.Staff,
+        [typeof(AttendanceRecord)] = RealtimeScopes.Staff,
+        [typeof(StaffLoan)] = RealtimeScopes.Staff,
+        [typeof(PayrollRun)] = RealtimeScopes.Staff,
+        [typeof(PayrollLine)] = RealtimeScopes.Staff,
+
+        // AppNotification is deliberately NOT here — it's the push-notification payload
+        // itself (TargetUserId/TargetRolesCsv, delivered via FCM/IPushNotificationSender),
+        // which is already a precise per-recipient channel. Broadcasting it tenant-wide
+        // through this generic scope map as well would mean a notification meant for one
+        // staff member also waking every other connected device — see RealtimeScopes' own
+        // doc comment for why push and SignalR stay on separate tracks.
+        [typeof(StaffTask)] = RealtimeScopes.Tasks,
+        [typeof(ApprovalRequest)] = RealtimeScopes.Approvals,
+
+        [typeof(CafeSettings)] = RealtimeScopes.Settings,
+        [typeof(Branch)] = RealtimeScopes.Settings,
+        [typeof(Subscription)] = RealtimeScopes.Settings,
+        [typeof(Integration)] = RealtimeScopes.Settings,
+    };
+
+    /// <summary>Same "capture before SaveChanges" constraint as
+    /// CollectRealtimeAffectedTenantIds.</summary>
+    private Dictionary<int, IReadOnlySet<string>> CollectRealtimeScopes()
+    {
+        var byTenant = new Dictionary<int, IReadOnlySet<string>>();
+        foreach (var entry in ChangeTracker.Entries())
+        {
+            if (entry.State is not (EntityState.Added or EntityState.Modified or EntityState.Deleted)) continue;
+            if (!RealtimeScopeByEntityType.TryGetValue(entry.Entity.GetType(), out var scope)) continue;
+
+            var tenantId = ((ITenantScoped)entry.Entity).TenantId;
+            if (tenantId == 0) continue;
+
+            if (!byTenant.TryGetValue(tenantId, out var scopes))
+                byTenant[tenantId] = scopes = new HashSet<string>();
+            ((HashSet<string>)scopes).Add(scope);
+        }
+        return byTenant;
+    }
+
     /// <summary>Same "read before SaveChanges, act after" shape as
     /// CollectRealtimeAffectedTenantIds — an Added AppNotification's entry flips to Unchanged
     /// once the save succeeds, but the entity object itself (Title/Body/TenantId/...) is still
@@ -546,41 +655,30 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     private List<AppNotification> CollectNewNotifications() =>
         ChangeTracker.Entries<AppNotification>().Where(e => e.State == EntityState.Added).Select(e => e.Entity).ToList();
 
-    /// <summary>Cafe Settings → Notification Preferences toggle for each category a
-    /// notification-producing flow actually creates (see OrderBuildingService's three
-    /// AppNotification sites, InventoryBatchService's low-stock check, and
-    /// AttendanceController.PunchOut's shift report). System/Billing/Marketing/AiInsight
-    /// have no producer anywhere yet, so they're deliberately not in this map — nothing to
-    /// gate, and a toggle for them would control nothing (the exact bug this fixes).</summary>
-    private static readonly Dictionary<NotificationCategory, Func<CafeSettings, bool>> NotificationGates = new()
-    {
-        [NotificationCategory.OrderPlaced] = s => s.OrderPlacedAlertsEnabled,
-        [NotificationCategory.OrderPendingConfirmation] = s => s.OrderPendingConfirmationAlertsEnabled,
-        [NotificationCategory.Order] = s => s.OrderReadyAlertsEnabled,
-        [NotificationCategory.Inventory] = s => s.InventoryAlertsEnabled,
-        [NotificationCategory.Staff] = s => s.ShiftReportsEnabled,
-    };
-
     /// <summary>Runs BEFORE the actual save so a gated-off notification is detached and
     /// never persisted at all (not saved, not pushed) — not just filtered out of the push,
     /// which would still leave a dead row cluttering the in-app Notification Center. Reads
     /// TenantId off each entry the same "before SaveChanges" way CollectRealtimeAffectedTenantIds
-    /// does, since StampTenantIds above already populated it.</summary>
+    /// does, since StampTenantIds above already populated it.
+    ///
+    /// Checks EVERY added AppNotification via NotificationPreferences.IsEnabled — not just a
+    /// hardcoded set of "known" categories — so a category added after this code was written
+    /// (no dedicated CafeSettings column, no change needed here) still gets a working
+    /// per-tenant on/off switch through NotificationPreferences' generic override map. See
+    /// that class's doc comment for the two-tier design.</summary>
     private async Task SuppressDisabledNotificationsAsync(CancellationToken ct)
     {
-        var gated = ChangeTracker.Entries<AppNotification>()
-            .Where(e => e.State == EntityState.Added && NotificationGates.ContainsKey(e.Entity.Category))
-            .ToList();
-        if (gated.Count == 0) return;
+        var added = ChangeTracker.Entries<AppNotification>().Where(e => e.State == EntityState.Added).ToList();
+        if (added.Count == 0) return;
 
-        var tenantIds = gated.Select(e => e.Entity.TenantId).Distinct().ToList();
+        var tenantIds = added.Select(e => e.Entity.TenantId).Distinct().ToList();
         var settingsByTenant = await Settings.IgnoreQueryFilters()
             .Where(s => tenantIds.Contains(s.TenantId))
             .ToDictionaryAsync(s => s.TenantId, ct);
 
-        foreach (var entry in gated)
+        foreach (var entry in added)
         {
-            if (settingsByTenant.TryGetValue(entry.Entity.TenantId, out var settings) && !NotificationGates[entry.Entity.Category](settings))
+            if (settingsByTenant.TryGetValue(entry.Entity.TenantId, out var settings) && !NotificationPreferences.IsEnabled(settings, entry.Entity.Category))
                 entry.State = EntityState.Detached;
         }
     }
@@ -620,6 +718,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         StampTenantIds();
         var affectedTenantIds = CollectRealtimeAffectedTenantIds();
         await SuppressDisabledNotificationsAsync(cancellationToken);
+        var realtimeScopes = CollectRealtimeScopes();
         var newNotifications = CollectNewNotifications();
         var whatsAppStatusTransitions = CollectWhatsAppStatusTransitions();
         var whatsAppBillGenerated = CollectWhatsAppBillGeneratedOrders();
@@ -641,6 +740,8 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // caller's request slower or fail because of it (see RealtimeNotifier).
         if (affectedTenantIds.Count > 0)
             _ = realtime.NotifyOrdersChangedAsync(affectedTenantIds);
+        if (realtimeScopes.Count > 0)
+            _ = realtime.NotifyDataChangedAsync(realtimeScopes);
         // Every AppNotification create path (OrderBuildingService's order-placed/pending-
         // confirmation/ready-to-serve, plus NotificationsController's manual POST) gets a push
         // for free from this single hook — no call site has to remember to fire one itself.
@@ -650,7 +751,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // CancellationToken.None, not the request's token: this keeps running after the
         // request scope (and its RequestAborted token) is gone, same as the realtime notify above.
         foreach (var n in newNotifications)
-            _ = pushSender.NotifyTenantAsync(n.TenantId, n.Category, n.Title, n.Body, n.ActionUrl, n.TargetUserId, CancellationToken.None);
+            _ = pushSender.NotifyTenantAsync(n.TenantId, n.Category, n.Title, n.Body, n.ActionUrl, n.TargetUserId, n.TargetRolesCsv, CancellationToken.None);
         // WhatsApp order-tracking module (see docs/plans — "WhatsApp Order Tracking Module").
         // IWhatsAppEventPublisher is a thin, swappable HTTP push into the standalone Node
         // whatsapp-service — CafePosApi has no idea whether Baileys, WhatsApp Cloud API, or

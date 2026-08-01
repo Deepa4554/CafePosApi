@@ -33,7 +33,11 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost]
-    public async Task<ActionResult<InventoryItemDto>> Create(CreateInventoryItemRequest req)
+    public Task<ActionResult<InventoryItemDto>> Create(CreateInventoryItemRequest req) =>
+        // Two saves (the item, then its opening batch — the batch needs the item's id as an
+        // FK), so without a transaction a crash between them left an ingredient reading
+        // zero stock with no lot behind it and nothing in the ledger to explain it.
+        DbConcurrency.InTransactionAsync<ActionResult<InventoryItemDto>>(db, async () =>
     {
         if (string.IsNullOrWhiteSpace(req.Name))
             throw new ApiValidationException("Name is required.");
@@ -67,7 +71,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
             InventoryTransactionType.Purchase, referenceId: null, CurrentUserId(), CurrentUserName());
         await db.SaveChangesAsync();
         return CreatedAtAction(nameof(List), new { id = item.Id }, InventoryItemDto.From(item));
-    }
+    });
 
     /// <summary>Edits the item's own details (name, category, unit, thresholds, cost).
     /// Current stock is untouched here on purpose — it only moves via Restock/Waste/Adjust
@@ -111,7 +115,11 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
     /// Adds the given quantity as a new batch (not a forced top-up to Max), optionally
     /// dated with an expiry.</summary>
     [HttpPost("{id:int}/restock")]
-    public async Task<ActionResult<InventoryItemDto>> Restock(int id, RestockRequest req)
+    public Task<ActionResult<InventoryItemDto>> Restock(int id, RestockRequest req) =>
+        // Transaction so InventoryBatchService can hold this ingredient's row lock across
+        // its read-modify-write of Current (see LockIngredientAsync) — same for Waste and
+        // Adjust below.
+        DbConcurrency.InTransactionAsync<ActionResult<InventoryItemDto>>(db, async () =>
     {
         var item = await db.InventoryItems.FindAsync(id);
         if (item is null) return NotFound();
@@ -129,10 +137,11 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
         await db.SaveChangesAsync();
         return InventoryItemDto.From(item);
-    }
+    });
 
     [HttpPost("{id:int}/waste")]
-    public async Task<ActionResult<InventoryItemDto>> LogWaste(int id, WasteRequest req)
+    public Task<ActionResult<InventoryItemDto>> LogWaste(int id, WasteRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<InventoryItemDto>>(db, async () =>
     {
         var item = await db.InventoryItems.FindAsync(id);
         if (item is null) return NotFound();
@@ -148,12 +157,13 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
         await db.SaveChangesAsync();
         return InventoryItemDto.From(item);
-    }
+    });
 
     /// <summary>Manual correction after a physical stock count — sets Current to an exact
     /// value. Creates a single consolidated ledger entry for the adjustment.</summary>
     [HttpPost("{id:int}/adjust")]
-    public async Task<ActionResult<InventoryItemDto>> Adjust(int id, AdjustStockRequest req)
+    public Task<ActionResult<InventoryItemDto>> Adjust(int id, AdjustStockRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<InventoryItemDto>>(db, async () =>
     {
         var item = await db.InventoryItems.FindAsync(id);
         if (item is null) return NotFound();
@@ -165,7 +175,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
         await db.SaveChangesAsync();
         return InventoryItemDto.From(item);
-    }
+    });
 
     /// <summary>Bulk stock/rate import from a CSV/Excel sheet, parsed client-side (see
     /// csvInventoryImport.ts) and posted as JSON — the counterpart to the recipe import:
@@ -180,8 +190,12 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
     /// convert is reported instead of guessed.</summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("bulk-import")]
-    public async Task<ActionResult<InventoryImportResultDto>> BulkImport(
-        List<InventoryImportRowRequest> rows, [FromQuery] int? branchId = null)
+    public Task<ActionResult<InventoryImportResultDto>> BulkImport(
+        List<InventoryImportRowRequest> rows, [FromQuery] int? branchId = null) =>
+        // Up to 2000 rows of stock corrections landing as one save — a transaction so the
+        // sheet applies whole or not at all, and so each SetStockToAsync can hold its
+        // ingredient's row lock while it computes the delta.
+        DbConcurrency.InTransactionAsync<ActionResult<InventoryImportResultDto>>(db, async () =>
     {
         if (rows is null || rows.Count == 0)
             throw new ApiValidationException("No rows to import.");
@@ -294,7 +308,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
         await db.SaveChangesAsync();
         return new InventoryImportResultDto(created, updated, errors.Count, errors);
-    }
+    });
 
     [HttpGet("transactions")]
     public async Task<TransactionsPagedResult> AllTransactions(
@@ -366,13 +380,20 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
     }
 
     [HttpGet("{id:int}/transactions")]
-    public async Task<ActionResult<IEnumerable<InventoryTransactionDto>>> ItemTransactions(int id)
+    public async Task<ActionResult<IEnumerable<InventoryTransactionDto>>> ItemTransactions(
+        int id, [FromQuery] int limit = 200)
     {
         var exists = await db.InventoryItems.AnyAsync(i => i.Id == id);
         if (!exists) return NotFound();
 
-        var txns = await db.InventoryTransactions.Where(t => t.InventoryItemId == id)
-            .OrderByDescending(t => t.CreatedAt).ToListAsync();
+        // The ledger is append-only, so "every movement this ingredient ever had" grows
+        // without bound — for a busy cafe's flour that's every sale of every dish that
+        // uses it. The screen shows a recent-history list; cap what it can ask for.
+        var txns = await db.InventoryTransactions.AsNoTracking()
+            .Where(t => t.InventoryItemId == id)
+            .OrderByDescending(t => t.CreatedAt)
+            .Take(Math.Clamp(limit, 1, 1000))
+            .ToListAsync();
         return Ok(await ToDtos(txns));
     }
 

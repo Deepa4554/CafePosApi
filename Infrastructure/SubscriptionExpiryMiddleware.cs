@@ -17,15 +17,21 @@ public class SubscriptionExpiryMiddleware(RequestDelegate next)
         "/api/auth", "/api/subscription", "/api/settings", "/api/public", "/order", "/health", "/swagger",
     ];
 
-    public async Task InvokeAsync(HttpContext context, CafePosDbContext db)
+    public async Task InvokeAsync(HttpContext context, CafePosDbContext db, ITenantContext tenant, ISubscriptionCache subscriptions)
     {
         var path = context.Request.Path.Value ?? "";
         var isAllowlisted = AllowedPrefixes.Any(p => path.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
         if (!isAllowlisted && context.User.Identity?.IsAuthenticated == true)
         {
-            var sub = await db.Subscriptions.FirstOrDefaultAsync();
-            var expired = sub?.PlanExpiresAt is not null && sub.PlanExpiresAt < DateTime.UtcNow;
+            // Cached — this ran twice per request (here and in RequirePlanHandler) against
+            // a row that changes once a billing cycle. See ISubscriptionCache.
+            var sub = await subscriptions.GetAsync(tenant.TenantIdOrDefault, async () =>
+            {
+                var row = await db.Subscriptions.AsNoTracking().FirstOrDefaultAsync();
+                return new SubscriptionSnapshot(row?.Plan ?? Domain.SubscriptionTier.FreeTrial, row?.PlanExpiresAt);
+            });
+            var expired = sub.PlanExpiresAt is not null && sub.PlanExpiresAt < DateTime.UtcNow;
             if (expired)
             {
                 context.Response.StatusCode = StatusCodes.Status402PaymentRequired;

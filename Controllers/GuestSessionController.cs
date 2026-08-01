@@ -28,14 +28,26 @@ public class GuestSessionController(
 {
     private const int HardTtlHours = 4;
 
-    // AddCartItem does a read-then-write (find existing line, else insert) against a
-    // request-scoped DbContext with no DB-level uniqueness/locking behind it. A double-tap
-    // (or any two near-simultaneous taps on the same session — no client debounce either,
-    // see CustomerOrderPage) can race two requests past each other so both see "no existing
-    // line" and both insert, duplicating the item. Serializing per-session here closes that
-    // window cheaply without a migration; fine for this app's single-instance deployment.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> CartLocks = new();
-    private static SemaphoreSlim CartLockFor(int sessionId) => CartLocks.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
+    /// <summary>AddCartItem does a read-then-write (find existing line, else insert) with no
+    /// DB-level uniqueness behind it. A double-tap — or any two near-simultaneous taps from
+    /// the phones sharing one table, with no client debounce either (see CustomerOrderPage) —
+    /// can race two requests past each other so both see "no existing line" and both insert,
+    /// duplicating the item.
+    ///
+    /// This used to be a process-wide dictionary of semaphores keyed by session id. That had
+    /// two problems: entries were never removed, so it grew for the life of the process, and
+    /// it protected nothing at all once the API runs on more than one instance — the two
+    /// phones simply land on different processes. Locking the session's own row instead has
+    /// neither failing, and costs one statement.</summary>
+    private Task<T> InSessionLockAsync<T>(GuestSession session, Func<Task<T>> work) =>
+        DbConcurrency.InTransactionAsync(db, async () =>
+        {
+            await DbConcurrency.LockRowsAsync<GuestSession>(db, session.Id);
+            // Whatever the previous holder committed — most importantly OrderId, which is
+            // the "who owns this table's cart" claim the branch below turns on.
+            if (db.Database.IsRelational()) await db.Entry(session).ReloadAsync();
+            return await work();
+        });
 
     private async Task<(int TenantId, string TableCode, CafeTable Table)?> ResolveAsync(string token)
     {
@@ -153,23 +165,27 @@ public class GuestSessionController(
     /// GuestSession.OrderId.</summary>
     [ValidateGuestSession(isWrite: true)]
     [HttpPost("cart/items")]
-    public async Task<ActionResult<GuestSessionStateDto>> AddCartItem(AddCartItemRequest req)
+    public Task<ActionResult<GuestSessionStateDto>> AddCartItem(AddCartItemRequest req)
     {
         var session = HttpContext.GetGuestSession();
-        var gate = CartLockFor(session.Id);
-        await gate.WaitAsync();
-        try
-        {
-            return await AddCartItemLocked(session, req);
-        }
-        finally
-        {
-            gate.Release();
-        }
+        return InSessionLockAsync(session, () => AddCartItemLocked(session, req));
     }
+
+    // GuestName/Modifier are free text from an anonymous, unauthenticated caller (anyone who
+    // scanned the table QR code) into otherwise-unbounded Postgres `text` columns — without a
+    // cap here, a single request could persist a multi-megabyte string that then gets
+    // rendered into every KOT/receipt/notification touching this order for staff
+    // (SECURITY_AUDIT_2026-07-30 finding #6).
+    private const int MaxGuestNameLength = 100;
+    private const int MaxModifierLength = 200;
 
     private async Task<ActionResult<GuestSessionStateDto>> AddCartItemLocked(GuestSession session, AddCartItemRequest req)
     {
+        if (req.GuestName is { Length: > MaxGuestNameLength })
+            throw new ApiValidationException($"Name can be at most {MaxGuestNameLength} characters.");
+        if (req.Modifier is { Length: > MaxModifierLength })
+            throw new ApiValidationException($"Note can be at most {MaxModifierLength} characters.");
+
         var table = await db.Tables.IgnoreQueryFilters().FirstAsync(t => t.Id == session.TableId);
 
         if (session.OrderId is null)
@@ -227,9 +243,16 @@ public class GuestSessionController(
     /// only the very first table-trust check is gated, not every re-order.</summary>
     [ValidateGuestSession(isWrite: true)]
     [HttpPost("order")]
-    public async Task<ActionResult<GuestSessionStateDto>> PlaceOrder()
+    public Task<ActionResult<GuestSessionStateDto>> PlaceOrder()
     {
         var session = HttpContext.GetGuestSession();
+        // Same session lock as the cart, for the same reason plus one more: firing deducts
+        // stock, and InventoryBatchService's ingredient locks only hold inside a transaction.
+        return InSessionLockAsync(session, () => PlaceOrderLocked(session));
+    }
+
+    private async Task<ActionResult<GuestSessionStateDto>> PlaceOrderLocked(GuestSession session)
+    {
         var table = await db.Tables.IgnoreQueryFilters().FirstAsync(t => t.Id == session.TableId);
         if (session.OrderId is null) throw new ApiValidationException("Your cart is empty.");
 

@@ -49,7 +49,17 @@ public class DeviceTokensController(CafePosDbContext db, ITenantContext tenant) 
     [HttpPost("unregister")]
     public async Task<IActionResult> Unregister(UnregisterDeviceTokenRequest req)
     {
-        var existing = await db.DeviceTokens.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Token == req.Token);
+        var currentUserId = CurrentUserId();
+        if (currentUserId is null) return Unauthorized();
+
+        // Matched on (Token, UserId), not the token alone: an FCM registration token is not a
+        // secret — it's readable on the device and rides in the clear inside every Register call
+        // above — so deleting purely by token string let anyone who learned one silently switch
+        // off another account's push. A token that isn't the caller's own is answered with the
+        // same NoContent as one that's already gone, since AuthRepository.logout calls this
+        // best-effort and must never fail the sign-out over it.
+        var existing = await db.DeviceTokens.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Token == req.Token && t.UserId == currentUserId.Value);
         if (existing is null) return NoContent();
 
         db.DeviceTokens.Remove(existing);

@@ -51,6 +51,25 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
             Level = req.Level,
         };
         db.Approvals.Add(request);
+
+        // An approval blocks real work the requester is standing there waiting on (a refund at
+        // the counter, a discount before the bill prints), so it can't wait for whenever someone
+        // next opens the Approvals screen. Addressed by ResolverRoles rather than
+        // request.AssignedToId: for money types only the Owner may resolve, so an assignment to
+        // a fellow Manager would otherwise ping someone who'd get nothing but a permission error.
+        var requester = await db.Users.FindAsync(currentUserId);
+        db.Notifications.Add(new AppNotification
+        {
+            Title = "Approval needed",
+            Body = request.Amount is decimal amount
+                ? $"{requester?.Name ?? "Someone"} requested {request.Type} approval — \"{request.Title}\" ({amount:C})."
+                : $"{requester?.Name ?? "Someone"} requested {request.Type} approval — \"{request.Title}\".",
+            Category = NotificationCategory.Approval,
+            Channel = NotificationChannel.InApp,
+            ActionUrl = "/approvals",
+            TargetRolesCsv = string.Join(',', ResolverRoles(req.Type)),
+        });
+
         await db.SaveChangesAsync();
         return CreatedAtAction(nameof(Get), new { id = request.Id }, ApprovalDto.From(request));
     }
@@ -60,12 +79,17 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
     /// this table) — so only the Owner may resolve them, closing the obvious hole where a
     /// Manager could otherwise just approve their own request from this same screen. Leave
     /// keeps the same OwnerOrManager bar StaffController's own leave-approval endpoints use,
-    /// since that one isn't money and Manager-approves-staff-leave is normal today.</summary>
-    private bool CanResolve(ApprovalType type) => type switch
-    {
-        ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense => User.IsInRole(nameof(AppRole.Owner)),
-        _ => User.IsInRole(nameof(AppRole.Owner)) || User.IsInRole(nameof(AppRole.Manager)),
-    };
+    /// since that one isn't money and Manager-approves-staff-leave is normal today.
+    ///
+    /// Single source of truth for both the permission check (CanResolve) and who Submit's
+    /// "approval needed" notification is addressed to — the two must not drift, or the app
+    /// ends up pinging someone whose only possible next step is a permission error.</summary>
+    private static AppRole[] ResolverRoles(ApprovalType type) =>
+        (type is ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense)
+            ? [AppRole.Owner]
+            : [AppRole.Owner, AppRole.Manager];
+
+    private bool CanResolve(ApprovalType type) => ResolverRoles(type).Any(r => User.IsInRole(r.ToString()));
 
     [HttpPatch("{id:int}/approve")]
     public async Task<ActionResult<ApprovalDto>> Approve(int id, ResolveApprovalRequest req)
@@ -85,6 +109,7 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
         request.ResolvedAt = DateTime.UtcNow;
         request.ResolvedById = CurrentUserId();
         request.Notes = req.Notes;
+        NotifyRequesterResolved(request, approved: true, req.Notes);
         await db.SaveChangesAsync();
 
         await audit.LogAsync(AuditAction.ApprovalGranted, AuditResource.Order, request.Id.ToString(),
@@ -200,6 +225,7 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
         request.ResolvedAt = DateTime.UtcNow;
         request.ResolvedById = CurrentUserId();
         request.Notes = req.Notes;
+        NotifyRequesterResolved(request, approved: false, req.Notes);
         await db.SaveChangesAsync();
 
         await audit.LogAsync(AuditAction.ApprovalDenied, AuditResource.Order, request.Id.ToString(),
@@ -220,9 +246,38 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
         return ApprovalDto.From(request);
     }
 
+    /// <summary>Closes the loop for whoever submitted the request — targeted at that one user
+    /// (AppNotification.TargetUserId), not the resolver roles Submit broadcast to, since the
+    /// outcome is only the requester's business. Added to the ChangeTracker before the caller's
+    /// SaveChangesAsync so it rides the same transaction and the same push hook.</summary>
+    private void NotifyRequesterResolved(ApprovalRequest request, bool approved, string? notes)
+    {
+        // Nobody to tell: RequestedById falls back to 0 in Submit when the principal carried no
+        // resolvable user id, and telling someone about their own action is just noise (possible
+        // for Leave, where a Manager may resolve requests they could also have raised).
+        if (request.RequestedById <= 0 || request.RequestedById == CurrentUserId()) return;
+
+        db.Notifications.Add(new AppNotification
+        {
+            Title = approved ? "Approval granted" : "Approval rejected",
+            Body = $"{CurrentUserName()} {(approved ? "approved" : "rejected")} \"{request.Title}\""
+                + (string.IsNullOrWhiteSpace(notes) ? "." : $" — {notes.Trim()}"),
+            Category = NotificationCategory.Approval,
+            Channel = NotificationChannel.InApp,
+            ActionUrl = "/approvals",
+            TargetUserId = request.RequestedById,
+        });
+    }
+
+    /// <summary>Both claim types, same as NotificationsController: JwtTokenService issues the id
+    /// as "sub", but the JWT handler's default inbound claim map rewrites that to
+    /// ClaimTypes.NameIdentifier before it ever reaches User.Claims (nothing sets
+    /// MapInboundClaims = false), so a lookup for "sub" alone always comes back null — which is
+    /// what left every ApprovalRequest here stored with RequestedById 0 and ResolvedById null.</summary>
     private int? CurrentUserId()
     {
-        var claim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+        var claim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+            ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
         return int.TryParse(claim, out var id) ? id : null;
     }
 

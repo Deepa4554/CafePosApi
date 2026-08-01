@@ -3,7 +3,6 @@ using CafePOS.Api.Contracts;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CafePOS.Api.Infrastructure;
 
@@ -91,10 +90,15 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     public async Task<decimal> GetTaxRatePctAsync(CafePosDbContext db, int tenantId) =>
         await taxRateCache.GetTaxRatePctAsync(tenantId, async () => (await db.Settings.IgnoreQueryFilters().FirstAsync(s => s.TenantId == tenantId)).TaxRatePct);
 
-    public async Task<Order> BuildOrderAsync(
+    // The whole build runs in one transaction so the dine-in table claim below can hold a
+    // lock from the "is this table free?" check all the way through to the order actually
+    // existing. Two waiters tapping New Order on the same table within milliseconds used to
+    // both pass the check and both succeed — the second order became a ghost nobody billed.
+    public Task<Order> BuildOrderAsync(
         CafePosDbContext db, string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
         decimal discountPct, ClaimsPrincipal? user, int? explicitTenantId = null, int? branchId = null,
-        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null)
+        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null) =>
+        DbConcurrency.InTransactionAsync(db, async () =>
     {
         if (items.Count == 0)
             throw new ApiValidationException("Order must contain at least one item.");
@@ -104,17 +108,22 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (string.IsNullOrWhiteSpace(tableCode))
                 throw new ApiValidationException("Dine-in orders need a tableCode.");
 
-            var tableCheck = await TenantScoped(db.Tables, explicitTenantId)
+            var tableId = await TenantScoped(db.Tables, explicitTenantId)
                 .Where(t => t.Code == tableCode)
-                .Select(t => new
-                {
-                    Busy = TenantScoped(db.Orders, explicitTenantId)
-                        .Any(o => o.TableCode == tableCode && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served)),
-                })
+                .Select(t => (int?)t.Id)
                 .FirstOrDefaultAsync();
-            if (tableCheck is null)
+            if (tableId is null)
                 throw new ApiValidationException($"Table {tableCode} does not exist.");
-            if (tableCheck.Busy)
+
+            // The table row itself is the claim token — whoever holds its lock owns the
+            // right to open an order on it until they commit. The loser then re-runs the
+            // busy check against the winner's committed order and gets the conflict, which
+            // is what the guest-QR path has always done via GuestSession's unique index.
+            await DbConcurrency.LockRowsAsync<CafeTable>(db, tableId.Value);
+
+            var busy = await TenantScoped(db.Orders, explicitTenantId)
+                .AnyAsync(o => o.TableCode == tableCode && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
+            if (busy)
                 throw new ApiConflictException($"Table {tableCode} already has an open order.");
         }
 
@@ -163,10 +172,10 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var settings = await TenantScoped(db.Settings, explicitTenantId).FirstAsync();
         var (defaultServiceCharge, defaultPackingCharge, defaultDeliveryCharge) = ComputeDefaultCharges(settings, orderType, subtotal);
 
-        // QSR counter orders get a daily-resetting token instead of a table — stamped here
-        // (not inside the SaveChanges transaction below) since the UPSERT is already
-        // atomic on its own; a rolled-back order can at worst waste one token number, same
-        // as any sequence counter skipping on a failed insert.
+        // QSR counter orders get a daily-resetting token instead of a table. The UPSERT is
+        // atomic on its own; running inside this method's transaction additionally means a
+        // build that fails later gives the number back instead of leaving a gap in the
+        // day's tokens.
         int? tokenNumber = null;
         DateOnly? tokenDate = null;
         if (orderType == "QSR")
@@ -246,40 +255,28 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // No inventory deduction here — orders are created "Open"/unfired (see doc Section
         // 4.1). Stock is only consumed once FireUnfiredItemsAsync actually sends items to
         // the kitchen, so a held or abandoned order never leaves a phantom deduction.
-        IDbContextTransaction? txn = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync() : null;
-        try
+        //
+        // Two saves because the audit entry needs the order's generated id; the surrounding
+        // transaction (DbConcurrency.InTransactionAsync at the top of this method) is what
+        // keeps them atomic, exactly as the hand-rolled one here used to.
+        await db.SaveChangesAsync();
+        if (clampedDiscountPct > 0)
         {
-            await db.SaveChangesAsync();
-            if (clampedDiscountPct > 0)
+            var discountEntry = new AuditLogEntry
             {
-                var discountEntry = new AuditLogEntry
-                {
-                    Action = AuditAction.Discount,
-                    Resource = AuditResource.Order,
-                    ResourceId = order.Id.ToString(),
-                    Details = $"Order {order.Id} applied {clampedDiscountPct}% discount (−{discountAmount:C}).",
-                    Severity = AuditSeverity.Medium,
-                };
-                if (explicitTenantId is int auditTid) discountEntry.TenantId = auditTid;
-                db.AuditLog.Add(discountEntry);
-            }
-
+                Action = AuditAction.Discount,
+                Resource = AuditResource.Order,
+                ResourceId = order.Id.ToString(),
+                Details = $"Order {order.Id} applied {clampedDiscountPct}% discount (−{discountAmount:C}).",
+                Severity = AuditSeverity.Medium,
+            };
+            if (explicitTenantId is int auditTid) discountEntry.TenantId = auditTid;
+            db.AuditLog.Add(discountEntry);
             await db.SaveChangesAsync();
-
-            if (txn is not null) await txn.CommitAsync();
-        }
-        catch
-        {
-            if (txn is not null) await txn.RollbackAsync();
-            throw;
-        }
-        finally
-        {
-            if (txn is not null) await txn.DisposeAsync();
         }
 
         return order;
-    }
+    });
 
     /// <summary>Atomically hands out the next QSR token number for (tenantId, date) — a plain
     /// SELECT-then-UPDATE would race under concurrent order creation (two counter orders

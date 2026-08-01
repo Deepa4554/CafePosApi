@@ -16,8 +16,18 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/dashboard")]
 [Authorize(Policy = Policies.OwnerOrManager)]
-public class DashboardController(CafePosDbContext db) : ControllerBase
+public class DashboardController : ControllerBase
 {
+    private readonly CafePosDbContext db;
+
+    public DashboardController(CafePosDbContext db)
+    {
+        this.db = db;
+        // Read-only controller — see ReportsController's constructor for why every one of
+        // these aggregations is better off untracked.
+        db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+    }
+
     /// <summary>
     /// Real revenue/sales/inventory/peak-hour analytics computed from actual orders —
     /// replaces the Dashboard screen's previously-hardcoded ANALYTICS_DATA constant.

@@ -560,9 +560,10 @@ public class CafeSettings : ITenantScoped
     public bool TerminalPasscodeRequired { get; set; } = true;
 
     // Notification Preferences — each gates one real AppNotification category end-to-end
-    // (see CafePosDbContext.SaveChangesAsync's NotificationGates): turning one off means
-    // that category's AppNotification is silently dropped before it's ever saved or pushed,
-    // not just hidden client-side.
+    // (see NotificationPreferences.NamedGates): turning one off means that category's
+    // AppNotification is silently dropped before it's ever saved or pushed, not just hidden
+    // client-side. Every category NOT listed with its own bool here is still gate-able — see
+    // NotificationCategoryOverridesJson below and NotificationPreferences' own doc comment.
     public bool InventoryAlertsEnabled { get; set; } = true;
     public bool ShiftReportsEnabled { get; set; } = true;
     /// <summary>Kitchen "new order"/"items fired" alert — see OrderBuildingService.FireUnfiredItemsAsync.</summary>
@@ -572,12 +573,23 @@ public class CafeSettings : ITenantScoped
     public bool OrderPendingConfirmationAlertsEnabled { get; set; } = true;
     /// <summary>"Order ready to serve" alert — see OrderBuildingService.RecomputeBatchStatus.</summary>
     public bool OrderReadyAlertsEnabled { get; set; } = true;
+    /// <summary>"Approval needed" / granted / rejected notices — see ApprovalsController. Unlike
+    /// the alerts above these are role-scoped rather than tenant-wide (only whoever may actually
+    /// resolve the request is told), so turning this off silences an approval queue nobody else
+    /// was seeing anyway.</summary>
+    public bool ApprovalAlertsEnabled { get; set; } = true;
     /// <summary>Gates the WhatsApp order-tracking module's automatic status-update/bill-PDF
     /// sends for this tenant — see CafePosDbContext.SaveChangesAsync's WhatsApp event hook.
     /// Independent of whether a WhatsAppSession is actually Connected (that's a separate,
     /// harder gate); this is just the same "Owner can turn a notification category off"
     /// pattern as the alerts above, applied to the WhatsApp channel.</summary>
     public bool WhatsAppOrderUpdatesEnabled { get; set; } = true;
+    /// <summary>Per-tenant on/off overrides for every NotificationCategory that has NO
+    /// dedicated bool above — a JSON dict of category name -> enabled, written/read only
+    /// through NotificationPreferences (see its doc comment for why this exists instead of
+    /// one more named column per category). Null/empty = every generic category still at its
+    /// default (enabled). Never read or written directly outside NotificationPreferences.</summary>
+    public string? NotificationCategoryOverridesJson { get; set; }
 
     // QR Ordering
     /// <summary>When on, a guest QR session's first fire (Place Order) doesn't reach the

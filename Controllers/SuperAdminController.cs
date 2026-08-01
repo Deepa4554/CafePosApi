@@ -18,7 +18,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/superadmin")]
 [Authorize(Policy = Policies.PlatformAdminOnly)]
-public class SuperAdminController(CafePosDbContext db) : ControllerBase
+public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscriptions) : ControllerBase
 {
     [HttpGet("tenants")]
     public async Task<IEnumerable<TenantSummaryDto>> ListTenants()
@@ -72,6 +72,8 @@ public class SuperAdminController(CafePosDbContext db) : ControllerBase
         });
 
         await db.SaveChangesAsync();
+        // Affected tenant's entry, not the admin's own — see ISubscriptionCache.
+        subscriptions.Invalidate(tenantId);
 
         var staffCount = await db.Staff.IgnoreQueryFilters().CountAsync(s => s.TenantId == tenantId);
         var branchCount = await db.Branches.IgnoreQueryFilters().CountAsync(b => b.TenantId == tenantId);

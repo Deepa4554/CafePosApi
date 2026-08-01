@@ -26,15 +26,21 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         var query = db.Staff.AsQueryable();
         if (branchId is not null) query = query.Where(s => s.BranchId == branchId);
         var staff = await query.OrderBy(s => s.Name).ToListAsync();
-        return staff.Select(StaffDto.From);
+        var includeCompensation = IsOwnerOrManager();
+        return staff.Select(s => StaffDto.From(s, includeCompensation));
     }
 
     [HttpGet("{id:int}")]
     public async Task<ActionResult<StaffDto>> Get(int id)
     {
         var staff = await db.Staff.FindAsync(id);
-        return staff is null ? NotFound() : StaffDto.From(staff);
+        return staff is null ? NotFound() : StaffDto.From(staff, IsOwnerOrManager());
     }
+
+    /// <summary>Whether the caller can see a staff member's compensation (HourlyRate/
+    /// BasicSalary/Department/Designation) in List/Get — everything else in StaffDto is
+    /// visible to any authenticated role. See StaffDto's doc comment.</summary>
+    private bool IsOwnerOrManager() => User.IsInRole(nameof(AppRole.Owner)) || User.IsInRole(nameof(AppRole.Manager));
 
     /// <summary>Resolves the logged-in user's own StaffMember record, if any — powers
     /// the POS Checkout "Waiter" picker's self-service default, so a waiter taking

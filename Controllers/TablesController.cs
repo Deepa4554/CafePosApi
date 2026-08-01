@@ -30,7 +30,13 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
     [HttpGet]
     public async Task<IEnumerable<object>> List()
     {
-        var allTables = await db.Tables.OrderBy(t => t.Id).ToListAsync();
+        // Not paginated on purpose: a floor plan is a fixed physical thing, and every table
+        // has to be on screen at once for the grid to mean anything — page 2 of a seating
+        // chart would be a worse product, not a safer one. What this endpoint IS careful
+        // about is staying flat as ORDER history grows: the open-orders query below is
+        // filtered to live orders and projected to six columns, never the full graph.
+        // AsNoTracking throughout — nothing here is written back, and this is polled.
+        var allTables = await db.Tables.AsNoTracking().OrderBy(t => t.Id).ToListAsync();
         // A merged-in "guest" table (see CafeTable.MergedIntoTableId) is hidden from the
         // grid entirely — its seats fold into its host's MergedSeats below instead — since
         // merging is a floor-plan concept (temporarily one bookable unit), not a second row
@@ -49,7 +55,7 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
         // a table before ever placing an order; this just lets staff see/revoke it (see
         // GetSession/RevokeSession below) without changing what "occupied" means anywhere
         // else in the app.
-        var activeSessionsByTable = await db.GuestSessions
+        var activeSessionsByTable = await db.GuestSessions.AsNoTracking()
             .Where(s => s.Status == GuestSessionStatus.Active || s.Status == GuestSessionStatus.Locked)
             .ToDictionaryAsync(s => s.TableId, s => s.Id);
 

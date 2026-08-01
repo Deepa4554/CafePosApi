@@ -385,10 +385,20 @@ public class OrdersController(
 
         if (req.Allocations is { Count: > 0 })
         {
-            // Manual allocation — exact lines + quantities the chef picked.
+            // Manual allocation — exact lines + quantities the chef picked. One query for
+            // every order named in the request, not one full order-graph fetch per
+            // allocation: a chef clearing ten KOTs at once was ten round trips, each
+            // pulling items + modifiers + batches + payments, at exactly the moment the
+            // kitchen is busiest.
+            var allocOrderIds = req.Allocations.Select(a => a.OrderId).Distinct().ToList();
+            var ordersById = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
+                .Include(o => o.FireBatches).Include(o => o.Payments)
+                .Where(o => allocOrderIds.Contains(o.Id))
+                .ToDictionaryAsync(o => o.Id);
+
             foreach (var alloc in req.Allocations)
             {
-                var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == alloc.OrderId);
+                ordersById.TryGetValue(alloc.OrderId, out var order);
                 var item = order?.Items.FirstOrDefault(i => i.Id == alloc.ItemId);
                 if (order is null || item is null) continue;
                 AdvanceUnits(item, fromStage, alloc.Qty);
@@ -402,8 +412,14 @@ public class OrdersController(
             // FIFO — spread req.Qty across this dish's lines, oldest KOT first.
             var remaining = req.Qty ?? 0;
             if (remaining <= 0) throw new ApiValidationException("Enter a quantity or pick specific KOTs.");
+            // Restricted to orders still in play. Without this the FIFO walk pulled the full
+            // order graph of every order that ever contained this dish — a scan that grows
+            // with the cafe's entire history, to find the handful of tickets actually on the
+            // board. Finished/cancelled orders contribute nothing anyway: their units are
+            // all past `fromStage`, so the loop below already skipped them.
             var candidates = await db.Orders
                 .Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments)
+                .Where(o => !o.Cancelled && o.Status != OrderStatus.Served)
                 .Where(o => o.Items.Any(i => i.MenuItemId == req.MenuItemId && i.FireBatch > 0))
                 .ToListAsync();
             // Oldest fire batch first (FIFO), then order id for a stable tie-break.
@@ -504,9 +520,13 @@ public class OrdersController(
     /// OrderBuildingService.RecomputeOrderStatus) — any other batch already
     /// Preparing/Ready/Served on this order keeps its own status, untouched.</summary>
     [HttpPost("{id:int}/fire")]
-    public async Task<ActionResult<OrderDto>> Fire(int id)
+    public Task<ActionResult<OrderDto>> Fire(int id) =>
+        // Fire is the single point stock comes off the shelf, so it needs a transaction for
+        // the ingredient locks ConsumeInventoryAsync takes — plus the order lock, which
+        // stops two devices firing the same order into two duplicate kitchen tickets.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
         try
@@ -520,7 +540,7 @@ public class OrdersController(
             throw new ApiConflictException("This order was already fired — refresh and try again.");
         }
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Adds one item to an existing, not-yet-paid order (new item starts unfired,
     /// FireBatch 0, so it only reaches the kitchen — and only then deducts inventory — as
@@ -531,9 +551,14 @@ public class OrdersController(
     /// undisturbed — only once this item is fired does it become its own separate ticket.
     /// The bill still totals every item together regardless of which fire round it came from.</summary>
     [HttpPost("{id:int}/items")]
-    public async Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req)
+    public Task<ActionResult<OrderDto>> AddItem(int id, AddOrderItemRequest req) =>
+        // Totals are recomputed from the order's line collection as this request sees it, so
+        // two waiters adding different items to the same table at once used to end with
+        // whichever saved last writing a Total that only counted its own item — the guest
+        // was undercharged for the other. Serialised, the second one recomputes over both.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
         if (req.Qty <= 0) throw new ApiValidationException("Quantity must be a positive number.");
@@ -565,7 +590,7 @@ public class OrdersController(
 
         await db.SaveChangesAsync();
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Removes/voids an item from a not-yet-paid order.
     /// Unfired (FireBatch == 0): freely hard-deleted — nothing was ever deducted, even if
@@ -576,9 +601,12 @@ public class OrdersController(
     /// Preparing/Ready a reason is required and stock is NOT reversed (food is genuinely
     /// spent) — matches the doc's "void before cooking vs void with wastage" rule.</summary>
     [HttpDelete("{id:int}/items/{itemId:int}")]
-    public async Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId, [FromQuery] string? reason = null)
+    public Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId, [FromQuery] string? reason = null) =>
+        // Same lost-update exposure as AddItem, plus this one can reverse stock — see
+        // VoidItemAsync.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
 
@@ -605,7 +633,7 @@ public class OrdersController(
         }
         await db.SaveChangesAsync();
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Staff-Confirm Mode: the floor's "yes, this table is real" gate on a guest QR
     /// order's first submission — actually fires it to the kitchen (see
@@ -614,9 +642,15 @@ public class OrdersController(
     /// there's no per-waiter assignment, whoever's free on the floor handles it. Rejecting a
     /// pending order is just the existing Cancel endpoint; no separate reject action needed.</summary>
     [HttpPost("{id:int}/confirm")]
-    public async Task<ActionResult<OrderDto>> ConfirmGuestOrder(int id)
+    public Task<ActionResult<OrderDto>> ConfirmGuestOrder(int id) =>
+        // Fires to the kitchen, so it deducts stock — same transaction requirement as Fire.
+        // The order lock also turns the two-staff-confirm race described in the catch block
+        // below from a caught index violation into a clean "already confirmed" the loser
+        // reaches by simply re-reading PendingStaffConfirmation. The catch stays as the
+        // backstop it always was.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (!order.PendingStaffConfirmation) throw new ApiConflictException("This order isn't awaiting confirmation.");
         if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
@@ -659,7 +693,7 @@ public class OrdersController(
         await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
             $"Order {order.Id} confirmed by staff — sent to kitchen.", AuditSeverity.Low);
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Cancels the whole order — voids every not-yet-served line via the same
     /// before-cook-reverses/after-cook-doesn't rule as RemoveItem (see VoidItemAsync).
@@ -668,9 +702,13 @@ public class OrdersController(
     /// any item has already been served — a floor waiter can freely cancel a still-New order,
     /// but walking back served food needs a manager's say-so.</summary>
     [HttpPost("{id:int}/cancel")]
-    public async Task<ActionResult<OrderDto>> Cancel(int id, CancelOrderRequest req)
+    public Task<ActionResult<OrderDto>> Cancel(int id, CancelOrderRequest req) =>
+        // Reverses stock and hands gift-card balance / coupon / loyalty points back to their
+        // owners (ReleaseBillRedemptionsAsync) — every one of those is a shared figure, so
+        // it needs the same serialisation as spending them did.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot cancel a paid order — use Refund instead.");
         if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
@@ -710,7 +748,7 @@ public class OrdersController(
         await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
             $"Order {order.Id} cancelled. Reason: {req.Reason ?? "not specified"}.", AuditSeverity.Medium);
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Moves an in-progress dine-in order to a different, currently-empty table —
     /// e.g. a party asks to move seats. Only relabels TableCode/Title; every line item, fire
@@ -761,9 +799,11 @@ public class OrdersController(
     /// already has a served line (walking back served food needs a manager's say-so, same
     /// rule as the whole-order Cancel).</summary>
     [HttpPost("{id:int}/batches/{batchNumber:int}/cancel")]
-    public async Task<ActionResult<OrderDto>> CancelBatch(int id, int batchNumber, CancelOrderRequest req)
+    public Task<ActionResult<OrderDto>> CancelBatch(int id, int batchNumber, CancelOrderRequest req) =>
+        // Same stock reversal + redemption release as the whole-order Cancel above.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot cancel a KOT on a paid order — use Refund instead.");
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
@@ -799,7 +839,7 @@ public class OrdersController(
         await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
             $"KOT #{1000 + batch.Id} (order {order.Id}) cancelled. Reason: {req.Reason ?? "not specified"}.", AuditSeverity.Medium);
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Voids one line. Unfired (FireBatch==0): hard-deletes exactly as before fire-time
     /// deduction existed — nothing was ever deducted. Fired + New/Read (prep hasn't started):
@@ -824,15 +864,22 @@ public class OrdersController(
             var deductions = await db.InventoryTransactions
                 .Where(t => t.OrderItemId == item.Id && t.Type == InventoryTransactionType.Sale)
                 .ToListAsync();
-            // One ordered lock for every ingredient being credited back, taken before the
-            // FindAsync below reads any of their balances — a reversal racing a sale of the
-            // same ingredient would otherwise lose one of the two movements. See
+            // One ordered lock for every ingredient being credited back, taken before any of
+            // their balances are read — a reversal racing a sale of the same ingredient would
+            // otherwise lose one of the two movements. See
             // InventoryBatchService.LockIngredientsAsync.
-            await InventoryBatchService.LockIngredientsAsync(db, deductions.Select(d => d.InventoryItemId));
+            var ingredientIds = deductions.Select(d => d.InventoryItemId).Distinct().ToList();
+            await InventoryBatchService.LockIngredientsAsync(db, ingredientIds);
+            // Loaded in one query rather than a FindAsync per ingredient — a ten-ingredient
+            // recipe was ten separate round trips to a remote Postgres, all while the kitchen
+            // waits. Safe to batch now precisely because the lock above is already held, so
+            // these rows can't move between this read and the reversal below.
+            var ingredients = await db.InventoryItems
+                .Where(i => ingredientIds.Contains(i.Id))
+                .ToDictionaryAsync(i => i.Id);
             foreach (var d in deductions)
             {
-                var ingredient = await db.InventoryItems.FindAsync(d.InventoryItemId);
-                if (ingredient is null) continue;
+                if (!ingredients.TryGetValue(d.InventoryItemId, out var ingredient)) continue;
                 await InventoryBatchService.ReverseAsync(db, d, ingredient, "Void before prep",
                     CurrentUserId(), User.Identity?.Name ?? "Cafe Staff");
             }
@@ -856,9 +903,17 @@ public class OrdersController(
     /// territory, where goods were actually delivered).</summary>
     private async Task ReleaseBillRedemptionsAsync(Order order)
     {
+        // Each of these three credits value back onto a row shared with other orders, so
+        // they need the same lock-then-read the spending side takes (ApplyBillGiftCard /
+        // ApplyBillCoupon / ApplyBillLoyalty) — otherwise a cancellation racing a redemption
+        // reads a stale balance and hands back the wrong amount. Locked in the same order
+        // everywhere (Orders first, then these), so the two can't deadlock against each other.
         if (order.GiftCardAmountApplied > 0 && order.GiftCardCode is not null)
         {
-            var giftCard = await db.GiftCards.FirstOrDefaultAsync(g => g.Code == order.GiftCardCode);
+            var giftCardId = await db.GiftCards.Where(g => g.Code == order.GiftCardCode)
+                .Select(g => (int?)g.Id).FirstOrDefaultAsync();
+            await DbConcurrency.LockRowsAsync<GiftCard>(db, giftCardId ?? 0);
+            var giftCard = giftCardId is null ? null : await db.GiftCards.FirstOrDefaultAsync(g => g.Id == giftCardId.Value);
             if (giftCard is not null)
             {
                 giftCard.Balance += order.GiftCardAmountApplied;
@@ -870,13 +925,17 @@ public class OrdersController(
 
         if (order.CouponCode is not null && order.CouponDiscountAmount > 0)
         {
-            var coupon = await db.Coupons.FirstOrDefaultAsync(c => c.Code == order.CouponCode);
+            var couponId = await db.Coupons.Where(c => c.Code == order.CouponCode)
+                .Select(c => (int?)c.Id).FirstOrDefaultAsync();
+            await DbConcurrency.LockRowsAsync<Coupon>(db, couponId ?? 0);
+            var coupon = couponId is null ? null : await db.Coupons.FirstOrDefaultAsync(c => c.Id == couponId.Value);
             if (coupon is not null) coupon.IsUsed = false;
             order.CouponDiscountAmount = 0;
         }
 
         if (order.LoyaltyPointsRedeemed > 0)
         {
+            if (order.CustomerId is int lockCid) await DbConcurrency.LockRowsAsync<Customer>(db, lockCid);
             var customer = order.CustomerId is int cid ? await db.Customers.FirstOrDefaultAsync(c => c.Id == cid) : null;
             if (customer is not null)
                 customer.RedeemedPoints = Math.Max(0, customer.RedeemedPoints - order.LoyaltyPointsRedeemed);
@@ -899,9 +958,10 @@ public class OrdersController(
     /// ApprovalRequest and only actually lands on the order once the Owner approves it.</summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPatch("{id:int}/bill-discount")]
-    public async Task<ActionResult<OrderDto>> ApplyBillDiscount(int id, BillDiscountRequest req)
+    public Task<ActionResult<OrderDto>> ApplyBillDiscount(int id, BillDiscountRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot discount a paid order.");
         if ((req.Pct is null) == (req.Amount is null)) throw new ApiValidationException("Provide either a percentage or a flat amount, not both.");
@@ -930,7 +990,7 @@ public class OrdersController(
         await audit.LogAsync(AuditAction.Discount, AuditResource.Order, order.Id.ToString(),
             $"Bill discount of {amount:C} applied to order {order.Id}.", AuditSeverity.Medium);
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>
     /// Turns "0 rows matched" from one of the bill-time redemption UPDATEs below into a 409.
@@ -963,15 +1023,22 @@ public class OrdersController(
     /// <summary>Redeems a coupon at billing time (any time before Paid — not gated on
     /// Served, see ApplyBillDiscount). Only one coupon per order.</summary>
     [HttpPatch("{id:int}/bill-coupon")]
-    public async Task<ActionResult<OrderDto>> ApplyBillCoupon(int id, BillCouponRequest req)
+    public Task<ActionResult<OrderDto>> ApplyBillCoupon(int id, BillCouponRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a coupon to a paid order.");
         if (order.CouponCode is not null) throw new ApiConflictException("A coupon has already been applied to this order.");
         if (string.IsNullOrWhiteSpace(req.Code)) throw new ApiValidationException("Enter a coupon code.");
 
-        var coupon = await db.Coupons.FirstOrDefaultAsync(c => c.Code == req.Code.ToUpperInvariant());
+        // Single-use is a shared flag, same story as the gift card below — lock the row
+        // before reading IsUsed or two bills can each "be the one" that used it.
+        var couponId = await db.Coupons.Where(c => c.Code == req.Code.ToUpperInvariant())
+            .Select(c => (int?)c.Id).FirstOrDefaultAsync();
+        if (couponId is null) throw new ApiValidationException("Coupon code is invalid or expired.");
+        await DbConcurrency.LockRowsAsync<Coupon>(db, couponId.Value);
+        var coupon = await db.Coupons.FirstOrDefaultAsync(c => c.Id == couponId.Value);
         if (coupon is null) throw new ApiValidationException("Coupon code is invalid or expired.");
         if (coupon.IsUsed) throw new ApiConflictException("Coupon has already been used.");
         if (coupon.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Coupon has expired.");
@@ -1009,21 +1076,29 @@ public class OrdersController(
         await db.SaveChangesAsync();
         if (txn is not null) await txn.CommitAsync();
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Redeems a gift card at billing time (any time before Paid — not gated on
     /// Served, see ApplyBillDiscount). Debits only what this bill can absorb. Only one gift
     /// card per order.</summary>
     [HttpPatch("{id:int}/bill-giftcard")]
-    public async Task<ActionResult<OrderDto>> ApplyBillGiftCard(int id, BillGiftCardRequest req)
+    public Task<ActionResult<OrderDto>> ApplyBillGiftCard(int id, BillGiftCardRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot apply a gift card to a paid order.");
         if (order.GiftCardCode is not null) throw new ApiConflictException("A gift card has already been applied to this order.");
         if (string.IsNullOrWhiteSpace(req.Code)) throw new ApiValidationException("Enter a gift card code.");
 
-        var giftCard = await db.GiftCards.FirstOrDefaultAsync(g => g.Code == req.Code.ToUpperInvariant());
+        // Resolve the id, lock that row, and only THEN read the balance — the balance is a
+        // shared pot, so reading it before the lock is what let the same card pay for two
+        // bills at once on two different tills, each debiting from the same stale figure.
+        var giftCardId = await db.GiftCards.Where(g => g.Code == req.Code.ToUpperInvariant())
+            .Select(g => (int?)g.Id).FirstOrDefaultAsync();
+        if (giftCardId is null) throw new ApiValidationException("Gift card code not found.");
+        await DbConcurrency.LockRowsAsync<GiftCard>(db, giftCardId.Value);
+        var giftCard = await db.GiftCards.FirstOrDefaultAsync(g => g.Id == giftCardId.Value);
         if (giftCard is null) throw new ApiValidationException("Gift card code not found.");
         if (giftCard.Status != GiftCardStatus.Active) throw new ApiConflictException("Gift card is not active.");
         if (giftCard.ExpiresAt < DateTime.UtcNow) throw new ApiConflictException("Gift card has expired.");
@@ -1064,7 +1139,7 @@ public class OrdersController(
         await db.SaveChangesAsync();
         if (txn is not null) await txn.CommitAsync();
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Redeems the order's linked customer's loyalty points as a bill-time discount
     /// (1 point = ₹1, matching the earn rate in OrderBuildingService.RecordVisit). Same
@@ -1073,17 +1148,26 @@ public class OrdersController(
     /// OrderBuildingService.FindOrCreateCustomerAsync), not a real individual's point balance,
     /// so redeeming against it wouldn't mean anything.</summary>
     [HttpPatch("{id:int}/bill-loyalty")]
-    public async Task<ActionResult<OrderDto>> ApplyBillLoyalty(int id, BillLoyaltyRequest req)
+    public Task<ActionResult<OrderDto>> ApplyBillLoyalty(int id, BillLoyaltyRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
+        await DbConcurrency.LockRowsAsync<Order>(db, id);
         var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
-            .Include(o => o.FireBatches).Include(o => o.Payments).Include(o => o.Customer)
+            .Include(o => o.FireBatches).Include(o => o.Payments)
             .FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot redeem points on a paid order.");
         if (order.LoyaltyPointsRedeemed > 0) throw new ApiConflictException("Loyalty points have already been redeemed on this order.");
         if (string.IsNullOrWhiteSpace(order.GuestPhone)) throw new ApiValidationException("A guest mobile number is needed to redeem loyalty points.");
         if (req.Points <= 0) throw new ApiValidationException("Points must be positive.");
-        var customer = order.Customer ?? throw new ApiValidationException("No customer linked to this order.");
+        if (order.CustomerId is null) throw new ApiValidationException("No customer linked to this order.");
+        // Same shape as the gift-card path above: the point balance belongs to the customer,
+        // not this order, so it has to be locked and re-read before it's spent — otherwise
+        // two bills for the same regular could each redeem the last of their points.
+        await DbConcurrency.LockRowsAsync<Customer>(db, order.CustomerId.Value);
+        var customer = await db.Customers.FirstOrDefaultAsync(c => c.Id == order.CustomerId.Value)
+            ?? throw new ApiValidationException("No customer linked to this order.");
+        order.Customer = customer;
         if (req.Points > customer.AvailablePoints) throw new ApiValidationException($"Only {customer.AvailablePoints} points available.");
 
         var owedBeforeLoyalty = Math.Max(0, order.Subtotal - order.DiscountAmount - order.BillDiscountAmount - order.CouponDiscountAmount - order.GiftCardAmountApplied);
@@ -1118,7 +1202,7 @@ public class OrdersController(
         await db.SaveChangesAsync();
         if (txn is not null) await txn.CommitAsync();
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Sets Service Charge / Packing Charge / Delivery Charge / Tip / Round Off in
     /// one call — every field optional, only the ones supplied change (send 0 to clear one).
@@ -1126,9 +1210,10 @@ public class OrdersController(
     /// open to any authenticated staff (not Owner/Manager-only) since these are routine billing
     /// add-ons, not a discretionary markdown.</summary>
     [HttpPatch("{id:int}/bill-charges")]
-    public async Task<ActionResult<OrderDto>> ApplyBillCharges(int id, BillChargesRequest req)
+    public Task<ActionResult<OrderDto>> ApplyBillCharges(int id, BillChargesRequest req) =>
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Paid) throw new ApiConflictException("Cannot adjust charges on a paid order.");
         if (req.ServiceChargePct is not null && req.ServiceChargeAmount is not null)
@@ -1147,7 +1232,7 @@ public class OrdersController(
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         await db.SaveChangesAsync();
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Tax rate for the current (staff/JWT) tenant — same cached source
     /// OrderBuildingService.BuildOrderAsync uses.</summary>
@@ -1198,6 +1283,26 @@ public class OrdersController(
     private bool IsOwnerOrManager() =>
         User.IsInRole(nameof(AppRole.Owner)) || User.IsInRole(nameof(AppRole.Manager));
 
+    /// <summary>The same eager-load every endpoint here needs (lines + their add-ons, fire
+    /// batches, payments) — but with the order's row locked first, so a second device doing
+    /// the same thing waits for this one to commit and then reads what it actually wrote.
+    ///
+    /// Every bill-changing endpoint goes through this. Without it, two staff devices
+    /// working one table (a rush, a double-tapped button on slow wifi) both read the same
+    /// snapshot and the later save silently discards the earlier one — a bill settled
+    /// twice, a gift card spent twice, an item added and then billed as if it never was.
+    ///
+    /// Only meaningful inside DbConcurrency.InTransactionAsync; the lock lives exactly as
+    /// long as that transaction does. Load the order through this and nowhere else within
+    /// such a block, or EF hands back the stale copy it already had tracked.</summary>
+    private async Task<Order?> LoadOrderForUpdateAsync(int id)
+    {
+        await DbConcurrency.LockRowsAsync<Order>(db, id);
+        return await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
+            .Include(o => o.FireBatches).Include(o => o.Payments)
+            .FirstOrDefaultAsync(o => o.Id == id);
+    }
+
     /// <summary>
     /// Marks the bill paid. Payment can happen at any point in the order's lifecycle —
     /// before, during, or after serving (e.g. a QSR counter that collects payment up front
@@ -1210,9 +1315,16 @@ public class OrdersController(
         new(StringComparer.OrdinalIgnoreCase) { "Cash", "Card", "UPI" };
 
     [HttpPatch("{id:int}/pay")]
-    public async Task<ActionResult<OrderDto>> Pay(int id, PayRequest? req = null)
+    public Task<ActionResult<OrderDto>> Pay(int id, PayRequest? req = null) =>
+        // Settling a bill is the single most expensive thing to get wrong under load: two
+        // devices tapping Pay on the same table in the same second used to both see
+        // Paid=false and both write a full payment row, so the till and the revenue report
+        // disagreed by one whole bill. The lock inside LoadOrderForUpdateAsync makes the
+        // second one wait, re-read Paid=true, and get the "already paid" conflict it should
+        // always have got.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
@@ -1290,7 +1402,7 @@ public class OrdersController(
         await CloseOrderAsync(order);
         await SavePaymentStateAsync(order);
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Marks Paid and closes any linked guest session — the actual "this bill is now
     /// settled" transition, shared by Pay (once a payment fully covers the balance) and Close
@@ -1320,9 +1432,12 @@ public class OrdersController(
     /// can't express (it always requires a positive amount to submit). Rejects if anything's
     /// still owed; use Pay to collect that first.</summary>
     [HttpPatch("{id:int}/close")]
-    public async Task<ActionResult<OrderDto>> Close(int id)
+    public Task<ActionResult<OrderDto>> Close(int id) =>
+        // Flips Paid, exactly like Pay — so it needs the same serialisation, or Close racing
+        // a final Pay could settle the same bill twice over.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
@@ -1334,7 +1449,7 @@ public class OrdersController(
         await CloseOrderAsync(order);
         await SavePaymentStateAsync(order);
         return OrderDto.From(order);
-    }
+    });
 
     /// <summary>Fills in the guest's phone/name on an order that already exists — see
     /// UpdateOrderGuestRequest. Deliberately NOT gated on Paid: the reason a number gets added
@@ -1403,9 +1518,12 @@ public class OrdersController(
     /// refund only happens once the Owner approves it (ApprovalsController.Approve).</summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("{id:int}/refund")]
-    public async Task<ActionResult<OrderDto>> Refund(int id, RefundOrderRequest req)
+    public Task<ActionResult<OrderDto>> Refund(int id, RefundOrderRequest req) =>
+        // Money leaving the till — the Refunded flag is exactly the kind of read-then-set
+        // that two managers hitting Refund together used to both get past.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
+        var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
         if (!order.Paid) throw new ApiValidationException("Only paid orders can be refunded.");
         if (order.Refunded) throw new ApiConflictException("Order has already been refunded.");
@@ -1445,6 +1563,6 @@ public class OrdersController(
             $"Refunded {amount:C} for order {order.Id}. Reason: {req.Reason ?? "not specified"}.", AuditSeverity.High);
 
         return OrderDto.From(order);
-    }
+    });
 
 }

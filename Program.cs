@@ -60,6 +60,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<ITaxRateCache, TaxRateCache>();
+builder.Services.AddSingleton<ISubscriptionCache, SubscriptionCache>();
 
 // ---------- QR token encryption ----------
 // Keys live in the database so already-printed QR codes keep working across restarts AND
@@ -97,8 +98,44 @@ builder.Services.AddDbContext<CafePosDbContext>(options =>
     if (string.IsNullOrWhiteSpace(connectionString))
         options.UseInMemoryDatabase("CafePosDev");
     else
-        options.UseNpgsql(connectionString);
+        options.UseNpgsql(WithPoolDefaults(connectionString), npgsql =>
+        {
+            // Without this, a single transient Postgres blip (a Supabase failover, a
+            // momentary network drop, a pooler restart) surfaces as a hard 500 to every
+            // tenant at once instead of a retry nobody notices. Retries are transient-only
+            // — a real constraint violation or a concurrency conflict still fails fast.
+            //
+            // Note this makes EF refuse plainly-opened transactions: every explicit
+            // transaction has to go through the execution strategy instead. That's what
+            // DbConcurrency.InTransactionAsync is for — use it, don't call
+            // BeginTransactionAsync directly.
+            npgsql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), errorCodesToAdd: null);
+            // A query that's still running after 30s is never going to make a POS screen
+            // useful — fail it and give the connection back to the pool rather than letting
+            // it sit and starve everyone else.
+            npgsql.CommandTimeout(30);
+        });
 });
+
+// Npgsql's implicit default is a 100-connection pool per process, which is more than most
+// managed Postgres instances allow in TOTAL — a moderate burst (order fire + KDS polling +
+// dashboards) could open enough connections to lock every tenant out of the database rather
+// than queue politely behind a sane cap. These are floor values only: anything the deployed
+// connection string states explicitly always wins.
+static string WithPoolDefaults(string raw)
+{
+    var b = new Npgsql.NpgsqlConnectionStringBuilder(raw);
+    if (!b.ContainsKey("Maximum Pool Size")) b.MaxPoolSize = 50;
+    if (!b.ContainsKey("Minimum Pool Size")) b.MinPoolSize = 2;
+    // How long a request waits for a free connection before failing — the "graceful
+    // queuing" half of the cap above.
+    if (!b.ContainsKey("Timeout")) b.Timeout = 20;
+    // Managed Postgres proxies drop idle connections silently; recycling ours first turns
+    // what would be a broken-pipe 500 into a fresh connection.
+    if (!b.ContainsKey("Connection Idle Lifetime")) b.ConnectionIdleLifetime = 60;
+    if (!b.ContainsKey("Keepalive")) b.KeepAlive = 30;
+    return b.ConnectionString;
+}
 
 // ---------- Auth: JWT + password hashing ----------
 var jwtSecret = builder.Configuration["Jwt:Secret"];
@@ -136,13 +173,21 @@ builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email
 builder.Services.AddHttpClient<IEmailService, BrevoEmailService>();
 
 // ---------- AI (Gemini) ----------
+// Explicit timeouts on both AI clients: the HttpClient default is 100 seconds, so a flaky
+// or slow upstream model could hold a request slot (and its database connection) open for
+// well over a minute each. A burst of those pins down capacity for every tenant, not just
+// the one using AI — the reason AIController also carries its own rate-limit policy.
 builder.Services.Configure<GeminiOptions>(builder.Configuration.GetSection("Gemini"));
-builder.Services.AddHttpClient<IGeminiService, GeminiService>();
+builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
+    client.Timeout = TimeSpan.FromSeconds(30));
 
 // ---------- AI menu-photo import (Claude -> Google Vision + Groq fallback chain) ----------
 // Reads ANTHROPIC_API_KEY / GOOGLE_APPLICATION_CREDENTIALS / GROQ_API_KEY directly as flat
 // env vars (no appsettings section) — see MenuPhotoAiService's doc comment.
-builder.Services.AddHttpClient<IMenuPhotoAiService, MenuPhotoAiService>();
+// Longer than the chat client above because this one uploads a photo and walks a provider
+// fallback chain, but still far short of the 100s default.
+builder.Services.AddHttpClient<IMenuPhotoAiService, MenuPhotoAiService>(client =>
+    client.Timeout = TimeSpan.FromSeconds(60));
 
 // ---------- Image storage (Supabase Storage) ----------
 builder.Services.Configure<SupabaseStorageOptions>(builder.Configuration.GetSection("Supabase"));
@@ -210,9 +255,25 @@ builder.Services
         {
             OnMessageReceived = context =>
             {
-                var accessToken = context.Request.Query["access_token"];
-                if (!string.IsNullOrEmpty(accessToken) && context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
-                    context.Token = accessToken;
+                var accessTokenQuery = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(accessTokenQuery) && context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                {
+                    context.Token = accessTokenQuery;
+                    return Task.CompletedTask;
+                }
+
+                // Web build carries no Authorization header at all (see tokenStore.ts —
+                // the access token is never put anywhere JS can read it); the httpOnly
+                // cookie AuthCookies sets on login/refresh rides along automatically on
+                // every same-site request, including this one, so fall back to it only
+                // when there's no real header to prefer.
+                if (string.IsNullOrEmpty(context.Request.Headers.Authorization) &&
+                    context.Request.Cookies.TryGetValue(AuthCookies.AccessToken, out var cookieToken) &&
+                    !string.IsNullOrEmpty(cookieToken))
+                {
+                    context.Token = cookieToken;
+                }
+
                 return Task.CompletedTask;
             },
         };
@@ -241,6 +302,11 @@ builder.Services.AddScoped<IAuthorizationHandler, RequirePlanHandler>();
 // Replaces the 5-8s polling Orders/KDS/Tables used before (see useOrders.ts/useTables.ts) —
 // CafePosDbContext pushes a tenant-scoped "ordersChanged" event on every relevant save
 // (see CafePosDbContext.SaveChangesAsync), no controller has to remember to notify.
+//
+// In-process only — hub group membership lives on whichever instance holds the socket. Fine
+// as long as this stays a single API instance; if it's ever scaled to two or more, add a
+// Redis (or other) SignalR backplane so a save on instance A can still reach a device
+// connected to instance B.
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<IRealtimeNotifier, RealtimeNotifier>();
 
@@ -249,9 +315,9 @@ builder.Services.AddSingleton<IRealtimeNotifier, RealtimeNotifier>();
 // any private-LAN origin on those same ports (192.168.x.x / 10.x.x.x / 172.16-31.x.x)
 // so a phone on the same Wi-Fi can open http://<lan-ip>:3000 and actually log in —
 // not just localhost, which only ever means "this machine" to whichever device is
-// asking. No cookies/credentials are involved (access + refresh tokens both travel
-// in the request/response body), so origins can just be allowed outright instead of
-// juggling AllowCredentials' wildcard restrictions.
+// asking. AllowCredentials is required now that the web build authenticates via the
+// httpOnly cookies AuthCookies sets (see its doc comment) — safe to combine with a
+// dynamic origin check like this since neither policy ever falls back to a literal "*".
 const string DevCorsPolicy = "DevCors";
 const string ProdCorsPolicy = "ProdCors";
 var lanOriginPattern = new System.Text.RegularExpressions.Regex(
@@ -267,7 +333,8 @@ builder.Services.AddCors(options =>
         policy
             .SetIsOriginAllowed(origin => lanOriginPattern.IsMatch(origin))
             .AllowAnyHeader()
-            .AllowAnyMethod();
+            .AllowAnyMethod()
+            .AllowCredentials();
     });
     options.AddPolicy(ProdCorsPolicy, policy =>
     {
@@ -283,7 +350,7 @@ builder.Services.AddCors(options =>
             // is set to a real domain, that takes over above.
             policy.SetIsOriginAllowed(origin => lanOriginPattern.IsMatch(origin));
         }
-        policy.AllowAnyHeader().AllowAnyMethod();
+        policy.AllowAnyHeader().AllowAnyMethod().AllowCredentials();
     });
 });
 
@@ -297,18 +364,56 @@ const string AuthLimiterPolicy = "AuthLimiter";
 // uses — attribute arguments must be compile-time constants, so that reference can't
 // share this const directly across files.
 const string GuestSessionLimiterPolicy = "GuestSessionLimiter";
+// AI endpoints call out to paid third-party providers (Gemini/Claude/Vision/Groq) that are
+// slow and occasionally flaky — a burst of them can pin down a large share of this API's
+// request capacity for every tenant, not just the tenant asking for AI. Kept well below the
+// global cap on purpose: nothing about the AI features is latency-critical to service.
+const string AiLimiterPolicy = "AiLimiter";
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            factory: _ => new FixedWindowRateLimiterOptions
-            {
-                PermitLimit = 200,
-                Window = TimeSpan.FromMinutes(1),
-                QueueLimit = 0,
-            }));
+    // Partitioned by signed-in identity where there is one, falling back to IP only for
+    // anonymous traffic. Partitioning on IP alone punished the normal case: every tablet in
+    // one cafe shares a single NAT/CGNAT address, so a busy floor's devices ate each other's
+    // budget. The second, wider partition adds the aggregate cap IP-only had no way to
+    // express — one tenant (however many addresses it comes from) can't crowd out the rest.
+    options.GlobalLimiter = PartitionedRateLimiter.CreateChained(
+        PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                partitionKey: CallerPartitionKey(httpContext),
+                factory: _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 200,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0,
+                })),
+        PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        {
+            var tenantId = httpContext.User.FindFirst("tenantId")?.Value;
+            // Anonymous/guest traffic has no tenant to aggregate over — the per-caller
+            // partition above is already its only cap, so don't double-count it here.
+            return tenantId is null
+                ? RateLimitPartition.GetNoLimiter("anonymous")
+                : RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: $"tenant:{tenantId}",
+                    factory: _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 3000,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                    });
+        }));
+
+    // One café's staff on a shared IP are distinct callers; an anonymous flood from one
+    // address still collapses to a single partition exactly as before.
+    static string CallerPartitionKey(HttpContext httpContext)
+    {
+        var userId = httpContext.User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+            ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (userId is not null)
+            return $"user:{httpContext.User.FindFirst("tenantId")?.Value}:{userId}";
+        return $"ip:{httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
+    }
 
     options.AddPolicy(AuthLimiterPolicy, httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
@@ -329,6 +434,20 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+
+    // See AiLimiterPolicy's declaration above. Partitioned per tenant, not per IP: the cost
+    // being protected (upstream API spend + a request slot held open for seconds) is the
+    // cafe's, however many of its devices asked.
+    options.AddPolicy(AiLimiterPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.User.FindFirst("tenantId")?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             }));
@@ -381,9 +500,14 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors(app.Environment.IsDevelopment() ? DevCorsPolicy : ProdCorsPolicy);
 
+app.UseAuthentication();
+
+// Deliberately AFTER UseAuthentication: the limiter partitions on the caller's tenant/user
+// claims (see AddRateLimiter above), which don't exist until the JWT has been validated.
+// Validating a token is cheap next to anything it gates, and the anonymous surfaces that
+// actually attract abuse (login, OTP, guest QR) keep their own stricter per-IP policies.
 app.UseRateLimiter();
 
-app.UseAuthentication();
 app.UseMiddleware<SubscriptionExpiryMiddleware>();
 app.UseAuthorization();
 

@@ -16,8 +16,22 @@ namespace CafePOS.Api.Controllers;
 [Route("api/reports")]
 [Authorize(Policy = Policies.OwnerOrManager)]
 [Authorize(Policy = Policies.RequirePlus)]
-public class ReportsController(CafePosDbContext db) : ControllerBase
+public class ReportsController : ControllerBase
 {
+    private readonly CafePosDbContext db;
+
+    public ReportsController(CafePosDbContext db)
+    {
+        this.db = db;
+        // Every endpoint here but one is a read-only aggregation over the biggest tables in
+        // the database. Change-tracking all of that cost roughly double the memory, plus a
+        // change-detection pass, for entities that were never going to be written back —
+        // and several reports pull tens of thousands of rows. Set once for the controller
+        // instead of remembered per query; DismissMissingRecipe, the one endpoint that does
+        // write, opts back in explicitly with AsTracking().
+        db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+    }
+
     /// <summary>Ingredient cost vs menu price for every Prepared/Independent item, worst
     /// food-cost% first — "which items are eating your margin" (doc Section 7).</summary>
     [HttpGet("food-cost")]
@@ -128,7 +142,9 @@ public class ReportsController(CafePosDbContext db) : ControllerBase
     [HttpPost("missing-recipes/{id:int}/dismiss")]
     public async Task<IActionResult> DismissMissingRecipe(int id)
     {
-        var alert = await db.MissingRecipeAlerts.FindAsync(id);
+        // AsTracking because this controller runs NoTracking by default (see the constructor)
+        // — without it the flag below would be set on a detached copy and never saved.
+        var alert = await db.MissingRecipeAlerts.AsTracking().FirstOrDefaultAsync(a => a.Id == id);
         if (alert is null) return NotFound();
         alert.Dismissed = true;
         await db.SaveChangesAsync();
@@ -443,17 +459,21 @@ public class ReportsController(CafePosDbContext db) : ControllerBase
             .GroupBy(o => o.CustomerId!.Value)
             .ToDictionary(g => g.Key, g => new { Visits = g.Count(), Spent = g.Sum(o => o.Total) });
 
-        // Every customer row is materialised because AvailablePoints and the tier are computed
-        // properties (see Customer.AvailablePoints) — neither can be translated to SQL.
-        var allCustomers = await db.Customers.ToListAsync();
-        var pointsOutstanding = allCustomers.Sum(c => c.AvailablePoints);
-
         var nowIst = IstClock.NowIst;
         var lapsedCutoffUtc = (nowIst - TimeSpan.FromDays(60)) - IstClock.Offset;
-        var lapsedCustomers = allCustomers.Count(c => c.LastVisitAt < lapsedCutoffUtc);
 
-        var activeIds = perCustomer.Keys.ToHashSet();
-        var activeCustomers = allCustomers.Where(c => activeIds.Contains(c.Id)).ToList();
+        // These two are whole-table figures, but they're both plain aggregates — computing
+        // them in SQL keeps this report's memory flat as the customer list grows, instead of
+        // pulling every row (with its notes and addresses) into the API just to add up two
+        // integer columns. AvailablePoints/the tier being computed properties is why the
+        // ROWS still have to be materialised below, but only the active ones need to be.
+        var pointsOutstanding = await db.Customers.SumAsync(c => c.TotalPoints - c.RedeemedPoints);
+        var lapsedCustomers = await db.Customers.CountAsync(c => c.LastVisitAt < lapsedCutoffUtc);
+
+        var activeIds = perCustomer.Keys.ToList();
+        var activeCustomers = await db.Customers
+            .Where(c => activeIds.Contains(c.Id))
+            .ToListAsync();
         var newCustomers = activeCustomers.Count(c => c.JoinedAt >= periodStartUtc && c.JoinedAt < periodEndExclusiveUtc);
         var returningCustomers = activeCustomers.Count - newCustomers;
 

@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text;
 using CafePOS.Api.Contracts;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
@@ -29,6 +30,7 @@ public class AuthController(
     IPasswordHasher<AppUser> hasher,
     IAuditService audit,
     IEmailService email,
+    IWebHostEnvironment env,
     ILogger<AuthController> logger) : ControllerBase
 {
     /// <summary>
@@ -129,7 +131,14 @@ public class AuthController(
             throw new ApiValidationException("Verification code has expired or wasn't requested. Request a new one.");
         if (otp.Attempts >= 5)
             throw new ApiValidationException("Too many incorrect attempts. Request a new code.");
-        if (otp.Code != suppliedOtp.Trim())
+        // Constant-time compare — a plain != short-circuits on the first mismatched digit,
+        // which is a (minor, on top of the 5-attempt lockout) timing side-channel on an
+        // otherwise-random 6-digit code (SECURITY_AUDIT_2026-07-30 finding #3).
+        var supplied = suppliedOtp.Trim();
+        var codesMatch = otp.Code.Length == supplied.Length &&
+            System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(otp.Code), Encoding.UTF8.GetBytes(supplied));
+        if (!codesMatch)
         {
             otp.Attempts++;
             await db.SaveChangesAsync();
@@ -181,7 +190,9 @@ public class AuthController(
         var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
+        var accessToken = tokenService.CreateAccessToken(user);
+        AuthCookies.Set(Response, accessToken, refreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
+        return Ok(BuildResponse(user, accessToken, refreshToken));
     }
 
     /// <summary>
@@ -241,7 +252,9 @@ public class AuthController(
         var refreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
+        var accessToken = tokenService.CreateAccessToken(user);
+        AuthCookies.Set(Response, accessToken, refreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
+        return Ok(BuildResponse(user, accessToken, refreshToken));
     }
 
     private async Task<string> GenerateUniqueSlugAsync(string cafeName)
@@ -281,7 +294,9 @@ public class AuthController(
         await db.SaveChangesAsync();
         await audit.LogAsync(AuditAction.Login, AuditResource.Auth, user.Id.ToString(), $"{user.Name} signed in.", AuditSeverity.Low, user.Id, user.Name, user.TenantId);
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), refreshToken));
+        var accessToken = tokenService.CreateAccessToken(user);
+        AuthCookies.Set(Response, accessToken, refreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
+        return Ok(BuildResponse(user, accessToken, refreshToken));
     }
 
     /// <summary>
@@ -296,7 +311,12 @@ public class AuthController(
     [HttpPost("refresh")]
     public async Task<ActionResult<AuthResponse>> Refresh([FromBody] RefreshRequest? req)
     {
+        // Mobile sends its MMKV-stored refresh token in the body; the web build sends none
+        // (see tokenStore.ts) and relies on the httpOnly cookie AuthCookies scoped this
+        // request path instead.
         var presentedToken = req?.RefreshToken;
+        if (string.IsNullOrWhiteSpace(presentedToken))
+            presentedToken = Request.Cookies[AuthCookies.RefreshToken];
         if (string.IsNullOrWhiteSpace(presentedToken))
             throw new UnauthorizedAccessException("Refresh token is invalid or expired.");
 
@@ -312,7 +332,9 @@ public class AuthController(
         var newRefreshToken = await IssueTokensAsync(user);
         await db.SaveChangesAsync();
 
-        return Ok(BuildResponse(user, tokenService.CreateAccessToken(user), newRefreshToken));
+        var accessToken = tokenService.CreateAccessToken(user);
+        AuthCookies.Set(Response, accessToken, newRefreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
+        return Ok(BuildResponse(user, accessToken, newRefreshToken));
     }
 
     /// <summary>Revokes only the calling device's own session — every other device
@@ -326,13 +348,14 @@ public class AuthController(
     public async Task<IActionResult> Logout([FromBody] LogoutRequest? req)
     {
         var user = await CurrentUserAsync();
-        var presentedToken = req?.RefreshToken;
+        var presentedToken = req?.RefreshToken ?? Request.Cookies[AuthCookies.RefreshToken];
         if (!string.IsNullOrWhiteSpace(presentedToken))
         {
             var entry = await db.RefreshTokens.FirstOrDefaultAsync(t => t.Token == presentedToken && t.UserId == user.Id);
             if (entry is not null) entry.RevokedAt = DateTime.UtcNow;
         }
         await db.SaveChangesAsync();
+        AuthCookies.Clear(Response);
         await audit.LogAsync(AuditAction.Logout, AuditResource.Auth, user.Id.ToString(), $"{user.Name} signed out.", AuditSeverity.Low, user.Id, user.Name);
         return NoContent();
     }

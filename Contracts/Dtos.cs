@@ -603,7 +603,8 @@ public record UpdateSettingsRequest(
     bool? DeliveryChargeAutoApplyTakeaway = null,
     bool? DeliveryChargeAutoApplyDelivery = null,
     bool? DeliveryChargeAutoApplyToken = null,
-    bool? DeliveryChargeClearDefault = null);
+    bool? DeliveryChargeClearDefault = null,
+    bool? ApprovalAlertsEnabled = null);
 
 // ---------- Order Note Suggestions ----------
 
