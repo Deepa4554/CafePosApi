@@ -657,6 +657,17 @@ public class CafeSettings : ITenantScoped
     /// same as ReceiptShowGstNumber being off either way (no number to show).</summary>
     public string? GstNumber { get; set; }
 
+    /// <summary>The cafe's own UPI payment address ("cafe@okaxis") — what the pay-by-UPI QR
+    /// on a bill is addressed to. Null/blank means the cafe hasn't set one up, and every
+    /// UPI QR surface (printed bill, the bill screen's Pay by UPI button) simply doesn't
+    /// appear — see the frontend's buildUpiPaymentUri.
+    ///
+    /// Deliberately safe to serve from this controller's [AllowAnonymous] GET: a VPA is a
+    /// receive-only address meant to be shown to whoever is paying (it goes on the printed
+    /// bill and on a QR sticker at the counter), not a credential. Knowing it lets someone
+    /// send money to this cafe, nothing else.</summary>
+    public string? UpiVpa { get; set; }
+
     // Attendance tunables — used by AttendanceController to derive Late/HalfDay/
     // Overtime status from raw punch times.
     public int LateGraceMinutes { get; set; } = 10;

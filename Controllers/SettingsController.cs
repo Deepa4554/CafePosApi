@@ -12,6 +12,14 @@ namespace CafePOS.Api.Controllers;
 [Route("api/settings")]
 public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage) : ControllerBase
 {
+    /// <summary>"name@handle", NPCI's shape for a UPI address. Deliberately loose on the
+    /// name half (banks allow letters, digits, dot, hyphen, underscore) and on the handle,
+    /// which is just a bank/PSP suffix that new providers keep adding to — the point is to
+    /// catch a typo or a phone number typed into the wrong box, not to maintain a list of
+    /// every valid PSP.</summary>
+    private static readonly System.Text.RegularExpressions.Regex UpiVpaPattern =
+        new(@"^[a-zA-Z0-9._-]{2,256}@[a-zA-Z][a-zA-Z0-9.]{1,63}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     /// <summary>
     /// Public — the app's theme/branding must render before login (splash,
     /// login screen background) and the QR menu is customer-facing too.
@@ -94,6 +102,16 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.ReceiptShowItemNotes is not null) settings.ReceiptShowItemNotes = req.ReceiptShowItemNotes.Value;
         if (req.ReceiptShowFooter is not null) settings.ReceiptShowFooter = req.ReceiptShowFooter.Value;
         if (req.GstNumber is not null) settings.GstNumber = req.GstNumber.Trim();
+        if (req.UpiVpa is not null)
+        {
+            var vpa = req.UpiVpa.Trim();
+            // Empty clears it (the Cafe Settings field emptied out) — only a non-empty value
+            // has to look like a real address, since an unparseable VPA produces a QR that
+            // every UPI app rejects at scan time, long after the bill is in a guest's hands.
+            if (vpa.Length > 0 && !UpiVpaPattern.IsMatch(vpa))
+                throw new ApiValidationException("Enter a valid UPI ID, like cafename@okaxis.");
+            settings.UpiVpa = vpa.Length > 0 ? vpa : null;
+        }
         if (req.Latitude is not null) settings.Latitude = req.Latitude;
         if (req.Longitude is not null) settings.Longitude = req.Longitude;
 

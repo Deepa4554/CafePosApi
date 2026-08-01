@@ -1,0 +1,239 @@
+Using launch settings from C:\Users\Aashish Verma\PrabandhOs\PrabandhOS\CafePosApi\Properties\launchSettings.json...
+Building...
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (212ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT "MigrationId", "ProductVersion"
+      FROM "__EFMigrationsHistory"
+      ORDER BY "MigrationId";
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (185ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory" (
+          "MigrationId" character varying(150) NOT NULL,
+          "ProductVersion" character varying(32) NOT NULL,
+          CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
+      );
+info: Microsoft.EntityFrameworkCore.Migrations[20411]
+      Acquiring an exclusive lock for migration application. See https://aka.ms/efcore-docs-migrations-lock for more information if this takes too long.
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (154ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      LOCK TABLE "__EFMigrationsHistory" IN ACCESS EXCLUSIVE MODE
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (154ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT "MigrationId", "ProductVersion"
+      FROM "__EFMigrationsHistory"
+      ORDER BY "MigrationId";
+info: Microsoft.EntityFrameworkCore.Migrations[20405]
+      No migrations were applied. The database is already up to date.
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (153ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Tenants" AS t)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (172ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Settings" AS s
+          WHERE s."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (154ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Subscriptions" AS s
+          WHERE s."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (154ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Branches" AS b
+          WHERE b."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (154ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Integrations" AS i
+          WHERE i."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (153ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Rewards" AS r
+          WHERE r."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (155ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "MenuItems" AS m
+          WHERE m."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (154ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Tables" AS t
+          WHERE t."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (153ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "InventoryItems" AS i
+          WHERE i."TenantId" = @__ef_filter__TenantIdOrDefault_0)
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (156ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT m."Id", m."Available", m."Category", m."Description", m."Icon", m."Image", m."ItemType", m."LinkedInventoryItemId", m."Name", m."Popular", m."Price", m."ProductType", m."ShortCode", m."StationId", m."Subtitle", m."TaxGroupId", m."TenantId", m."VegNonVegType"
+      FROM "MenuItems" AS m
+      WHERE m."TenantId" = @__ef_filter__TenantIdOrDefault_0
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (154ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT m."Id", m."Available", m."Category", m."Description", m."Icon", m."Image", m."ItemType", m."LinkedInventoryItemId", m."Name", m."Popular", m."Price", m."ProductType", m."ShortCode", m."StationId", m."Subtitle", m."TaxGroupId", m."TenantId", m."VegNonVegType"
+      FROM "MenuItems" AS m
+      WHERE m."TenantId" = @__ef_filter__TenantIdOrDefault_0
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (155ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT i."Id", i."BranchId", i."Category", i."Current", i."DailyUsage", i."Icon", i."IsActive", i."LastRestockAt", i."LowStockNotified", i."Max", i."MinStock", i."Name", i."ReorderLevel", i."TenantId", i."Unit", i."UnitCost"
+      FROM "InventoryItems" AS i
+      WHERE i."TenantId" = @__ef_filter__TenantIdOrDefault_0
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (153ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT u."Id", u."AccessMode", u."AllowedScreens", u."AssignedStationId", u."CreatedAt", u."Email", u."IsActive", u."IsPlatformAdmin", u."Name", u."PasswordHash", u."Phone", u."ProfilePhoto", u."Role", u."TenantId"
+      FROM "Users" AS u
+      WHERE u."TenantId" = 0
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (156ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "Users" AS u
+          WHERE u."Email" = 'superadmin@cafepos.local')
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (158ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT DISTINCT i."InventoryItemId"
+      FROM "InventoryBatches" AS i
+      WHERE i."TenantId" = @__ef_filter__TenantIdOrDefault_0
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (156ms) [Parameters=[@__ef_filter__TenantIdOrDefault_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT i."Id", i."BranchId", i."Category", i."Current", i."DailyUsage", i."Icon", i."IsActive", i."LastRestockAt", i."LowStockNotified", i."Max", i."MinStock", i."Name", i."ReorderLevel", i."TenantId", i."Unit", i."UnitCost"
+      FROM "InventoryItems" AS i
+      WHERE i."TenantId" = @__ef_filter__TenantIdOrDefault_0
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (157ms) [Parameters=[@__ownerEmail_0='?'], CommandType='Text', CommandTimeout='30']
+      SELECT u."Id", u."AccessMode", u."AllowedScreens", u."AssignedStationId", u."CreatedAt", u."Email", u."IsActive", u."IsPlatformAdmin", u."Name", u."PasswordHash", u."Phone", u."ProfilePhoto", u."Role", u."TenantId"
+      FROM "Users" AS u
+      WHERE u."Email" = @__ownerEmail_0
+      LIMIT 1
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (153ms) [Parameters=[@__user_TenantId_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT t."Id", t."CreatedAt", t."Name", t."Slug", t."Status"
+      FROM "Tenants" AS t
+      WHERE t."Id" = @__user_TenantId_0
+      LIMIT 1
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (153ms) [Parameters=[@__tenant_Id_0='?' (DbType = Int32)], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "AttendanceRecords" AS a
+          WHERE a."TenantId" = @__tenant_Id_0)
+info: DemoData[0]
+      DemoData: tenant 'default' already has attendance rows — skipping demo seed.
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (174ms) [Parameters=[@__now_2='?' (DbType = DateTime), @__now_0='?' (DbType = DateTime), @__inactivityCutoff_1='?' (DbType = DateTime)], CommandType='Text', CommandTimeout='30']
+      UPDATE "GuestSessions" AS g
+      SET "ClosedAt" = @__now_2,
+          "ClosedReason" = 'Timeout',
+          "Status" = 'Expired'
+      WHERE g."Status" IN ('Active', 'Locked') AND (g."ExpiresAt" < @__now_0 OR g."LastActivity" < @__inactivityCutoff_1)
+fail: Microsoft.Extensions.Hosting.Internal.Host[11]
+      Hosting failed to start
+      System.IO.IOException: Failed to bind to address http://0.0.0.0:5080: address already in use.
+       ---> Microsoft.AspNetCore.Connections.AddressInUseException: Only one usage of each socket address (protocol/network address/port) is normally permitted.
+       ---> System.Net.Sockets.SocketException (10048): Only one usage of each socket address (protocol/network address/port) is normally permitted.
+         at System.Net.Sockets.Socket.UpdateStatusAfterSocketErrorAndThrowException(SocketError error, Boolean disconnectOnFailure, String callerName)
+         at System.Net.Sockets.Socket.DoBind(EndPoint endPointSnapshot, SocketAddress socketAddress)
+         at System.Net.Sockets.Socket.Bind(EndPoint localEP)
+         at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketTransportOptions.CreateDefaultBoundListenSocket(EndPoint endpoint)
+         at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketConnectionListener.Bind()
+         --- End of inner exception stack trace ---
+         at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketConnectionListener.Bind()
+         at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketTransportFactory.BindAsync(EndPoint endpoint, CancellationToken cancellationToken)
+         at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure.TransportManager.BindAsync(EndPoint endPoint, ConnectionDelegate connectionDelegate, EndpointConfig endpointConfig, CancellationToken cancellationToken)
+         at Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerImpl.<>c__DisplayClass28_0`1.<<StartAsync>g__OnBind|0>d.MoveNext()
+      --- End of stack trace from previous location ---
+         at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.AddressBinder.BindEndpointAsync(ListenOptions endpoint, AddressBindContext context, CancellationToken cancellationToken)
+         --- End of inner exception stack trace ---
+         at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.AddressBinder.BindEndpointAsync(ListenOptions endpoint, AddressBindContext context, CancellationToken cancellationToken)
+         at Microsoft.AspNetCore.Server.Kestrel.Core.ListenOptions.BindAsync(AddressBindContext context, CancellationToken cancellationToken)
+         at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.AddressBinder.AddressesStrategy.BindAsync(AddressBindContext context, CancellationToken cancellationToken)
+         at Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerImpl.BindAsync(CancellationToken cancellationToken)
+         at Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerImpl.StartAsync[TContext](IHttpApplication`1 application, CancellationToken cancellationToken)
+         at Microsoft.AspNetCore.Hosting.GenericWebHostService.StartAsync(CancellationToken cancellationToken)
+         at Microsoft.Extensions.Hosting.Internal.Host.<StartAsync>b__14_1(IHostedService service, CancellationToken token)
+         at Microsoft.Extensions.Hosting.Internal.Host.ForeachService[T](IEnumerable`1 services, CancellationToken token, Boolean concurrent, Boolean abortOnFirstException, List`1 exceptions, Func`3 operation)
+fail: Microsoft.Extensions.Hosting.Internal.Host[9]
+      BackgroundService failed
+      System.OperationCanceledException: The operation was canceled.
+         at System.Threading.PeriodicTimer.State.Signal(Boolean stopping, CancellationToken cancellationToken)
+         at System.Threading.CancellationTokenSource.Invoke(Delegate d, Object state, CancellationTokenSource source)
+         at System.Threading.CancellationTokenSource.ExecuteCallbackHandlers(Boolean throwOnFirstException)
+         at Microsoft.Extensions.DependencyInjection.ServiceLookup.ServiceProviderEngineScope.DisposeAsync()
+         at Microsoft.Extensions.Hosting.Internal.Host.<DisposeAsync>g__DisposeAsync|20_0(Object o)
+         at Microsoft.Extensions.Hosting.Internal.Host.DisposeAsync()
+         at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+         at Microsoft.Extensions.Hosting.Internal.Host.DisposeAsync()
+         at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.RunAsync(IHost host, CancellationToken token)
+         at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+         at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.RunAsync(IHost host, CancellationToken token)
+         at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.Run(IHost host)
+         at Program.<Main>$(String[] args) in C:\Users\Aashish Verma\PrabandhOs\PrabandhOS\CafePosApi\Program.cs:line 357
+      --- End of stack trace from previous location ---
+         at System.Threading.PeriodicTimer.State.System.Threading.Tasks.Sources.IValueTaskSource<System.Boolean>.GetResult(Int16 token)
+         at CafePOS.Api.Infrastructure.GuestSessionSweepService.ExecuteAsync(CancellationToken stoppingToken) in C:\Users\Aashish Verma\PrabandhOs\PrabandhOS\CafePosApi\Infrastructure\GuestSessionSweepService.cs:line 67
+         at Microsoft.Extensions.Hosting.Internal.Host.TryExecuteBackgroundServiceAsync(BackgroundService backgroundService)
+crit: Microsoft.Extensions.Hosting.Internal.Host[10]
+      The HostOptions.BackgroundServiceExceptionBehavior is configured to StopHost. A BackgroundService has thrown an unhandled exception, and the IHost instance is stopping. To avoid this behavior, configure this to Ignore; however the BackgroundService will not be restarted.
+      System.OperationCanceledException: The operation was canceled.
+         at System.Threading.PeriodicTimer.State.Signal(Boolean stopping, CancellationToken cancellationToken)
+         at System.Threading.CancellationTokenSource.Invoke(Delegate d, Object state, CancellationTokenSource source)
+         at System.Threading.CancellationTokenSource.ExecuteCallbackHandlers(Boolean throwOnFirstException)
+         at Microsoft.Extensions.DependencyInjection.ServiceLookup.ServiceProviderEngineScope.DisposeAsync()
+         at Microsoft.Extensions.Hosting.Internal.Host.<DisposeAsync>g__DisposeAsync|20_0(Object o)
+         at Microsoft.Extensions.Hosting.Internal.Host.DisposeAsync()
+         at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+         at Microsoft.Extensions.Hosting.Internal.Host.DisposeAsync()
+         at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.RunAsync(IHost host, CancellationToken token)
+         at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+         at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.RunAsync(IHost host, CancellationToken token)
+         at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.Run(IHost host)
+         at Program.<Main>$(String[] args) in C:\Users\Aashish Verma\PrabandhOs\PrabandhOS\CafePosApi\Program.cs:line 357
+      --- End of stack trace from previous location ---
+         at System.Threading.PeriodicTimer.State.System.Threading.Tasks.Sources.IValueTaskSource<System.Boolean>.GetResult(Int16 token)
+         at CafePOS.Api.Infrastructure.GuestSessionSweepService.ExecuteAsync(CancellationToken stoppingToken) in C:\Users\Aashish Verma\PrabandhOs\PrabandhOS\CafePosApi\Infrastructure\GuestSessionSweepService.cs:line 67
+         at Microsoft.Extensions.Hosting.Internal.Host.TryExecuteBackgroundServiceAsync(BackgroundService backgroundService)
+info: Microsoft.Hosting.Lifetime[0]
+      Application is shutting down...
+Unhandled exception. System.IO.IOException: Failed to bind to address http://0.0.0.0:5080: address already in use.
+ ---> Microsoft.AspNetCore.Connections.AddressInUseException: Only one usage of each socket address (protocol/network address/port) is normally permitted.
+ ---> System.Net.Sockets.SocketException (10048): Only one usage of each socket address (protocol/network address/port) is normally permitted.
+   at System.Net.Sockets.Socket.UpdateStatusAfterSocketErrorAndThrowException(SocketError error, Boolean disconnectOnFailure, String callerName)
+   at System.Net.Sockets.Socket.DoBind(EndPoint endPointSnapshot, SocketAddress socketAddress)
+   at System.Net.Sockets.Socket.Bind(EndPoint localEP)
+   at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketTransportOptions.CreateDefaultBoundListenSocket(EndPoint endpoint)
+   at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketConnectionListener.Bind()
+   --- End of inner exception stack trace ---
+   at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketConnectionListener.Bind()
+   at Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketTransportFactory.BindAsync(EndPoint endpoint, CancellationToken cancellationToken)
+   at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure.TransportManager.BindAsync(EndPoint endPoint, ConnectionDelegate connectionDelegate, EndpointConfig endpointConfig, CancellationToken cancellationToken)
+   at Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerImpl.<>c__DisplayClass28_0`1.<<StartAsync>g__OnBind|0>d.MoveNext()
+--- End of stack trace from previous location ---
+   at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.AddressBinder.BindEndpointAsync(ListenOptions endpoint, AddressBindContext context, CancellationToken cancellationToken)
+   --- End of inner exception stack trace ---
+   at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.AddressBinder.BindEndpointAsync(ListenOptions endpoint, AddressBindContext context, CancellationToken cancellationToken)
+   at Microsoft.AspNetCore.Server.Kestrel.Core.ListenOptions.BindAsync(AddressBindContext context, CancellationToken cancellationToken)
+   at Microsoft.AspNetCore.Server.Kestrel.Core.Internal.AddressBinder.AddressesStrategy.BindAsync(AddressBindContext context, CancellationToken cancellationToken)
+   at Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerImpl.BindAsync(CancellationToken cancellationToken)
+   at Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerImpl.StartAsync[TContext](IHttpApplication`1 application, CancellationToken cancellationToken)
+   at Microsoft.AspNetCore.Hosting.GenericWebHostService.StartAsync(CancellationToken cancellationToken)
+   at Microsoft.Extensions.Hosting.Internal.Host.<StartAsync>b__14_1(IHostedService service, CancellationToken token)
+   at Microsoft.Extensions.Hosting.Internal.Host.ForeachService[T](IEnumerable`1 services, CancellationToken token, Boolean concurrent, Boolean abortOnFirstException, List`1 exceptions, Func`3 operation)
+   at Microsoft.Extensions.Hosting.Internal.Host.StartAsync(CancellationToken cancellationToken)
+   at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.RunAsync(IHost host, CancellationToken token)
+   at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.RunAsync(IHost host, CancellationToken token)
+   at Microsoft.Extensions.Hosting.HostingAbstractionsHostExtensions.Run(IHost host)
+   at Program.<Main>$(String[] args) in C:\Users\Aashish Verma\PrabandhOs\PrabandhOS\CafePosApi\Program.cs:line 357

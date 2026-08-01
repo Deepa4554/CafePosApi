@@ -604,7 +604,11 @@ public record UpdateSettingsRequest(
     bool? DeliveryChargeAutoApplyDelivery = null,
     bool? DeliveryChargeAutoApplyToken = null,
     bool? DeliveryChargeClearDefault = null,
-    bool? ApprovalAlertsEnabled = null);
+    bool? ApprovalAlertsEnabled = null,
+    /// <summary>The cafe's UPI address for bill QR codes (see CafeSettings.UpiVpa). Send an
+    /// empty string to clear it — unlike the toggles above, "" is a meaningful value here
+    /// (stop showing the UPI QR) rather than "leave unchanged", which is what null means.</summary>
+    string? UpiVpa = null);
 
 // ---------- Order Note Suggestions ----------
 
