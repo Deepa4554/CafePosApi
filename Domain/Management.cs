@@ -304,7 +304,7 @@ public class Subscription : ITenantScoped
     public int TenantId { get; set; }
     public SubscriptionTier Plan { get; set; } = SubscriptionTier.FreeTrial;
     /// <summary>
-    /// When the CURRENT plan cycle ends — FreeTrial gets 7 days, every paid tier gets
+    /// When the CURRENT plan cycle ends — FreeTrial gets 14 days, every paid tier gets
     /// 1 month, reset on every /subscription/change-plan call (including re-selecting
     /// the same plan, which is today's stand-in for "renew" since there's no real
     /// payment gateway yet — see docs/multi-tenant-saas-plan.md). Checked by

@@ -33,7 +33,7 @@ public static class SeedData
             db.Subscriptions.Add(new Subscription
             {
                 Plan = SubscriptionTier.FreeTrial,
-                PlanExpiresAt = DateTime.UtcNow.AddDays(7),
+                PlanExpiresAt = DateTime.UtcNow.AddDays(14),
             });
         }
 

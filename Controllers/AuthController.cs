@@ -197,7 +197,7 @@ public class AuthController(
 
     /// <summary>
     /// Onboards a brand-new cafe: creates an isolated Tenant, its Owner account, and
-    /// default CafeSettings/Subscription (7-day trial) — all scoped to the new
+    /// default CafeSettings/Subscription (14-day trial) — all scoped to the new
     /// tenant so it starts completely empty and can never see another cafe's data.
     /// Use this (not /register) for "create your cafe" signup; /register is kept for
     /// the existing demo/role-switcher accounts, which stay on the default tenant.
@@ -245,7 +245,7 @@ public class AuthController(
         {
             TenantId = tenant.Id,
             Plan = SubscriptionTier.FreeTrial,
-            PlanExpiresAt = DateTime.UtcNow.AddDays(7),
+            PlanExpiresAt = DateTime.UtcNow.AddDays(14),
         });
 
         await db.SaveChangesAsync(); // assigns user.Id before IssueTokensAsync references it

@@ -54,11 +54,11 @@ public class SubscriptionController(
         sub.Plan = req.Plan;
         sub.ActiveCouponCode = req.CouponCode;
         sub.UpdatedAt = DateTime.UtcNow;
-        // Every plan runs on a cycle — 7 days for the free trial, 1 month for any paid
+        // Every plan runs on a cycle — 14 days for the free trial, 1 month for any paid
         // tier — reset from "now" on every change (this doubles as "renew" today, since
         // there's no payment gateway yet to trigger renewal on an actual billing date).
         sub.PlanExpiresAt = req.Plan == SubscriptionTier.FreeTrial
-            ? DateTime.UtcNow.AddDays(7)
+            ? DateTime.UtcNow.AddDays(14)
             : DateTime.UtcNow.AddMonths(1);
 
         await db.SaveChangesAsync();

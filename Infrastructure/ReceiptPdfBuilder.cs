@@ -110,11 +110,49 @@ public static class ReceiptPdfBuilder
                         col.Item().PaddingTop(6).AlignCenter().Text($"REFUNDED{(order.RefundedAmount is decimal r ? $" — {r:0.00}" : "")}").FontSize(9).Bold();
                     }
 
+                    // Scan-to-pay block. This PDF is the bill a waiter carries to the table
+                    // (it's generated before settlement and sent over WhatsApp), so it's the
+                    // copy a guest is most likely to pay from — the thermal slip and the bill
+                    // screen carry the same QR, built from the same link (see UpiPaymentLink).
+                    //
+                    // Charged on the outstanding balance, not Total, so a part-paid bill asks
+                    // only for what's left; a settled or refunded one drops the block entirely
+                    // rather than inviting a second payment.
+                    var alreadyPaid = order.Payments.Sum(p => p.Amount);
+                    var outstanding = order.Total - alreadyPaid;
+                    var upiUri = order.Paid || order.Refunded
+                        ? null
+                        : UpiPaymentLink.Build(settings.UpiVpa, businessName, outstanding, $"Bill {1000 + order.Id}");
+
+                    if (upiUri is not null)
+                    {
+                        col.Item().PaddingTop(10).LineHorizontal(0.5f);
+                        col.Item().PaddingTop(6).AlignCenter().Text("SCAN TO PAY").FontSize(9).Bold();
+                        col.Item().AlignCenter().Text($"{outstanding:0.00}").FontSize(12).Bold();
+                        // PngByteQRCode rather than QRCoder's System.Drawing-backed renderers:
+                        // this runs on Linux containers where System.Drawing.Common isn't
+                        // supported at all. 10 px per module keeps it sharp when a phone
+                        // camera reads it off a screen rather than paper.
+                        col.Item().PaddingTop(4).AlignCenter().Width(120).Image(BuildQrPng(upiUri));
+                        col.Item().PaddingTop(2).AlignCenter().Text(settings.UpiVpa).FontSize(8);
+                    }
+
                     col.Item().PaddingTop(10).AlignCenter().Text(
                         string.IsNullOrWhiteSpace(settings.ReceiptFooter) ? "Thank you for visiting!" : settings.ReceiptFooter
                     ).FontSize(9).Italic();
                 });
             });
         }).GeneratePdf();
+    }
+
+    /// <summary>Encodes a payment link as a PNG the PDF can embed. ECC level M is the usual
+    /// choice for a payment QR — enough redundancy to survive a phone photographing a screen
+    /// or a creased slip, without inflating the code so much it stops scanning at this
+    /// size.</summary>
+    private static byte[] BuildQrPng(string payload)
+    {
+        using var generator = new QRCoder.QRCodeGenerator();
+        using var data = generator.CreateQrCode(payload, QRCoder.QRCodeGenerator.ECCLevel.M);
+        return new QRCoder.PngByteQRCode(data).GetGraphic(10);
     }
 }

@@ -35,7 +35,11 @@ public class PublicController(CafePosDbContext db, QrTokenService qrTokens, Rece
         var orderId = receiptTokens.TryDecode(token);
         if (orderId is null) return NotFound();
 
+        // Payments are needed as well as Items: the scan-to-pay QR ReceiptPdfBuilder adds is
+        // charged on what's still outstanding, and an unloaded collection would read as zero
+        // paid and ask a part-paid guest for the whole bill again.
         var order = await db.Orders.IgnoreQueryFilters().Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
+            .Include(o => o.Payments)
             .FirstOrDefaultAsync(o => o.Id == orderId.Value);
         if (order is null) return NotFound();
 

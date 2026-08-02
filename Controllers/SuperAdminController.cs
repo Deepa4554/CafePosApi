@@ -39,7 +39,7 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
 
     /// <summary>
     /// The real fix for the manual-DB workflow: pick a tenant, pick a plan, done —
-    /// same 7-day-trial/1-month-paid cycle rule as the tenant's own (locked-down)
+    /// same 14-day-trial/1-month-paid cycle rule as the tenant's own (locked-down)
     /// /subscription/change-plan. Still no payment gateway, so this stays a manual
     /// "I confirmed they paid" action by you, just via API instead of raw SQL.
     /// </summary>
@@ -56,7 +56,7 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
         sub.Plan = req.Plan;
         sub.UpdatedAt = DateTime.UtcNow;
         sub.PlanExpiresAt = req.Plan == SubscriptionTier.FreeTrial
-            ? DateTime.UtcNow.AddDays(7)
+            ? DateTime.UtcNow.AddDays(14)
             : DateTime.UtcNow.AddMonths(1);
 
         // Tagged to the AFFECTED tenant, not yours — the shared IAuditService would
