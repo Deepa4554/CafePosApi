@@ -143,18 +143,20 @@ public class OrdersController(
 
     /// <summary>
     /// Idempotently creates (if needed) this order's WhatsApp tracking row and returns the
-    /// wa.me deep link to embed as the token slip's WhatsApp QR — called by
-    /// POSCheckoutScreen.autoPrintTokenSlip right before printing, NOT at order creation, so
+    /// wa.me deep link to embed as a WhatsApp QR — called by POSCheckoutScreen.
+    /// autoPrintTokenSlip (token orders) and TableManagementScreen's order popup (table
+    /// orders) right before printing/opening, NOT at order creation, so
     /// OrderBuildingService.BuildOrderAsync is never touched. whatsAppDeepLink is null (client
     /// just prints the plain slip, exactly as before this module existed) whenever no tenant
-    /// WhatsApp session is Connected yet.
+    /// WhatsApp session is Connected yet. Available for any order type — see
+    /// CafePosDbContext.CollectWhatsAppStatusTransitions/CollectWhatsAppBillGeneratedOrders
+    /// for the matching status-push side.
     /// </summary>
     [HttpPost("{id:int}/whatsapp-tracking")]
     public async Task<ActionResult<object>> GetOrCreateWhatsAppTracking(int id)
     {
         var order = await db.Orders.FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
-        if (order.OrderType != "QSR") throw new ApiValidationException("WhatsApp tracking is only available for token/counter orders.");
 
         var tracking = await db.WhatsAppTracking.FirstOrDefaultAsync(t => t.OrderId == id);
         if (tracking is null)

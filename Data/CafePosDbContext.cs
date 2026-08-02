@@ -683,31 +683,33 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         }
     }
 
-    // Only these two QSR/token-order transitions ever push a WhatsApp update — New (shown to
-    // the customer as "Pending") is answered by the inbound TRACK reply instead, since no
-    // WhatsApp number is linked yet at order-creation time, and Served is explicitly excluded
-    // per product decision (see docs/plans — "never send on Served").
+    // Only these two transitions ever push a WhatsApp update — New (shown to the customer as
+    // "Pending") is answered by the inbound TRACK reply instead, since no WhatsApp number is
+    // linked yet at order-creation time, and Served is explicitly excluded per product
+    // decision (see docs/plans — "never send on Served"). Any order type qualifies (token or
+    // table) now — every transition still gets queued (see WhatsAppEventPublisher.
+    // EnqueueAsync), whatsapp-service just marks the job Skipped downstream if the order never
+    // got a linked phone (no QR scan/opt-in), so this stays a no-op for orders nobody tracked.
     private static readonly HashSet<OrderStatus> WhatsAppNotifiableStatuses = [OrderStatus.Preparing, OrderStatus.Ready];
 
     /// <summary>Same "read before SaveChanges, act after" shape as
-    /// CollectRealtimeAffectedTenantIds — scoped to QSR/token orders only (this module's
-    /// current pass) and to the two statuses that ever trigger an automatic WhatsApp push.
-    /// Purely observational over the ChangeTracker: no existing call site of
-    /// OrderBuildingService.RecomputeOrderStatus changes.</summary>
+    /// CollectRealtimeAffectedTenantIds — scoped to the two statuses that ever trigger an
+    /// automatic WhatsApp push. Purely observational over the ChangeTracker: no existing call
+    /// site of OrderBuildingService.RecomputeOrderStatus changes.</summary>
     private List<(int TenantId, int OrderId, OrderStatus NewStatus)> CollectWhatsAppStatusTransitions() =>
         ChangeTracker.Entries<Order>()
-            .Where(e => e.State == EntityState.Modified && e.Entity.OrderType == "QSR"
+            .Where(e => e.State == EntityState.Modified
                 && e.Property(nameof(Order.Status)).IsModified
                 && WhatsAppNotifiableStatuses.Contains(e.Entity.Status)
                 && (OrderStatus)e.OriginalValues[nameof(Order.Status)]! != e.Entity.Status)
             .Select(e => (e.Entity.TenantId, e.Entity.Id, e.Entity.Status))
             .ToList();
 
-    /// <summary>Fires once a QSR order flips Paid false -> true (see OrdersController.
+    /// <summary>Fires once an order flips Paid false -> true (see OrdersController.
     /// CloseOrderAsync) — the trigger for the automatic bill-PDF WhatsApp send.</summary>
     private List<(int TenantId, int OrderId)> CollectWhatsAppBillGeneratedOrders() =>
         ChangeTracker.Entries<Order>()
-            .Where(e => e.State == EntityState.Modified && e.Entity.OrderType == "QSR"
+            .Where(e => e.State == EntityState.Modified
                 && e.Property(nameof(Order.Paid)).IsModified
                 && (bool)e.OriginalValues[nameof(Order.Paid)]! == false && e.Entity.Paid)
             .Select(e => (e.Entity.TenantId, e.Entity.Id))
