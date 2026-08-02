@@ -88,6 +88,11 @@ public record CreateStaffRequest(
     string? BankAccountNumber = null, string? BankIfsc = null, string? BankName = null, string? Aadhaar = null, string? Pan = null);
 public record UpdateStaffStatusRequest(StaffStatus Status);
 
+/// <summary>For a staff member created without app access (CreateStaffRequest's Email/
+/// Password/LoginRole left blank) — provisions a login for them after the fact, same
+/// validation as the create-time path in StaffController.Create.</summary>
+public record GrantStaffAccessRequest(string Email, string Password, AppRole LoginRole);
+
 /// <summary>Partial update for the Staff Profile edit flow — only non-null fields are
 /// applied, matching MenuController.Update's pattern.</summary>
 public record UpdateStaffRequest(

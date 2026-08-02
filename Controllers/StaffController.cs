@@ -229,6 +229,53 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return NoContent();
     }
 
+    /// <summary>
+    /// Provisions app access for a staff member who was created without it — same
+    /// validation and AppUser-creation shape as Create's inline login path, just
+    /// deferred to whenever the owner/manager decides this person needs a login.
+    /// </summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("{id:int}/grant-access")]
+    public async Task<ActionResult<StaffDto>> GrantAccess(int id, GrantStaffAccessRequest req)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is not null) throw new ApiConflictException("This staff member already has app access.");
+
+        if (string.IsNullOrWhiteSpace(req.Email) || !req.Email.Contains('@'))
+            throw new ApiValidationException("A valid email is required to give this staff member app access.");
+        if (string.IsNullOrWhiteSpace(req.Password) || req.Password.Length < 6)
+            throw new ApiValidationException("Password must be at least 6 characters.");
+        if (req.LoginRole == AppRole.Owner)
+            throw new ApiValidationException("Owner accounts are created only via cafe signup, not here.");
+
+        var normalizedEmail = req.Email.Trim().ToLowerInvariant();
+        if (await db.Users.AnyAsync(u => u.Email == normalizedEmail))
+            throw new ApiConflictException("An account with this email already exists.");
+
+        var user = new AppUser
+        {
+            TenantId = tenant.TenantIdOrDefault,
+            Email = normalizedEmail,
+            Name = staff.Name,
+            Role = req.LoginRole,
+            PasswordHash = "",
+        };
+        user.PasswordHash = hasher.HashPassword(user, req.Password);
+        db.Users.Add(user);
+        await db.SaveChangesAsync(); // assigns user.Id before StaffMember.UserId references it
+
+        staff.UserId = user.Id;
+        staff.Email = normalizedEmail;
+        await db.SaveChangesAsync();
+
+        var actor = await CurrentUserAsync();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Staff, staff.Id.ToString(),
+            $"{actor.Name} gave {staff.Name} app access.", AuditSeverity.High, actor.Id, actor.Name);
+
+        return StaffDto.From(staff);
+    }
+
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPatch("{id:int}/status")]
     public async Task<ActionResult<StaffDto>> UpdateStatus(int id, UpdateStaffStatusRequest req)
