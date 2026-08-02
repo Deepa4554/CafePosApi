@@ -179,8 +179,12 @@ public record SubscriptionDto(string Plan, DateTime? PlanExpiresAt, int MonthlyO
     public static readonly Dictionary<SubscriptionTier, (int orders, int branches, int staff)> PlanLimits = new()
     {
         [SubscriptionTier.FreeTrial] = (200, 1, 3),
-        [SubscriptionTier.Starter] = (1000, 1, 5),
-        [SubscriptionTier.Professional] = (10000, 3, 25),
+        // Orders/Branches/Staff are unlimited on every paid tier now — Basic and Plus no
+        // longer cap them (only the free trial still does, to push conversion). See
+        // BranchesController.Create, the only place among these three that actually
+        // enforces the cap — int.MaxValue makes that check a no-op.
+        [SubscriptionTier.Starter] = (int.MaxValue, int.MaxValue, int.MaxValue),
+        [SubscriptionTier.Professional] = (int.MaxValue, int.MaxValue, int.MaxValue),
         [SubscriptionTier.Enterprise] = (int.MaxValue, int.MaxValue, int.MaxValue),
     };
 }
