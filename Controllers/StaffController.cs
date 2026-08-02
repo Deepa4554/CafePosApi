@@ -400,8 +400,9 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// can't be pinned (always sees every kitchen, same rule as screen access above).
     /// Clearing it (null) falls back to that device's own remembered station (see
     /// kdsDeviceSettings on the client) instead of a server-side pin. Picks up on the
-    /// staff member's device within moments via the same /auth/me poll that carries
-    /// AccessMode — see UserDto.From.
+    /// staff member's device within moments via the same "accessChanged" SignalR push
+    /// that carries AccessMode (see UpdateScreenAccess above), falling back to
+    /// useLiveAccessSync's 60s safety-net poll if that device's socket is down.
     /// </summary>
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPatch("{id:int}/kitchen-assignment")]
@@ -423,6 +424,10 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
         user.AssignedStationId = req.AssignedStationId;
         await db.SaveChangesAsync();
+        // Fire-and-forget, same as UpdateScreenAccess — without this, the pin only ever
+        // reached the staff member's device via the 60s poll, which read as "not working"
+        // to an owner checking KDS right after saving.
+        _ = realtime.NotifyAccessChangedAsync(user.TenantId, user.Id);
 
         var actor = await CurrentUserAsync();
         var summary = req.AssignedStationId is null
