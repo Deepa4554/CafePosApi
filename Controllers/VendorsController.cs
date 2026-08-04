@@ -14,6 +14,8 @@ namespace CafePOS.Api.Controllers;
 [Route("api/vendors")]
 [Authorize(Policy = Policies.OwnerOrManager)]
 [Authorize(Policy = Policies.RequirePlus)]
+// PurchaseOrders too — the PO form needs the vendor list to raise an order at all.
+[RequireScreen("Vendors", "PurchaseOrders")]
 public class VendorsController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]

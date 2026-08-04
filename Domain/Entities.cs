@@ -524,7 +524,7 @@ public class CafeSettings : ITenantScoped
 
     /// <summary>Fallback rate for items with no TaxGroup and when no default group exists —
     /// see <see cref="TaxGroup"/> for the full resolution order.</summary>
-    public decimal TaxRatePct { get; set; } = 8;
+    public decimal TaxRatePct { get; set; } = 0;
 
     // Language & Region
     public string Currency { get; set; } = "INR (₹)";

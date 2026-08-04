@@ -15,6 +15,8 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/expenses")]
 [Authorize(Policy = Policies.OwnerOrManager)]
+// ExpenseReport too — the Expense Report screen reads the same rows.
+[RequireScreen("Expenses", "ExpenseReport")]
 public class ExpensesController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]

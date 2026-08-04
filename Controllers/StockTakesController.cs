@@ -16,6 +16,7 @@ namespace CafePOS.Api.Controllers;
 [Route("api/stock-takes")]
 [Authorize(Policy = Policies.OwnerOrManager)]
 [Authorize(Policy = Policies.RequirePlus)]
+[RequireScreen("StockTakes")]
 public class StockTakesController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]

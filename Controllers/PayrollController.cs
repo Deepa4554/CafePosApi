@@ -17,6 +17,9 @@ namespace CafePOS.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/payroll-runs")]
+// HRReports too: the HR Reports screen charts payroll runs alongside leave, so a login
+// granted HR Reports but not Payroll still needs to read this.
+[RequireScreen("Payroll", "HRReports")]
 public class PayrollController(CafePosDbContext db, IAuditService audit) : ControllerBase
 {
     [Authorize(Policy = Policies.RequirePlus)]

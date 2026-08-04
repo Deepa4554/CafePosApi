@@ -107,10 +107,13 @@ public record ResetStaffPasswordRequest(string NewPassword);
 public record StaffFinancialDetailsDto(int StaffId, string? BankAccountNumber, string? BankIfsc, string? BankName, string? Aadhaar, string? Pan, bool Revealed);
 
 // ---------- Staff screen access ----------
-public record StaffScreenAccessDto(int StaffId, string AccessMode, List<string> AllowedScreens)
+/// <summary>Role rides along so the Screen Access picker can show what Automatic mode
+/// grants this particular login (see isScreenInRoleDefault in core/auth/permissions.ts)
+/// rather than only naming the mode.</summary>
+public record StaffScreenAccessDto(int StaffId, string AccessMode, List<string> AllowedScreens, string Role)
 {
     public static StaffScreenAccessDto From(int staffId, AppUser user) =>
-        new(staffId, user.AccessMode.ToString(), user.AllowedScreens ?? []);
+        new(staffId, user.AccessMode.ToString(), user.AllowedScreens ?? [], user.Role.ToString());
 }
 public record UpdateStaffScreenAccessRequest(StaffAccessMode AccessMode, List<string>? AllowedScreens);
 
@@ -147,6 +150,9 @@ public record LeaveRequestDto(
         l.Reason, l.Status.ToString(), l.ReviewedByName, l.ReviewedAt, l.CreatedAt);
 }
 public record CreateLeaveRequest(int StaffId, DateOnly StartDate, DateOnly EndDate, LeaveType Type, string? Reason);
+/// <summary>Self-service counterpart to CreateLeaveRequest — no StaffId, the caller's own
+/// linked roster row is resolved server-side (see StaffController.CreateMyLeaveRequest).</summary>
+public record CreateMyLeaveRequest(DateOnly StartDate, DateOnly EndDate, LeaveType Type, string? Reason);
 public record ReviewLeaveRequest(string? Note);
 
 public record CafeExpenseDto(int Id, decimal Amount, string Category, string Purpose, string SpentBy, DateTime SpentAt, string RecordedByName, DateTime CreatedAt)

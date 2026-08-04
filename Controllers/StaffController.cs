@@ -667,8 +667,15 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     // ---------- Leave requests ----------
 
     /// <summary>All leave requests, newest first — optionally filtered to one status
-    /// (Pending/Approved/Rejected) for the "tabs" the Leave screen shows.</summary>
+    /// (Pending/Approved/Rejected) for the "tabs" the Leave screen shows. The Owner/Manager
+    /// admin view across all staff — see GetMyLeaveRequests below for the self-service
+    /// counterpart; without this gate any authenticated login could pull every staff
+    /// member's leave requests (including free-text reasons) directly over the wire.</summary>
     [Authorize(Policy = Policies.RequirePlus)]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    // HRReports too — that screen charts leave alongside payroll runs. Deliberately NOT on
+    // the "/me" self-service actions below: those are open to any login by design.
+    [RequireScreen("Leave", "HRReports")]
     [HttpGet("leave-requests")]
     public async Task<IEnumerable<LeaveRequestDto>> ListLeaveRequests([FromQuery] LeaveRequestStatus? status)
     {
@@ -678,25 +685,63 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         return requests.Select(LeaveRequestDto.From);
     }
 
-    /// <summary>Any staff-portal user can request leave for themselves (or, if they're
-    /// an Owner/Manager, on behalf of someone else) — approval is the gated step, not
-    /// the request itself.</summary>
+    /// <summary>Owner/Manager filing leave on a staff member's behalf via Team Portal's
+    /// staff picker — accepts an arbitrary StaffId, which is why this is restricted to
+    /// Owner/Manager (matches Approve/Reject/ReturnToWork below) even though Cashier/
+    /// Accountant can otherwise reach Team Portal. For a staff member requesting their
+    /// own leave, see CreateMyLeaveRequest below instead.</summary>
     [Authorize(Policy = Policies.RequirePlus)]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [RequireScreen("Leave")]
     [HttpPost("leave-requests")]
     public async Task<ActionResult<LeaveRequestDto>> CreateLeaveRequest(CreateLeaveRequest req)
     {
-        var staff = await db.Staff.FindAsync(req.StaffId);
+        var dto = await CreateLeaveRequestInternal(req.StaffId, req.StartDate, req.EndDate, req.Type, req.Reason);
+        return CreatedAtAction(nameof(ListLeaveRequests), dto);
+    }
+
+    /// <summary>Self-service leave request — always for the caller's own linked staff
+    /// roster row (see CurrentStaffResolver), never an arbitrary StaffId from the client.
+    /// Lets a Waiter/Chef/etc. who has no Team Portal access still request their own leave
+    /// (approval still requires Owner/Manager, same as CreateLeaveRequest above).</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
+    [HttpPost("leave-requests/me")]
+    public async Task<ActionResult<LeaveRequestDto>> CreateMyLeaveRequest(CreateMyLeaveRequest req)
+    {
+        var staff = await CurrentStaffAsync();
+        var dto = await CreateLeaveRequestInternal(staff.Id, req.StartDate, req.EndDate, req.Type, req.Reason);
+        return CreatedAtAction(nameof(GetMyLeaveRequests), dto);
+    }
+
+    /// <summary>This staff member's own leave requests, newest first — the self-service
+    /// counterpart to ListLeaveRequests (the Owner/Manager admin view across all staff).
+    /// Its own endpoint rather than a staffId filter on ListLeaveRequests, so a Waiter's
+    /// device never receives another staff member's leave data over the wire.</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
+    [HttpGet("leave-requests/me")]
+    public async Task<IEnumerable<LeaveRequestDto>> GetMyLeaveRequests([FromQuery] LeaveRequestStatus? status)
+    {
+        var staff = await CurrentStaffAsync();
+        var query = db.LeaveRequests.Where(l => l.StaffId == staff.Id);
+        if (status is not null) query = query.Where(l => l.Status == status);
+        var requests = await query.OrderByDescending(l => l.CreatedAt).ToListAsync();
+        return requests.Select(LeaveRequestDto.From);
+    }
+
+    private async Task<LeaveRequestDto> CreateLeaveRequestInternal(int staffId, DateOnly startDate, DateOnly endDate, LeaveType type, string? reason)
+    {
+        var staff = await db.Staff.FindAsync(staffId);
         if (staff is null) throw new ApiValidationException("Staff member not found.");
-        if (req.EndDate < req.StartDate) throw new ApiValidationException("End date must be on or after the start date.");
+        if (endDate < startDate) throw new ApiValidationException("End date must be on or after the start date.");
 
         var leave = new LeaveRequest
         {
             StaffId = staff.Id,
             StaffName = staff.Name,
-            StartDate = req.StartDate,
-            EndDate = req.EndDate,
-            Type = req.Type,
-            Reason = req.Reason?.Trim(),
+            StartDate = startDate,
+            EndDate = endDate,
+            Type = type,
+            Reason = reason?.Trim(),
         };
         db.LeaveRequests.Add(leave);
         await db.SaveChangesAsync(); // assigns leave.Id before the mirror below references it
@@ -711,13 +756,13 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         {
             Type = ApprovalType.Leave,
             RequestedById = actor.Id,
-            Title = $"{req.Type} leave — {staff.Name}",
-            Description = $"{req.StartDate:MMM d} to {req.EndDate:MMM d}" + (string.IsNullOrWhiteSpace(req.Reason) ? "" : $" — {req.Reason.Trim()}"),
+            Title = $"{type} leave — {staff.Name}",
+            Description = $"{startDate:MMM d} to {endDate:MMM d}" + (string.IsNullOrWhiteSpace(reason) ? "" : $" — {reason.Trim()}"),
             LinkedEntityId = leave.Id,
         });
         await db.SaveChangesAsync();
 
-        return CreatedAtAction(nameof(ListLeaveRequests), LeaveRequestDto.From(leave));
+        return LeaveRequestDto.From(leave);
     }
 
     /// <summary>Finds this leave request's mirrored ApprovalRequest (see CreateLeaveRequest),
@@ -729,6 +774,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// doc comment for why this is manual rather than date-triggered).</summary>
     [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
+    [RequireScreen("Leave")]
     [HttpPost("leave-requests/{id:int}/approve")]
     public async Task<ActionResult<LeaveRequestDto>> ApproveLeaveRequest(int id)
     {
@@ -759,6 +805,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
 
     [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
+    [RequireScreen("Leave")]
     [HttpPost("leave-requests/{id:int}/reject")]
     public async Task<ActionResult<LeaveRequestDto>> RejectLeaveRequest(int id, ReviewLeaveRequest req)
     {
@@ -790,6 +837,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     /// the counterpart to Approve's OnLeave flip.</summary>
     [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
+    [RequireScreen("Leave")]
     [HttpPost("leave-requests/{id:int}/return-to-work")]
     public async Task<ActionResult<LeaveRequestDto>> ReturnToWork(int id)
     {
@@ -810,4 +858,6 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         var id = int.Parse(idClaim!);
         return await db.Users.FindAsync(id) ?? throw new KeyNotFoundException("User not found.");
     }
+
+    private Task<StaffMember> CurrentStaffAsync() => this.GetOrCreateCurrentStaffAsync(db);
 }

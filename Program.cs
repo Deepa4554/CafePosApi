@@ -26,7 +26,10 @@ Environment.SetEnvironmentVariable("DOTNET_hostBuilder:reloadConfigOnChange", "f
 var builder = WebApplication.CreateBuilder(args);
 
 // ---------- Controllers, Swagger ----------
-builder.Services.AddControllers()
+builder.Services.AddControllers(o =>
+    // Server-side half of per-staff Custom screen access — no-ops unless the endpoint
+    // carries [RequireScreen]. See RequireScreenAttribute.cs.
+    o.Filters.Add<ScreenAccessFilter>())
     // Accept/return enums as their string names ("Owner", "Percent", ...) instead
     // of raw ints — every request DTO with an enum field (Role, CouponType,
     // TaskPriority, ApprovalType, ...) relies on this.

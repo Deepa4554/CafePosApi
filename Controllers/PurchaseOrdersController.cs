@@ -14,6 +14,8 @@ namespace CafePOS.Api.Controllers;
 [Route("api/purchase-orders")]
 [Authorize(Policy = Policies.OwnerOrManager)]
 [Authorize(Policy = Policies.RequirePlus)]
+// PurchaseReport too — that report screen lists the same orders.
+[RequireScreen("PurchaseOrders", "PurchaseReport")]
 public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
 {
     /// <summary>Additive optional filters for the Purchase Report — all default to "no

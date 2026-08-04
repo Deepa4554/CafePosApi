@@ -12,6 +12,9 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/approvals")]
 [Authorize(Policy = Policies.RequirePlus)]
+// MoreScreen/DesktopAppShell only poll this for their pending-count badge, and both now
+// skip the call entirely without Approvals access (see useApprovals' `enabled` option).
+[RequireScreen("Approvals")]
 public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, ITenantContext tenantContext) : ControllerBase
 {
     [HttpGet]

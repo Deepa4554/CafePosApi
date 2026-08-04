@@ -16,6 +16,7 @@ namespace CafePOS.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/staff-loans")]
+[RequireScreen("Loans")]
 public class StaffLoansController(CafePosDbContext db, IAuditService audit) : ControllerBase
 {
     [Authorize(Policy = Policies.RequirePlus)]

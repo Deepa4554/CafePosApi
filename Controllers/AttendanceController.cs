@@ -22,6 +22,9 @@ namespace CafePOS.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/attendance")]
+// Covers the self-service My Attendance screen as well — it's guarded by the same
+// "Attendance" catalog key on the client (see AppNavigator's MyAttendanceScreenComp).
+[RequireScreen("Attendance")]
 public class AttendanceController(CafePosDbContext db, IAuditService audit) : ControllerBase
 {
     /// <summary>Punch in/out must happen within this radius of the cafe's registered

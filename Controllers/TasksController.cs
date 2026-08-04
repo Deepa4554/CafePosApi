@@ -11,6 +11,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/tasks")]
 [Authorize(Policy = Policies.RequirePlus)]
+[RequireScreen("Tasks")]
 public class TasksController(CafePosDbContext db) : ControllerBase
 {
     [HttpGet]
