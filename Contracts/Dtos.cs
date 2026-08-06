@@ -397,7 +397,10 @@ public record BestSellerDto(int Id, string Name, string Category, decimal Price,
 
 // ---------- Tables ----------
 
-public record CreateTableRequest(string Zone, int Seats);
+/// <summary>Code is the table's display name on the floor plan. Optional — left null/blank
+/// the server auto-numbers the next "T{n}", which is what the app sent before naming was
+/// offered, so older builds keep working unchanged.</summary>
+public record CreateTableRequest(string Zone, int Seats, string? Code = null);
 
 public record MergeTableRequest(int TargetHostTableId);
 

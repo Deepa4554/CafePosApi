@@ -145,14 +145,36 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
         if (req.Seats <= 0)
             throw new ApiValidationException("Seats must be at least 1.");
 
-        var maxNum = (await db.Tables.Select(t => t.Code).ToListAsync())
-            .Select(c => int.TryParse(c.TrimStart('T'), out var n) ? n : 0)
-            .DefaultIfEmpty(0)
-            .Max();
+        var codes = await db.Tables.Select(t => t.Code).ToListAsync();
+
+        // A typed-in name wins; blank falls back to the auto "T{n}" numbering. Custom names
+        // (e.g. "Corner Booth") simply don't parse as a number below, so they contribute 0 to
+        // maxNum and never disturb the auto sequence for the tables that do use it.
+        var requested = req.Code?.Trim();
+        string code;
+        if (!string.IsNullOrWhiteSpace(requested))
+        {
+            if (requested.Length > 20)
+                throw new ApiValidationException("Table name can be at most 20 characters.");
+            // Code identifies the table on every order (Order.TableCode), so a duplicate would
+            // make two tables indistinguishable — the (TenantId, Code) unique index would reject
+            // it anyway, this just turns that into a readable message.
+            if (codes.Any(c => string.Equals(c, requested, StringComparison.OrdinalIgnoreCase)))
+                throw new ApiConflictException($"A table named \"{requested}\" already exists.");
+            code = requested;
+        }
+        else
+        {
+            var maxNum = codes
+                .Select(c => int.TryParse(c.TrimStart('T'), out var n) ? n : 0)
+                .DefaultIfEmpty(0)
+                .Max();
+            code = $"T{maxNum + 1}";
+        }
 
         var table = new CafeTable
         {
-            Code = $"T{maxNum + 1}",
+            Code = code,
             Zone = string.IsNullOrWhiteSpace(req.Zone) ? "Indoor" : req.Zone.Trim(),
             Seats = req.Seats,
         };
