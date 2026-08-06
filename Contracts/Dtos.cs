@@ -46,6 +46,13 @@ public record ShiftTableRequest(string NewTableCode);
 
 public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null);
 
+/// <summary>Corrects an existing line's quantity — <paramref name="Qty"/> is the line's FINAL
+/// quantity, not a delta. Must be ≥ 1; removing a line entirely is still DELETE .../items/{itemId},
+/// which carries its own "order must keep at least one item" rule. Reason is required only when the
+/// change pulls back units that are already Preparing/Ready or recorded as served (same wastage
+/// rule as RemoveItem) — see OrdersController.UpdateItemQty.</summary>
+public record UpdateOrderItemQtyRequest(int Qty, string? Reason = null);
+
 /// <summary>Manager-only markdown applied at the billing stage (Served). Supply exactly
 /// one of Pct (percentage of subtotal) or Amount (flat).</summary>
 public record BillDiscountRequest(decimal? Pct, decimal? Amount);

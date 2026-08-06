@@ -334,11 +334,22 @@ public static class InventoryBatchService
     /// SAME batch back via <paramref name="original"/>'s InventoryBatchId, not a floating
     /// new batch. Falls back to a fresh no-expiry batch if the original batch is somehow
     /// gone (batches are never hard-deleted in normal operation, so this is just a safety
-    /// net, not an expected path).</summary>
+    /// net, not an expected path).
+    ///
+    /// <paramref name="amountBackOverride"/> credits back only PART of the original row — what a
+    /// quantity correction needs (a line cut from 5 to 3 gives back two fifths of its deduction,
+    /// see OrdersController.UpdateItemQty). The ledger stays append-only: the original Sale row is
+    /// never rewritten, so callers that may reverse the same row more than once must work out the
+    /// still-outstanding amount themselves by netting off earlier Returns (see
+    /// OrdersController.ReverseItemStockAsync, the only place that does). Omit it — the void/cancel
+    /// paths do — to credit the whole row back exactly as before. A non-positive amount is a no-op
+    /// rather than a stock-eating negative "return".</summary>
     public static async Task ReverseAsync(
         CafePosDbContext db, InventoryTransaction original, InventoryItem ingredient, string reason,
-        int? userId, string userName)
+        int? userId, string userName, double? amountBackOverride = null)
     {
+        if (amountBackOverride is <= 0) return;
+
         await LockAndRefreshAsync(db, ingredient);
 
         // Same ambient-filter bypass as ConsumeFifoAsync above — Find/queries here must
@@ -356,7 +367,9 @@ public static class InventoryBatchService
         };
         if (batch.Id == 0) db.InventoryBatches.Add(batch);
 
-        var amountBack = -original.ChangedQuantity; // ChangedQuantity was negative on the original deduction
+        // ChangedQuantity was negative on the original deduction, so negating it gives the full
+        // credit; an override caps that at whatever slice of the line is actually being pulled back.
+        var amountBack = amountBackOverride ?? -original.ChangedQuantity;
         var previous = ingredient.Current;
         batch.Quantity += amountBack;
         ingredient.Current += amountBack;

@@ -637,6 +637,165 @@ public class OrdersController(
         return OrderDto.From(order);
     });
 
+    /// <summary>Corrects one line's quantity on a not-yet-paid order — the "we rang up 3, they
+    /// only wanted 1" fix, which until now could only be done by voiding the line and re-adding it.
+    /// <c>req.Qty</c> is the line's FINAL quantity, not a delta, and must be ≥ 1 (removing a line
+    /// outright stays <see cref="RemoveItem"/>, which owns the "an order must keep at least one
+    /// item" rule).
+    ///
+    /// UNFIRED line (FireBatch == 0): the quantity is simply rewritten. Nothing was deducted and
+    /// the kitchen has never seen this line, so there's nothing else to reconcile — any staff
+    /// member may do it, same bar as adding the item in the first place.
+    ///
+    /// FIRED line, INCREASE: the line's own quantity goes up in place — no second line, no second
+    /// KOT. "Make it 4" is a correction to an existing ticket, not a new round, and the KDS renders
+    /// the live line, so the kitchen sees 4 the moment this commits. The added units enter at New
+    /// (NewQty is derived from Qty, see OrderItem), which can legitimately pull a batch that had
+    /// already rolled up to Ready back to New — correct, there is unmade food on it again.
+    /// The exception is a line that was ALREADY fully Served: that's the till reconciling a bill
+    /// after the fact, so the added units join the served ones instead of reopening a ticket for
+    /// food the guest has already had. Their ingredients are deducted straight away, tagged so they
+    /// sit outside the fire-time idempotency index (see ConsumeInventoryForAddedUnitsAsync).
+    /// Priced off the line's own snapshot, not today's menu price: this is the same guest asking
+    /// for more of the same thing at the price they were quoted. Staff wanting a genuinely separate
+    /// round still have Add Item, which is what makes its own KOT.
+    ///
+    /// FIRED line, DECREASE: Owner/Manager only. Units come off the least-progressed stages first
+    /// (New → Read → Preparing → Ready → Served), so an over-count is always corrected out of the
+    /// cheapest units available. Served units ARE reachable: a bill's counts get settled at the
+    /// till, not in the kitchen ("was it 3 lassis or 4?"), and by then every unit is served — a
+    /// floor at ServedQty would make the one correction this endpoint exists for impossible.
+    ///
+    /// Only New/Read units put ingredients back (see ReverseItemStockAsync). Preparing/Ready is
+    /// genuinely spent food, and a SERVED unit is one this system already believes left the
+    /// kitchen — crediting its stock back would let "served 4, billed 3" balance itself out and
+    /// leave nothing anywhere looking wrong. The cafe instead counts slightly MORE on the shelf
+    /// than the system claims, which is the direction that gets noticed. Both cases require a
+    /// reason and are audited; pulling back a served unit is logged at High severity, since that
+    /// is the shape till-side leakage takes.</summary>
+    [HttpPatch("{id:int}/items/{itemId:int}/qty")]
+    public Task<ActionResult<OrderDto>> UpdateItemQty(int id, int itemId, UpdateOrderItemQtyRequest req) =>
+        // Same lost-update exposure as AddItem (totals are recomputed from the line collection as
+        // this request sees it), plus this one can reverse stock — see ReverseItemStockAsync.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
+    {
+        var order = await LoadOrderForUpdateAsync(id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
+        if (order.Cancelled) throw new ApiConflictException("Cannot modify a cancelled order.");
+        if (req.Qty < 1) throw new ApiValidationException("Quantity must be at least 1 — remove the item instead.");
+
+        var item = order.Items.FirstOrDefault(i => i.Id == itemId && !i.Voided);
+        if (item is null) return NotFound();
+        if (req.Qty == item.Qty) return OrderDto.From(order);
+
+        if (item.FireBatch == 0)
+        {
+            item.Qty = req.Qty;
+        }
+        else if (req.Qty > item.Qty)
+        {
+            var extraQty = req.Qty - item.Qty;
+            // A line that's ALREADY fully served is being reconciled at the till, not re-ordered:
+            // "they actually had 4 lassis, we rang up 3". The food went out long ago, so the added
+            // units enter Served alongside the rest. Without this they'd land at New (NewQty is
+            // derived from Qty), dragging the line — and its KOT, and the whole order — back out
+            // of Served and onto the kitchen board to cook something that's already been drunk.
+            var reconcilingServedLine = item.Status == OrderStatus.Served;
+            item.Qty = req.Qty;
+            if (reconcilingServedLine) item.ServedQty = item.Qty;
+            // Deducted before the stage rollups below so a stock failure aborts the whole
+            // correction rather than leaving the kitchen told to make units nothing was drawn for.
+            await orderBuilder.ConsumeInventoryForAddedUnitsAsync(db, item, extraQty, order.Id);
+            RecomputeItemStatus(item);
+            orderBuilder.RecomputeBatchStatus(db, order, item.FireBatch);
+            OrderBuildingService.RecomputeOrderStatus(order);
+            await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
+                reconcilingServedLine
+                    ? $"Billing correction: '{item.Name}' (order {order.Id}) raised to {req.Qty} — {extraQty} already-served unit(s) added at the till and deducted from stock."
+                    : $"Increased '{item.Name}' (order {order.Id}) to {req.Qty} — {extraQty} added unit(s) deducted against the existing KOT.",
+                AuditSeverity.Low);
+        }
+        else
+        {
+            if (!IsOwnerOrManager()) return Forbid();
+
+            var removed = ReduceFiredLineQty(item, req.Qty);
+            // Anything past the not-yet-cooked units is either food already in the pass or food
+            // the system believes has gone out — both need a reason on the record.
+            if (removed.FromPrepOrReady + removed.FromServed > 0 && string.IsNullOrWhiteSpace(req.Reason))
+                throw new ApiValidationException("A reason is required to pull back units that are already in preparation or served.");
+
+            // Only the not-yet-cooked units put ingredients back — see the endpoint's own doc above
+            // for why a served unit deliberately doesn't.
+            // Fraction of what the line still has on the shelf, not of the original quantity —
+            // an earlier reduction may already have credited part of it back.
+            if (removed.Reversible > 0)
+                await ReverseItemStockAsync(item, (double)removed.Reversible / removed.QtyBefore, "Quantity reduced before prep");
+            if (removed.FromPrepOrReady > 0)
+                await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
+                    $"Reduced '{item.Name}' (order {order.Id}) from {removed.QtyBefore} to {req.Qty} — {removed.FromPrepOrReady} unit(s) already in prep, no stock reversal (wastage). Reason: {req.Reason}.",
+                    AuditSeverity.Medium);
+            if (removed.FromServed > 0)
+                await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+                    $"Billing correction: '{item.Name}' (order {order.Id}) cut from {removed.QtyBefore} to {req.Qty} — {removed.FromServed} unit(s) the system had recorded as SERVED were removed from the bill. Stock NOT reversed. Reason: {req.Reason}.",
+                    AuditSeverity.High);
+
+            RecomputeItemStatus(item);
+            orderBuilder.RecomputeBatchStatus(db, order, item.FireBatch);
+            OrderBuildingService.RecomputeOrderStatus(order);
+        }
+
+        order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    });
+
+    /// <summary>What a quantity reduction actually took off a fired line — see UpdateItemQty.</summary>
+    /// <param name="QtyBefore">The line's quantity before the cut, i.e. the denominator for the
+    /// share of its stock deduction being credited back.</param>
+    /// <param name="Reversible">Units taken from New/Read — prep hadn't started, so their
+    /// ingredients go back on the shelf.</param>
+    /// <param name="FromPrepOrReady">Units taken from Preparing/Ready — wastage, no reversal.</param>
+    /// <param name="FromServed">Units the system had already recorded as served — a till-time
+    /// billing correction ("they only had 3 lassis, not 4"). No reversal, and the one the audit
+    /// trail cares most about.</param>
+    private readonly record struct QtyReduction(int QtyBefore, int Reversible, int FromPrepOrReady, int FromServed);
+
+    /// <summary>Cuts a fired line down to <paramref name="newQty"/>, taking units off the
+    /// least-progressed stages first so the cheapest units (nothing started on them yet) are the
+    /// ones that go, and only reaching already-SERVED units once nothing else is left. NewQty is
+    /// derived from Qty minus the explicit stage counters, so lowering Qty consumes New units by
+    /// itself — only the deeper stages need decrementing here.
+    ///
+    /// Served units are reachable on purpose: the count on a bill gets settled at the till, not in
+    /// the kitchen ("was it 3 lassis or 4?"), and by then every unit on the order is served. Since
+    /// they're taken last, an over-count is always corrected out of the cheapest units available.</summary>
+    private static QtyReduction ReduceFiredLineQty(OrderItem item, int newQty)
+    {
+        var qtyBefore = item.Qty;
+        var toRemove = qtyBefore - newQty;
+
+        var fromNew = Math.Min(toRemove, item.NewQty);
+        toRemove -= fromNew;
+        var fromRead = Math.Min(toRemove, item.ReadQty);
+        item.ReadQty -= fromRead;
+        toRemove -= fromRead;
+        var fromPreparing = Math.Min(toRemove, item.PreparingQty);
+        item.PreparingQty -= fromPreparing;
+        toRemove -= fromPreparing;
+        var fromReady = Math.Min(toRemove, item.ReadyQty);
+        item.ReadyQty -= fromReady;
+        toRemove -= fromReady;
+        var fromServed = Math.Min(toRemove, item.ServedQty);
+        item.ServedQty -= fromServed;
+
+        item.Qty = newQty;
+        return new QtyReduction(qtyBefore, fromNew + fromRead, fromPreparing + fromReady, fromServed);
+    }
+
     /// <summary>Staff-Confirm Mode: the floor's "yes, this table is real" gate on a guest QR
     /// order's first submission — actually fires it to the kitchen (see
     /// IOrderBuildingService.FireUnfiredItemsAsync) now that a staff member has looked at it.
@@ -863,34 +1022,76 @@ public class OrdersController(
 
         if (item.Status is OrderStatus.New or OrderStatus.Read)
         {
-            var deductions = await db.InventoryTransactions
-                .Where(t => t.OrderItemId == item.Id && t.Type == InventoryTransactionType.Sale)
-                .ToListAsync();
-            // One ordered lock for every ingredient being credited back, taken before any of
-            // their balances are read — a reversal racing a sale of the same ingredient would
-            // otherwise lose one of the two movements. See
-            // InventoryBatchService.LockIngredientsAsync.
-            var ingredientIds = deductions.Select(d => d.InventoryItemId).Distinct().ToList();
-            await InventoryBatchService.LockIngredientsAsync(db, ingredientIds);
-            // Loaded in one query rather than a FindAsync per ingredient — a ten-ingredient
-            // recipe was ten separate round trips to a remote Postgres, all while the kitchen
-            // waits. Safe to batch now precisely because the lock above is already held, so
-            // these rows can't move between this read and the reversal below.
-            var ingredients = await db.InventoryItems
-                .Where(i => ingredientIds.Contains(i.Id))
-                .ToDictionaryAsync(i => i.Id);
-            foreach (var d in deductions)
-            {
-                if (!ingredients.TryGetValue(d.InventoryItemId, out var ingredient)) continue;
-                await InventoryBatchService.ReverseAsync(db, d, ingredient, "Void before prep",
-                    CurrentUserId(), User.Identity?.Name ?? "Cafe Staff");
-            }
+            // Every unit of the line is coming back, so the fraction is 1 — which
+            // ReverseItemStockAsync turns into "whatever of this line's deduction is still
+            // outstanding", the same full credit this used to do inline.
+            await ReverseItemStockAsync(item, fraction: 1, reason: "Void before prep");
         }
         else
         {
             await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
                 $"Voided '{item.Name}' (order {order.Id}) after prep started — no stock reversal (wastage). Reason: {reason ?? "not specified"}.",
                 AuditSeverity.Medium);
+        }
+    }
+
+    /// <summary>Credits back <paramref name="fraction"/> of the ingredients this line's fire
+    /// deducted — the whole thing (fraction 1) for a void/cancel, or just the slice a quantity
+    /// correction is pulling back (see UpdateItemQty).
+    ///
+    /// Nets off Returns already written against the same (OrderItemId, ingredient, batch) before
+    /// applying the fraction, so the credit is always a share of what's still OUTSTANDING, never of
+    /// the original deduction. That's what makes repeated partial pull-backs safe: a line cut 5→3
+    /// gives back 2/5, a later cut 3→1 gives back 2/3 of the remaining 3/5 (= another 2/5), and a
+    /// void of the last unit gives back the final 1/5 — the deduction can never be credited more
+    /// than once over. The Sale row itself is left untouched (the ledger is append-only).</summary>
+    private async Task ReverseItemStockAsync(OrderItem item, double fraction, string reason)
+    {
+        if (fraction <= 0) return;
+
+        var ledger = await db.InventoryTransactions
+            .Where(t => t.OrderItemId == item.Id
+                && (t.Type == InventoryTransactionType.Sale || t.Type == InventoryTransactionType.Return))
+            .ToListAsync();
+        var deductions = ledger.Where(t => t.Type == InventoryTransactionType.Sale).ToList();
+        if (deductions.Count == 0) return;
+
+        // Grouped per (ingredient, lot) rather than per row, because one line can hold SEVERAL Sale
+        // rows against the same lot: its fire-time draw plus a draw for every later quantity
+        // increase (see ConsumeInventoryForAddedUnitsAsync). Netting row-by-row would subtract the
+        // same Returns from each of them and credit far too little back. A draw that spanned two
+        // lots still stays two independent groups, each credited against its own lot.
+        var netByBatch = ledger
+            .GroupBy(t => (t.InventoryItemId, t.InventoryBatchId))
+            // Sale rows carry a NEGATIVE ChangedQuantity (stock leaving) and Return rows a positive
+            // one, so negating the sum gives what this lot still owes the line.
+            // FirstOrDefault, not First: a group can hold only Return rows when an earlier reversal
+            // had to fall back to a fresh lot because the original was gone (see ReverseAsync).
+            // Those owe nothing back and are skipped below.
+            .ToDictionary(g => g.Key, g => (Outstanding: -g.Sum(t => t.ChangedQuantity), Sample: g.FirstOrDefault(t => t.Type == InventoryTransactionType.Sale)));
+
+        // One ordered lock for every ingredient being credited back, taken before any of
+        // their balances are read — a reversal racing a sale of the same ingredient would
+        // otherwise lose one of the two movements. See
+        // InventoryBatchService.LockIngredientsAsync.
+        var ingredientIds = deductions.Select(d => d.InventoryItemId).Distinct().ToList();
+        await InventoryBatchService.LockIngredientsAsync(db, ingredientIds);
+        // Loaded in one query rather than a FindAsync per ingredient — a ten-ingredient
+        // recipe was ten separate round trips to a remote Postgres, all while the kitchen
+        // waits. Safe to batch now precisely because the lock above is already held, so
+        // these rows can't move between this read and the reversal below.
+        var ingredients = await db.InventoryItems
+            .Where(i => ingredientIds.Contains(i.Id))
+            .ToDictionaryAsync(i => i.Id);
+        foreach (var ((inventoryItemId, _), (outstanding, sample)) in netByBatch)
+        {
+            if (outstanding <= 0 || sample is null) continue;
+            if (!ingredients.TryGetValue(inventoryItemId, out var ingredient)) continue;
+            // `sample` only supplies the lot to credit back to — the amount is the netted figure
+            // above, never that one row's own quantity.
+            await InventoryBatchService.ReverseAsync(db, sample, ingredient, reason,
+                CurrentUserId(), User.Identity?.Name ?? "Cafe Staff",
+                amountBackOverride: outstanding * Math.Min(fraction, 1));
         }
     }
 

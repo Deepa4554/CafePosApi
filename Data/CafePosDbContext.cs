@@ -430,10 +430,19 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // actual retry/duplicate fire. Existing rows all have OrderItemId == NULL; Postgres
         // treats NULLs as distinct in a unique index, so historical Sale rows never collide
         // with each other or with this filter — no backfill needed.
+        //
+        // "Reason" IS NULL narrows this to FIRE-time deductions specifically, which is all it was
+        // ever meant to guard. A fire always writes reason: null (see
+        // OrderBuildingService.ConsumeInventoryAsync's Deduct), so a duplicate fire still collides
+        // exactly as before. A quantity increase on an already-fired line is a second, legitimate
+        // draw against the same line, and it tags its rows with a reason (see
+        // OrderBuildingService.TopUpDeductionReason) so it lands outside this index instead of
+        // being rejected as a retry. Deliberately NOT a separate transaction Type: these really
+        // are sales, and the usage/variance reports sum Type == Sale (see ReportsController).
         modelBuilder.Entity<InventoryTransaction>()
             .HasIndex(t => new { t.OrderItemId, t.InventoryItemId, t.InventoryBatchId })
             .IsUnique()
-            .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL");
+            .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL AND \"Reason\" IS NULL");
 
         modelBuilder.Entity<MissingRecipeAlert>().HasIndex(a => new { a.TenantId, a.MenuItemId }).IsUnique();
 

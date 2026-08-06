@@ -69,7 +69,20 @@ public interface IOrderBuildingService
     /// OrdersController.AddItem (which keeps its own "always a new line" semantics,
     /// distinct from the guest cart's upsert-by-line behaviour) can still share the
     /// deduction logic instead of duplicating it.</summary>
-    Task ConsumeInventoryAsync(CafePosDbContext db, Dictionary<int, MenuItem> menu, List<OrderItem> items, int orderId, int? explicitTenantId = null);
+    Task ConsumeInventoryAsync(CafePosDbContext db, Dictionary<int, MenuItem> menu, List<OrderItem> items, int orderId,
+        int? explicitTenantId = null, string? reason = null, bool skipAlreadyDeductedCheck = false);
+
+    /// <summary>Deducts the ingredients for <paramref name="extraQty"/> ADDITIONAL units of a line
+    /// that has already been fired (and so already had its original units deducted) — what a
+    /// quantity increase needs, see OrdersController.UpdateItemQty.
+    ///
+    /// Distinct from a plain re-run of <see cref="ConsumeInventoryAsync"/> in two ways, both
+    /// deliberate: it must NOT be skipped by the already-deducted guard (this line having been
+    /// deducted once is the normal case here, not a retry), and its ledger rows are tagged with
+    /// <see cref="OrderBuildingService.TopUpDeductionReason"/> so they fall outside the fire-time
+    /// idempotency index rather than colliding with the line's original draw (see
+    /// CafePosDbContext). Does not save — the caller does.</summary>
+    Task ConsumeInventoryForAddedUnitsAsync(CafePosDbContext db, OrderItem line, int extraQty, int orderId);
 
     /// <summary>Resolves the CRM customer for a guest — by phone first, then by name, creating
     /// one if neither matches. Exposed so OrdersController.UpdateGuest can re-link an order
@@ -564,12 +577,24 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
     }
 
+    /// <summary>Rolls the order up to its least-progressed work, the same way a batch rolls up its
+    /// items. Requires order.Items to be loaded (every call site loads them).
+    ///
+    /// A not-yet-fired line pins the order at New even when every KOT on it is Served. Fire batches
+    /// alone used to decide this, and an unfired line belongs to no batch — so an order that had
+    /// one (added late via Add Item, or a quantity top-up, see OrdersController.UpdateItemQty)
+    /// rolled up to SERVED with an item the kitchen had never been told about. That order then
+    /// dropped out of the activeOnly list, freed its table, and could be settled for a total that
+    /// billed food nobody ever made.</summary>
     public static void RecomputeOrderStatus(Order order)
     {
+        var hasUnfired = order.Items.Any(i => i.FireBatch == 0 && !i.Voided);
         var active = order.FireBatches.Where(b => b.Status != OrderStatus.Served).ToList();
-        order.Status = active.Count > 0
-            ? active.Min(b => b.Status)
-            : (order.FireBatches.Count > 0 ? OrderStatus.Served : OrderStatus.New);
+        order.Status = hasUnfired
+            ? OrderStatus.New
+            : active.Count > 0
+                ? active.Min(b => b.Status)
+                : (order.FireBatches.Count > 0 ? OrderStatus.Served : OrderStatus.New);
     }
 
     /// <summary>Recomputes tax and total from the order's live lines.
@@ -721,13 +746,34 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
     }
 
-    public async Task ConsumeInventoryAsync(CafePosDbContext db, Dictionary<int, MenuItem> menu, List<OrderItem> items, int orderId, int? explicitTenantId = null)
+    /// <summary>Marks a ledger row as the second-or-later draw against an already-fired line (a
+    /// quantity increase), which is what keeps it out of the fire-time idempotency index — see
+    /// CafePosDbContext, which filters that index on Reason IS NULL.</summary>
+    public const string TopUpDeductionReason = "Quantity increased after fire";
+
+    public async Task ConsumeInventoryForAddedUnitsAsync(CafePosDbContext db, OrderItem line, int extraQty, int orderId)
+    {
+        if (extraQty <= 0) return;
+        var menu = await db.MenuItems.Where(m => m.Id == line.MenuItemId).ToDictionaryAsync(m => m.Id);
+        // A stand-in line carrying ONLY the added units, so the recipe maths below multiplies by
+        // the delta instead of the line's new total (whose original units are already off the
+        // shelf). Never attached to the context — ConsumeInventoryAsync only reads Id/MenuItemId/
+        // Qty off it, and the real line's Id is what the ledger rows must point at.
+        var addedUnits = new OrderItem { Id = line.Id, MenuItemId = line.MenuItemId, Name = line.Name, Qty = extraQty };
+        await ConsumeInventoryAsync(db, menu, [addedUnits], orderId, explicitTenantId: null,
+            reason: TopUpDeductionReason, skipAlreadyDeductedCheck: true);
+    }
+
+    public async Task ConsumeInventoryAsync(CafePosDbContext db, Dictionary<int, MenuItem> menu, List<OrderItem> items, int orderId,
+        int? explicitTenantId = null, string? reason = null, bool skipAlreadyDeductedCheck = false)
     {
         // Idempotency pre-check — skip any line already deducted (e.g. a retried Fire
         // call). The DB unique index on (OrderItemId, InventoryItemId) WHERE Type='Sale'
         // is the hard backstop for a genuine concurrent double-fire; this is just the
         // happy-path guard that avoids hitting it in the common case.
-        var candidateItemIds = items.Select(i => i.Id).Where(id => id != 0).ToList();
+        // Bypassed for a quantity top-up, where the line having been deducted before is precisely
+        // the expected state rather than a sign of a retry (see ConsumeInventoryForAddedUnitsAsync).
+        var candidateItemIds = skipAlreadyDeductedCheck ? [] : items.Select(i => i.Id).Where(id => id != 0).ToList();
         if (candidateItemIds.Count > 0)
         {
             var alreadyDeducted = await TenantScoped(db.InventoryTransactions, explicitTenantId)
@@ -771,7 +817,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
 
         Task Deduct(InventoryItem ingredient, double amount, int orderItemId) =>
             InventoryBatchService.ConsumeFifoAsync(db, ingredient, amount, InventoryTransactionType.Sale,
-                orderId.ToString(), orderItemId, reason: null, wasteReasonCode: null, userId: null, userName: "System");
+                orderId.ToString(), orderItemId, reason, wasteReasonCode: null, userId: null, userName: "System");
 
         async Task TrackMissingRecipeAsync(MenuItem menuItem)
         {
