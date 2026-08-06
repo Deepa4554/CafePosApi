@@ -46,17 +46,21 @@ public class CustomersController(CafePosDbContext db) : ControllerBase
         var retentionRate = totalCustomers > 0 ? customers.Count(c => c.VisitCount >= 2) * 100.0 / totalCustomers : 0;
         var avgLtv = totalCustomers > 0 ? customers.Average(c => c.TotalSpent) : 0;
 
-        var weekStart = DateTime.UtcNow.Date.AddDays(-6);
+        // The week's days are the cafe's, not UTC's (see IstClock) — on a UTC boundary each bar
+        // would run 5:30am-to-5:30am, so a customer who came in after midnight would be counted
+        // against the previous day, and today's bar would look emptier than the floor did.
+        var weekStartIst = IstClock.NowIst.Date.AddDays(-6);
+        var weekStartUtc = weekStartIst - IstClock.Offset;
         var recentOrders = await db.Orders
-            .Where(o => o.CreatedAt >= weekStart && o.CustomerId != null)
+            .Where(o => o.CreatedAt >= weekStartUtc && o.CustomerId != null)
             .Select(o => new { o.CreatedAt, o.CustomerId })
             .ToListAsync();
-        var customerJoinDates = customers.ToDictionary(c => c.Id, c => c.JoinedAt.Date);
+        var customerJoinDates = customers.ToDictionary(c => c.Id, c => IstClock.ToIst(c.JoinedAt).Date);
 
         var growth = Enumerable.Range(0, 7).Select(offset =>
         {
-            var day = weekStart.AddDays(offset);
-            var dayCustomerIds = recentOrders.Where(o => o.CreatedAt.Date == day).Select(o => o.CustomerId!.Value).Distinct().ToList();
+            var day = weekStartIst.AddDays(offset);
+            var dayCustomerIds = recentOrders.Where(o => IstClock.ToIst(o.CreatedAt).Date == day).Select(o => o.CustomerId!.Value).Distinct().ToList();
             var newCount = dayCustomerIds.Count(cid => customerJoinDates.TryGetValue(cid, out var joined) && joined == day);
             return new CrmGrowthPointDto(day.ToString("ddd"), newCount, dayCustomerIds.Count - newCount);
         }).ToList();

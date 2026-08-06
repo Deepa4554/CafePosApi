@@ -41,7 +41,10 @@ public class AIController(IGeminiService gemini, CafePosDbContext db) : Controll
     private async Task<string> BuildSystemPromptAsync()
     {
         var settings = await db.Settings.FirstAsync();
-        var todayStart = DateTime.UtcNow.Date;
+        // "Today" is the cafe's calendar day (see IstClock), not UTC's: on a UTC boundary the
+        // assistant would quote a figure that silently excluded everything rung up between
+        // midnight and 5:30am, and before 5:30am would fold in the whole of yesterday.
+        var todayStart = IstClock.IstDateStartUtc(DateOnly.FromDateTime(IstClock.NowIst));
         var todaysOrders = await db.Orders.Where(o => o.Paid && o.CreatedAt >= todayStart).ToListAsync();
         var todayRevenue = todaysOrders.Sum(o => o.Total);
         var lowStockCount = await db.InventoryItems.CountAsync(i => i.Current <= i.ReorderLevel);

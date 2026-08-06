@@ -86,19 +86,7 @@ public class ReportsController : ControllerBase
     public async Task<IEnumerable<VarianceReportLineDto>> Variance(
         [FromQuery] int days = 30, [FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null)
     {
-        DateTime periodStart;
-        DateTime periodEndExclusive;
-        if (from is not null || to is not null)
-        {
-            periodStart = (from ?? to!.Value).ToDateTime(TimeOnly.MinValue);
-            periodEndExclusive = (to ?? from!.Value).ToDateTime(TimeOnly.MinValue).AddDays(1);
-        }
-        else
-        {
-            if (days <= 0) days = 30;
-            periodStart = DateTime.UtcNow.AddDays(-days);
-            periodEndExclusive = DateTime.UtcNow;
-        }
+        var (periodStart, periodEndExclusive) = ResolveIstRange(from, to, days);
 
         var itemsQuery = db.InventoryItems.AsQueryable();
         if (branchId is int bid) itemsQuery = itemsQuery.Where(i => i.BranchId == bid);
@@ -154,9 +142,11 @@ public class ReportsController : ControllerBase
     // ---------- Owner Daily-Audit Reports ----------
 
     /// <summary>Same "explicit from/to wins, else a rolling N-day window ending now" shape
-    /// as DashboardController.Analytics — kept IST-bounded (unlike this controller's own
-    /// Variance(), which does raw-UTC math) since every caller of this helper is a money
-    /// report, where a UTC-midnight boundary would silently start "today" at 5:30am IST.</summary>
+    /// as DashboardController.Analytics, and IST-bounded: a UTC-midnight boundary would
+    /// silently start "today" at 5:30am IST, so a report asked for today would drop the
+    /// after-midnight trade onto the previous day. Every dated read in this controller goes
+    /// through here for that reason — Variance() used to do its own raw-UTC math and was the
+    /// one report where the night's stock movement landed on the wrong day.</summary>
     private static (DateTime StartUtc, DateTime EndExclusiveUtc) ResolveIstRange(DateOnly? from, DateOnly? to, int days)
     {
         DateTime startIst, endExclusiveIst;

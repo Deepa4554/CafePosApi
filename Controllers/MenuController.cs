@@ -58,7 +58,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
     /// period=month (default): last 30 days, top 3. A brand-new cafe with too little order
     /// history (fewer than 3 items with any sales) gets the remaining slots backfilled from
     /// Popular-flagged items (UnitsSold 0) so the section never renders empty on day one.
-    /// period=today: midnight UTC through now, top 3 — "today's best-selling items so far".
+    /// period=today: cafe-local midnight (IST) through now, top 3 — "today's best-selling items so far".
     /// No Popular backfill here: a short or empty list before the day's sales pick up is the
     /// correct answer, not a gap to paper over.
     /// </summary>
@@ -67,7 +67,11 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
     public async Task<IEnumerable<BestSellerDto>> BestSellers([FromQuery] string period = "month")
     {
         var isToday = period.Equals("today", StringComparison.OrdinalIgnoreCase);
-        var cutoff = isToday ? DateTime.UtcNow.Date : DateTime.UtcNow.AddDays(-30);
+        // "Today" starts at the cafe's midnight (see IstClock), not UTC's — a UTC cutoff starts
+        // the day at 5:30am IST, which drops the whole after-midnight trade off this list.
+        var cutoff = isToday
+            ? IstClock.IstDateStartUtc(DateOnly.FromDateTime(IstClock.NowIst))
+            : DateTime.UtcNow.AddDays(-30);
         var take = BestSellerCount;
 
         var sales = await (
@@ -352,6 +356,23 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         if (item is null) return NotFound();
 
         item.Available = !item.Available;
+        await db.SaveChangesAsync();
+        return item;
+    }
+
+    /// <summary>Pins/unpins an item to the front of the POS grid — see MenuItem.Pinned. Same
+    /// any-authenticated-staff bar as ToggleAvailability above: it's a till-layout preference,
+    /// not a price or a recipe, and the person who needs it changed is whoever is on the till.
+    /// Note List() is deliberately left ordering by Category/Name — the POS applies this itself,
+    /// so the customer QR menu (same endpoint) keeps its own alphabetical order.</summary>
+    [Authorize]
+    [HttpPatch("{id:int}/toggle-pinned")]
+    public async Task<ActionResult<MenuItem>> TogglePinned(int id)
+    {
+        var item = await db.MenuItems.FindAsync(id);
+        if (item is null) return NotFound();
+
+        item.Pinned = !item.Pinned;
         await db.SaveChangesAsync();
         return item;
     }

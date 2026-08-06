@@ -91,8 +91,12 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
         var tenant = await db.Tenants.FindAsync(tenantId);
         if (tenant is null) return NotFound();
 
-        var now = DateTime.UtcNow;
-        var historyStart = now.Date.AddDays(-29);
+        // Days and months are the cafe's own (IST — see IstClock), not UTC's. On UTC boundaries
+        // every bar here would start at 5:30am IST, so a tenant's after-midnight trade would be
+        // credited to the previous day and "today's revenue" would omit it entirely.
+        var nowIst = IstClock.NowIst;
+        var historyStartIst = nowIst.Date.AddDays(-29);
+        var historyStart = historyStartIst - IstClock.Offset;
 
         var recentOrders = await db.Orders.IgnoreQueryFilters()
             .Where(o => o.TenantId == tenantId && o.Paid && o.CreatedAt >= historyStart)
@@ -106,21 +110,23 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
 
         var daily = Enumerable.Range(0, 30).Select(offset =>
         {
-            var day = historyStart.AddDays(offset);
-            var dayOrders = recentOrders.Where(o => o.CreatedAt.Date == day).ToList();
+            var day = historyStartIst.AddDays(offset);
+            var dayOrders = recentOrders.Where(o => IstClock.ToIst(o.CreatedAt).Date == day).ToList();
             return new DailySalesDto(day.ToString("yyyy-MM-dd"), dayOrders.Sum(o => o.Total), dayOrders.Count);
         }).ToList();
 
         var monthly = Enumerable.Range(0, 12).Select(offset =>
         {
-            var monthStart = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-(11 - offset));
-            var monthEnd = monthStart.AddMonths(1);
-            var monthOrders = allTimePaid.Where(o => o.CreatedAt >= monthStart && o.CreatedAt < monthEnd).ToList();
-            return new MonthlySalesDto(monthStart.ToString("MMM yyyy"), monthOrders.Sum(o => o.Total), monthOrders.Count);
+            var monthStartIst = new DateTime(nowIst.Year, nowIst.Month, 1).AddMonths(-(11 - offset));
+            var monthStartUtc = monthStartIst - IstClock.Offset;
+            var monthEndUtc = monthStartIst.AddMonths(1) - IstClock.Offset;
+            var monthOrders = allTimePaid.Where(o => o.CreatedAt >= monthStartUtc && o.CreatedAt < monthEndUtc).ToList();
+            return new MonthlySalesDto(monthStartIst.ToString("MMM yyyy"), monthOrders.Sum(o => o.Total), monthOrders.Count);
         }).ToList();
 
-        var todayRevenue = allTimePaid.Where(o => o.CreatedAt.Date == now.Date).Sum(o => o.Total);
-        var thisMonthRevenue = allTimePaid.Where(o => o.CreatedAt.Year == now.Year && o.CreatedAt.Month == now.Month).Sum(o => o.Total);
+        var todayRevenue = allTimePaid.Where(o => IstClock.ToIst(o.CreatedAt).Date == nowIst.Date).Sum(o => o.Total);
+        var thisMonthStartUtc = new DateTime(nowIst.Year, nowIst.Month, 1) - IstClock.Offset;
+        var thisMonthRevenue = allTimePaid.Where(o => o.CreatedAt >= thisMonthStartUtc).Sum(o => o.Total);
 
         return new TenantSalesDto(
             tenantId, tenant.Name,

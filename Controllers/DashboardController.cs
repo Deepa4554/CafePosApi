@@ -107,9 +107,10 @@ public class DashboardController : ControllerBase
 
         // IST hours against DaypartBuckets' cafe-local-time ranges — same shift
         // OrdersController.RushForecast applies; raw UTC hours put the 1 PM lunch rush
-        // in the morning bucket.
+        // in the morning bucket. Contains() rather than a hand-written >= / < pair because
+        // the night bucket wraps past midnight, so the raw hours don't compare.
         var hourCounts = DaypartBuckets.All
-            .Select(b => currentPaid.Count(o => IstClock.ToIst(o.CreatedAt).Hour >= b.StartHour && IstClock.ToIst(o.CreatedAt).Hour < b.EndHour))
+            .Select(b => currentPaid.Count(o => b.Contains(IstClock.ToIst(o.CreatedAt).Hour)))
             .ToList();
         var maxHourCount = Math.Max(1, hourCounts.Count > 0 ? hourCounts.Max() : 0);
         var peakHours = DaypartBuckets.All

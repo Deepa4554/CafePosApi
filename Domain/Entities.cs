@@ -32,6 +32,15 @@ public class MenuItem : ITenantScoped
     public string Image { get; set; } = "";
     public string? Description { get; set; }
     public bool Popular { get; set; }
+    /// <summary>Staff pinned this item to the front of the POS grid — the handful of things a
+    /// till rings up all day, kept out of the alphabetical scroll. Distinct from
+    /// <see cref="Popular"/>, which only paints a badge and never moves anything, and from the
+    /// best-sellers list, which is derived from real sales rather than chosen.
+    ///
+    /// Cafe-wide, not per-user (this is tenant-scoped like every other MenuItem field), and
+    /// deliberately NOT honoured by the customer-facing QR menu: MenuController.List serves both,
+    /// so the ordering is applied by the POS grid itself rather than by the query.</summary>
+    public bool Pinned { get; set; }
     public ProductType ProductType { get; set; } = ProductType.Prepared;
     /// <summary>Only set when ProductType == Independent — the InventoryItem this menu
     /// item sells directly from.</summary>

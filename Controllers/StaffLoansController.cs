@@ -58,7 +58,9 @@ public class StaffLoansController(CafePosDbContext db, IAuditService audit) : Co
             Type = req.Type,
             PrincipalAmount = req.PrincipalAmount,
             MonthlyDeduction = req.MonthlyDeduction,
-            StartDate = req.StartDate ?? DateOnly.FromDateTime(DateTime.UtcNow),
+            // Defaults to today on the cafe's clock (see IstClock), not UTC's — a loan approved
+            // after midnight would otherwise be dated to the previous day.
+            StartDate = req.StartDate ?? DateOnly.FromDateTime(IstClock.NowIst),
             OutstandingBalance = req.PrincipalAmount,
             Reason = req.Reason,
             ApprovedByUserId = actor.Id,

@@ -419,7 +419,9 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
     [HttpGet("expiring")]
     public async Task<IEnumerable<InventoryBatchDto>> Expiring([FromQuery] int days = 7)
     {
-        var cutoff = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(Math.Max(0, days));
+        // Today is the cafe's day (see IstClock) — ExpiryDate is a plain calendar date, so
+        // comparing it against a UTC "today" shifts the whole window by 5.5 hours.
+        var cutoff = DateOnly.FromDateTime(IstClock.NowIst).AddDays(Math.Max(0, days));
         var batches = await db.InventoryBatches
             .Where(b => b.Quantity > 0 && b.ExpiryDate != null && b.ExpiryDate <= cutoff)
             .OrderBy(b => b.ExpiryDate).ThenBy(b => b.ReceivedAt)
@@ -433,7 +435,7 @@ public class InventoryController(CafePosDbContext db) : ControllerBase
 
     private static InventoryBatchDto ToBatchDto(InventoryBatch b, string itemName, string unit)
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var today = DateOnly.FromDateTime(IstClock.NowIst);
         int? daysUntilExpiry = b.ExpiryDate?.DayNumber - today.DayNumber;
         return new InventoryBatchDto(b.Id, b.InventoryItemId, itemName, unit, b.Quantity, b.UnitCost,
             b.ExpiryDate, b.ReceivedAt, daysUntilExpiry, daysUntilExpiry is < 0);
