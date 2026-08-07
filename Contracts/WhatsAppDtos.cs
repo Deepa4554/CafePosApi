@@ -56,6 +56,15 @@ public record WhatsAppQueueJobDto(int Id, int? OrderId, int? TrackingId, string 
 
 public record WhatsAppTenantSettingsDto(string BusinessName, bool UpdatesEnabled);
 
+/// <summary>Batch-fetch specific Baileys auth-state keys (see WhatsAppAuthState) — only the
+/// keys Baileys actually asked its SignalKeyStore.get() for, not the tenant's whole state.
+/// Missing keys are simply absent from the response, never present with a null value.</summary>
+public record WhatsAppAuthStateGetRequest(List<string> Keys);
+
+/// <summary>Upsert (non-null Value) or delete (null Value) each entry — mirrors
+/// SignalKeyStore.set()'s "null value means delete this id" convention one-for-one.</summary>
+public record WhatsAppAuthStateSetRequest(Dictionary<string, string?> Entries);
+
 // ---------- Staff-facing API (RN app -> CafePosApi, JWT-authed) ----------
 
 public record WhatsAppStaffStatusDto(string Status, string? PhoneNumberE164, DateTime? ConnectedAt, bool UpdatesEnabled);

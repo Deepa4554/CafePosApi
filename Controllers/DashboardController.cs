@@ -87,14 +87,17 @@ public class DashboardController : ControllerBase
         // own query, deliberately independent of whatever period/range was requested
         // above, so it's always "today" even when viewing a custom range that excludes today.
         var todayStartUtc = IstClock.IstDateStartUtc(DateOnly.FromDateTime(nowIst.Date));
-        var todayPaidTotal = await db.Orders
-            .Where(o => o.Paid && o.CreatedAt >= todayStartUtc && o.CreatedAt < todayStartUtc.AddDays(1))
-            .Select(o => o.Total)
-            .ToListAsync();
+        var todayPaidQuery = db.Orders.Where(o => o.Paid && o.CreatedAt >= todayStartUtc && o.CreatedAt < todayStartUtc.AddDays(1));
+        // Same branch convention as the period query above: no branch selected shows the
+        // whole tenant, a branch selected shows only that branch's calendar-day total.
+        if (branchId.HasValue) todayPaidQuery = todayPaidQuery.Where(o => o.BranchId == branchId.Value);
+        var todayPaidTotal = await todayPaidQuery.Select(o => o.Total).ToListAsync();
         var todayRevenue = todayPaidTotal.Sum();
         var todaySalesCount = todayPaidTotal.Count;
 
-        var inventoryItems = await db.InventoryItems.ToListAsync();
+        var inventoryItemsQuery = db.InventoryItems.AsQueryable();
+        if (branchId.HasValue) inventoryItemsQuery = inventoryItemsQuery.Where(i => i.BranchId == branchId.Value);
+        var inventoryItems = await inventoryItemsQuery.ToListAsync();
         var inventoryValue = inventoryItems.Sum(i => (decimal)i.Current * i.UnitCost);
 
         var daySpan = Math.Max(1, (int)Math.Ceiling((periodEndExclusiveIst - periodStartIst).TotalDays));

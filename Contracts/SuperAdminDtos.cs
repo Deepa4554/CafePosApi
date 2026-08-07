@@ -1,4 +1,5 @@
 using CafePOS.Api.Domain;
+using CafePOS.Api.Infrastructure;
 
 namespace CafePOS.Api.Contracts;
 
@@ -12,6 +13,19 @@ public record TenantSummaryDto(
 }
 
 public record AdminChangePlanRequest(SubscriptionTier Plan);
+
+// ---------- Tenant screen access ----------
+
+/// <summary>Cafe-level ceiling on which plan screens this tenant actually gets — see
+/// Tenant.ScreenMode/EnabledScreens. Distinct from StaffScreenAccessDto one level down:
+/// this is set by a platform admin for the whole cafe, that one by an Owner for one login.</summary>
+public record TenantScreenAccessDto(int TenantId, string ScreenMode, List<string> EnabledScreens, string Plan)
+{
+    public static TenantScreenAccessDto From(Tenant t, Subscription? sub) => new(
+        t.Id, t.ScreenMode.ToString(), t.EnabledScreens ?? [], (sub?.Plan ?? SubscriptionTier.FreeTrial).ToCategory().ToString());
+}
+
+public record UpdateTenantScreenAccessRequest(TenantScreenMode ScreenMode, List<string>? EnabledScreens);
 
 public record DailySalesDto(string Date, decimal Revenue, int OrderCount);
 public record MonthlySalesDto(string Month, decimal Revenue, int OrderCount);

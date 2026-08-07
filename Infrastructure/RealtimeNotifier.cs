@@ -50,6 +50,15 @@ public interface IRealtimeNotifier
     Task NotifyDataChangedAsync(IReadOnlyDictionary<int, IReadOnlySet<string>> scopesByTenant);
 
     Task NotifyAccessChangedAsync(int tenantId, int userId);
+
+    /// <summary>Same "accessChanged" event as NotifyAccessChangedAsync, but broadcast to
+    /// every connected device in the tenant instead of one user's own group — used when a
+    /// platform admin edits the CAFE-level screen access (see
+    /// SuperAdminController.UpdateTenantScreenAccess), which can change what every login in
+    /// the cafe sees, not just one staff member's. The client's handler is already just
+    /// "refetch my own access" (see useLiveAccessSync), so every device picking up the same
+    /// event is exactly the right behavior — no new client-side wiring needed.</summary>
+    Task NotifyTenantAccessChangedAsync(int tenantId);
 }
 
 public class RealtimeNotifier(IHubContext<OrdersHub> hub, ILogger<RealtimeNotifier> logger) : IRealtimeNotifier
@@ -105,6 +114,18 @@ public class RealtimeNotifier(IHubContext<OrdersHub> hub, ILogger<RealtimeNotifi
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to push accessChanged to user {UserId} in tenant {TenantId}.", userId, tenantId);
+        }
+    }
+
+    public async Task NotifyTenantAccessChangedAsync(int tenantId)
+    {
+        try
+        {
+            await hub.Clients.Group(TenantGroup(tenantId)).SendAsync("accessChanged");
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to push tenant-wide accessChanged to tenant {TenantId}.", tenantId);
         }
     }
 }

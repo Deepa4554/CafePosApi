@@ -18,7 +18,7 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/superadmin")]
 [Authorize(Policy = Policies.PlatformAdminOnly)]
-public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscriptions) : ControllerBase
+public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscriptions, ITenantScreenAccessCache tenantScreenAccess, IRealtimeNotifier realtime) : ControllerBase
 {
     [HttpGet("tenants")]
     public async Task<IEnumerable<TenantSummaryDto>> ListTenants()
@@ -78,6 +78,79 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
         var staffCount = await db.Staff.IgnoreQueryFilters().CountAsync(s => s.TenantId == tenantId);
         var branchCount = await db.Branches.IgnoreQueryFilters().CountAsync(b => b.TenantId == tenantId);
         return TenantSummaryDto.From(tenant, sub, staffCount, branchCount);
+    }
+
+    /// <summary>
+    /// Current cafe-level screen ceiling — see Tenant.ScreenMode/EnabledScreens. PlanDefault
+    /// (the default for every existing cafe) means "everything the plan includes"; Custom
+    /// means only EnabledScreens, which is always a subset of what the plan currently allows.
+    /// </summary>
+    [HttpGet("tenants/{tenantId:int}/screen-access")]
+    public async Task<ActionResult<TenantScreenAccessDto>> GetTenantScreenAccess(int tenantId)
+    {
+        var tenant = await db.Tenants.FindAsync(tenantId);
+        if (tenant is null) return NotFound();
+
+        var sub = await db.Subscriptions.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == tenantId);
+        return TenantScreenAccessDto.From(tenant, sub);
+    }
+
+    /// <summary>
+    /// Sets which plan screens this one cafe actually gets — the ceiling every staff login
+    /// in it (Owner included) is intersected with, one level above per-staff Custom access
+    /// (see StaffController.UpdateScreenAccess). Custom mode's EnabledScreens goes through the
+    /// same unknown-key/above-plan/cascade validation as a staff allow-list, then is
+    /// cascade-normalized (ScreenCatalog.Normalize) so a child can never survive without its
+    /// parent. Switching back to PlanDefault clears the stored list so a later plan change
+    /// can't leave a stale key behind. Every connected device in the cafe picks this up
+    /// within moments via a tenant-wide "accessChanged" push — see
+    /// NotifyTenantAccessChangedAsync — falling back to useLiveAccessSync's safety-net poll.
+    /// </summary>
+    [HttpPatch("tenants/{tenantId:int}/screen-access")]
+    public async Task<ActionResult<TenantScreenAccessDto>> UpdateTenantScreenAccess(int tenantId, UpdateTenantScreenAccessRequest req)
+    {
+        var tenant = await db.Tenants.FindAsync(tenantId);
+        if (tenant is null) return NotFound();
+
+        var sub = await db.Subscriptions.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == tenantId);
+        var tenantPlan = (sub?.Plan ?? SubscriptionTier.FreeTrial).ToCategory();
+
+        if (req.ScreenMode == TenantScreenMode.Custom)
+        {
+            var requested = (req.EnabledScreens ?? []).Distinct().ToList();
+
+            var unknown = requested.Where(k => !ScreenCatalog.IsValidKey(k)).ToList();
+            if (unknown.Count > 0) throw new ApiValidationException($"Unknown screen(s): {string.Join(", ", unknown)}.");
+
+            var abovePlan = requested.Where(k => !ScreenCatalog.IsAssignableAt(k, tenantPlan)).ToList();
+            if (abovePlan.Count > 0) throw new ApiValidationException($"These screens need a higher plan than this cafe currently has: {string.Join(", ", abovePlan)}.");
+
+            tenant.EnabledScreens = ScreenCatalog.Normalize(requested);
+        }
+        else
+        {
+            tenant.EnabledScreens = null;
+        }
+        tenant.ScreenMode = req.ScreenMode;
+
+        // Tagged to the AFFECTED tenant, same reasoning as ChangeTenantPlan above.
+        db.AuditLog.Add(new AuditLogEntry
+        {
+            TenantId = tenantId,
+            Action = AuditAction.PermissionChange,
+            Resource = AuditResource.Settings,
+            ResourceId = tenantId.ToString(),
+            Details = req.ScreenMode == TenantScreenMode.Custom
+                ? $"[Platform Admin] Set custom screen access for this cafe ({(tenant.EnabledScreens ?? []).Count} screen(s))."
+                : "[Platform Admin] Reset this cafe's screen access to plan default.",
+            Severity = AuditSeverity.High,
+        });
+
+        await db.SaveChangesAsync();
+        tenantScreenAccess.Invalidate(tenantId);
+        _ = realtime.NotifyTenantAccessChangedAsync(tenantId);
+
+        return TenantScreenAccessDto.From(tenant, sub);
     }
 
     /// <summary>

@@ -173,6 +173,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Subscription> Subscriptions => Set<Subscription>();
     public DbSet<Integration> Integrations => Set<Integration>();
     public DbSet<WhatsAppSession> WhatsAppSessions => Set<WhatsAppSession>();
+    public DbSet<WhatsAppAuthState> WhatsAppAuthStates => Set<WhatsAppAuthState>();
     public DbSet<WhatsAppOrderTracking> WhatsAppTracking => Set<WhatsAppOrderTracking>();
     public DbSet<WhatsAppMessageLog> WhatsAppMessageLogs => Set<WhatsAppMessageLog>();
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
@@ -372,6 +373,19 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
                 v => v == null ? 0 : v.Aggregate(0, (h, s) => HashCode.Combine(h, s.GetHashCode())),
                 v => v == null ? null : v.ToList()));
 
+        // Tenant.ScreenMode/EnabledScreens — the cafe-level ceiling one level above
+        // AppUser.AccessMode/AllowedScreens, same storage shape and reasoning as the pair
+        // just above.
+        modelBuilder.Entity<Tenant>().Property(t => t.ScreenMode).HasConversion<string>();
+        modelBuilder.Entity<Tenant>().Property(t => t.EnabledScreens)
+            .HasConversion(
+                v => v == null ? null : JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
+                v => v == null ? null : JsonSerializer.Deserialize<List<string>>(v, (JsonSerializerOptions?)null))
+            .Metadata.SetValueComparer(new ValueComparer<List<string>?>(
+                (a, b) => (a ?? new()).SequenceEqual(b ?? new()),
+                v => v == null ? 0 : v.Aggregate(0, (h, s) => HashCode.Combine(h, s.GetHashCode())),
+                v => v == null ? null : v.ToList()));
+
         // ---- Double-settle guard (two halves of one rule) ----
         // 1. Every UPDATE to an Order carries its PaymentVersion in the WHERE clause, so a
         //    Pay/Close/Refund that raced another one and lost matches zero rows and throws
@@ -476,6 +490,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
 
         // One Baileys session per tenant.
         modelBuilder.Entity<WhatsAppSession>().HasIndex(s => s.TenantId).IsUnique();
+        // One row per Baileys auth-state key per tenant — matches "one file per key" in
+        // useMultiFileAuthState, just addressed by (TenantId, Key) instead of a filename.
+        modelBuilder.Entity<WhatsAppAuthState>().HasIndex(a => new { a.TenantId, a.Key }).IsUnique();
         // TrackingId is the QR payload — must resolve unambiguously on an inbound message with
         // no tenant context yet, so it's globally unique, not just per-tenant. OrderId is unique
         // too: one tracking row per order, a reprint just reuses the existing row (see

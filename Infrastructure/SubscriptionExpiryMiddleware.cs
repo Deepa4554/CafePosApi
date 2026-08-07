@@ -21,8 +21,9 @@ public class SubscriptionExpiryMiddleware(RequestDelegate next)
     {
         var path = context.Request.Path.Value ?? "";
         var isAllowlisted = AllowedPrefixes.Any(p => path.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+        var isPlatformAdmin = context.User.FindFirst("isPlatformAdmin")?.Value == "true";
 
-        if (!isAllowlisted && context.User.Identity?.IsAuthenticated == true)
+        if (!isAllowlisted && !isPlatformAdmin && context.User.Identity?.IsAuthenticated == true)
         {
             // Cached — this ran twice per request (here and in RequirePlanHandler) against
             // a row that changes once a billing cycle. See ISubscriptionCache.

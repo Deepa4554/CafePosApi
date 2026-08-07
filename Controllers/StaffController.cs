@@ -353,7 +353,12 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             var abovePlan = requested.Where(k => !ScreenCatalog.IsAssignableAt(k, tenantPlan)).ToList();
             if (abovePlan.Count > 0) throw new ApiValidationException($"These screens need a higher plan than this cafe currently has: {string.Join(", ", abovePlan)}.");
 
-            user.AllowedScreens = requested;
+            // Drop any child whose parent isn't also in this request (e.g. PurchaseOrders
+            // without Inventory) — see ScreenCatalog.Normalize. A staff login's grants are
+            // still checked against the cafe's own tenant-level ceiling at read time (see
+            // ScreenAccessFilter/canAccessRoute), not trimmed here, so a temporary tenant-level
+            // restriction never destroys a grant that should come back once it's lifted.
+            user.AllowedScreens = ScreenCatalog.Normalize(requested);
         }
         else
         {

@@ -20,6 +20,25 @@ public class WhatsAppSession : ITenantScoped
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>Baileys' Signal auth state (creds + protocol keys) for a tenant's WhatsApp
+/// connection, persisted here instead of local disk — the same fix as DataProtectionKey
+/// (see CafePosDbContext's doc comment on it): free-tier hosting's container filesystem is
+/// thrown away on every redeploy, so a file-based session forced the Owner to re-scan the
+/// QR after every deploy. One row per (TenantId, Key); Key is Baileys' own naming scheme
+/// ("creds" for AuthenticationCreds, "session-&lt;id&gt;"/"sender-key-&lt;id&gt;"/etc for Signal
+/// protocol keys — see useMultiFileAuthState, which this mirrors one file-per-row). Value is
+/// the same BufferJSON-serialized JSON string Baileys would have written to that file.
+/// Written/read only by WhatsAppInternalController's auth-state endpoints — see
+/// whatsapp-service/src/baileys/authStateStore.ts, the only caller on the Node side.</summary>
+public class WhatsAppAuthState : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Key { get; set; }
+    public required string Value { get; set; }
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
 /// <summary>The idempotent TrackingId &lt;-&gt; Order &lt;-&gt; WhatsApp number mapping. Created
 /// (WhatsAppNumberE164 == null) the moment a QSR token slip is about to print (see
 /// OrdersController.GetOrCreateWhatsAppTracking); filled in on the customer's first inbound

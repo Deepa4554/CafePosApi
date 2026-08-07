@@ -74,10 +74,77 @@ public static class ScreenCatalog
         ["SupportTicket"] = PlanCategory.Normal,
     };
 
+    /// <summary>Which screen a drill-down key is normally reached from — mirrors the RN app's
+    /// screenCatalog.ts `parent` field key-for-key. A key absent here is a top-level screen.
+    /// Used to validate that an allow-list (tenant-level or per-staff) never contains a child
+    /// whose parent isn't also present — see Normalize below.</summary>
+    public static readonly IReadOnlyDictionary<string, string> Parent = new Dictionary<string, string>
+    {
+        ["Attendance"] = "TeamPortal",
+        ["Leave"] = "TeamPortal",
+        ["Payroll"] = "TeamPortal",
+        ["Loans"] = "TeamPortal",
+        ["HRReports"] = "Reports",
+        ["RecipeBuilder"] = "Menu",
+        ["InventoryLedger"] = "Inventory",
+        ["PurchaseOrders"] = "Inventory",
+        ["Vendors"] = "Inventory",
+        ["StockTakes"] = "Inventory",
+        ["VarianceReport"] = "Reports",
+        ["FoodCostReport"] = "Reports",
+        ["ExpiringBatches"] = "Inventory",
+        ["AIChat"] = "Dashboard",
+        ["StockReport"] = "Reports",
+        ["PurchaseReport"] = "Reports",
+        ["RevenueReport"] = "Reports",
+        ["ProfitReport"] = "Reports",
+        ["SalesReport"] = "Reports",
+        ["TaxGstReport"] = "Reports",
+        ["ExpenseReport"] = "Reports",
+        ["CrmReport"] = "Reports",
+        ["OrderDetailReport"] = "Reports",
+        ["WhatsAppSetup"] = "Integrations",
+        ["PrinterSettings"] = "Profile",
+        ["KitchenFlowSettings"] = "Profile",
+        ["StationManagement"] = "Profile",
+        ["TaxSlabManagement"] = "Profile",
+        ["OrderTypesSettings"] = "Profile",
+        ["AutoChargesSettings"] = "Profile",
+        ["ReceiptBuilder"] = "Profile",
+        ["CafeProfileDetail"] = "Profile",
+        ["HelpArticle"] = "Help",
+        ["SupportTicket"] = "Help",
+    };
+
     public static bool IsValidKey(string key) => MinPlan.ContainsKey(key);
 
     /// <summary>True if `key` exists and the tenant's current plan meets its minimum —
     /// i.e. it's actually assignable right now, not just a recognized key.</summary>
     public static bool IsAssignableAt(string key, PlanCategory tenantPlan) =>
         MinPlan.TryGetValue(key, out var min) && tenantPlan >= min;
+
+    /// <summary>Walks `key`'s parent chain up to the top-level screen, nearest first. Empty
+    /// for a key with no parent.</summary>
+    public static IEnumerable<string> AncestorsOf(string key)
+    {
+        var current = Parent.GetValueOrDefault(key);
+        while (current is not null)
+        {
+            yield return current;
+            current = Parent.GetValueOrDefault(current);
+        }
+    }
+
+    /// <summary>Drops any key from `requested` whose parent chain isn't entirely present in
+    /// the same set — e.g. requesting PurchaseOrders without Inventory silently drops
+    /// PurchaseOrders rather than leaving a child reachable with its parent switched off.
+    /// Applied to both Tenant.EnabledScreens and AppUser.AllowedScreens on every write (see
+    /// SuperAdminController.UpdateTenantScreenAccess and StaffController.UpdateScreenAccess)
+    /// so stored data can never disagree with the cascade rule canAccessRoute/the client's
+    /// ScreenAccessTree enforce at render time.</summary>
+    public static List<string> Normalize(IEnumerable<string> requested)
+    {
+        var set = requested.ToHashSet();
+        return set.Where(k => AncestorsOf(k).All(set.Contains)).ToList();
+    }
 }

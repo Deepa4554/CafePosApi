@@ -64,6 +64,7 @@ builder.Services.AddScoped<ITenantContext, TenantContext>();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<ITaxRateCache, TaxRateCache>();
 builder.Services.AddSingleton<ISubscriptionCache, SubscriptionCache>();
+builder.Services.AddSingleton<ITenantScreenAccessCache, TenantScreenAccessCache>();
 
 // ---------- QR token encryption ----------
 // Keys live in the database so already-printed QR codes keep working across restarts AND

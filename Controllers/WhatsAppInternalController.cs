@@ -294,4 +294,78 @@ public class WhatsAppInternalController(CafePosDbContext db, ReceiptTokenService
         var settings = await db.Settings.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == tenantId);
         return settings is null ? NotFound() : new WhatsAppTenantSettingsDto(settings.BusinessName, settings.WhatsAppOrderUpdatesEnabled);
     }
+
+    /// <summary>Batch-fetch: exactly the keys Baileys' SignalKeyStore.get() asked for (plus the
+    /// single "creds" key at connect time) — see WhatsAppAuthState's doc comment. A POST
+    /// because the key list stands in for a query and can run long (a busy tenant accumulates
+    /// one Signal session key per contact), which would risk exceeding URL length limits as a
+    /// query string.</summary>
+    [HttpPost("auth-state/{tenantId:int}/get")]
+    public async Task<ActionResult<Dictionary<string, string>>> GetAuthStateEntries(int tenantId, WhatsAppAuthStateGetRequest req)
+    {
+        if (req.Keys.Count == 0) return new Dictionary<string, string>();
+        var rows = await db.WhatsAppAuthStates.IgnoreQueryFilters()
+            .Where(a => a.TenantId == tenantId && req.Keys.Contains(a.Key))
+            .ToListAsync();
+        return rows.ToDictionary(a => a.Key, a => a.Value);
+    }
+
+    /// <summary>Upserts/deletes a batch of auth-state entries in one round trip — backs both
+    /// Baileys' saveCreds() (a single "creds" entry) and SignalKeyStore.set() (however many
+    /// key ids changed in that call).</summary>
+    [HttpPut("auth-state/{tenantId:int}")]
+    public async Task<IActionResult> SetAuthState(int tenantId, WhatsAppAuthStateSetRequest req)
+    {
+        if (req.Entries.Count == 0) return NoContent();
+
+        var keys = req.Entries.Keys.ToList();
+        var existing = await db.WhatsAppAuthStates.IgnoreQueryFilters()
+            .Where(a => a.TenantId == tenantId && keys.Contains(a.Key))
+            .ToDictionaryAsync(a => a.Key, a => a);
+
+        foreach (var (key, value) in req.Entries)
+        {
+            existing.TryGetValue(key, out var row);
+            if (value is null)
+            {
+                if (row is not null) db.WhatsAppAuthStates.Remove(row);
+                continue;
+            }
+
+            if (row is null)
+                db.WhatsAppAuthStates.Add(new WhatsAppAuthState { TenantId = tenantId, Key = key, Value = value });
+            else
+            {
+                row.Value = value;
+                row.UpdatedAt = DateTime.UtcNow;
+            }
+        }
+
+        await db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>Wipes every stored auth-state key for a tenant — called on explicit logout and
+    /// on a loggedOut disconnect (see BaileysSessionManager), matching useMultiFileAuthState's
+    /// old rmSync(sessionDir) behaviour: the next connect() needs a fresh QR pairing.</summary>
+    [HttpDelete("auth-state/{tenantId:int}")]
+    public async Task<IActionResult> ClearAuthState(int tenantId)
+    {
+        var rows = await db.WhatsAppAuthStates.IgnoreQueryFilters().Where(a => a.TenantId == tenantId).ToListAsync();
+        if (rows.Count == 0) return NoContent();
+        db.WhatsAppAuthStates.RemoveRange(rows);
+        await db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>Every tenant with a persisted "creds" row — what whatsapp-service reconnects to
+    /// automatically on process boot (see BaileysSessionManager.bootstrapAllSessions). "creds"
+    /// is the one key every completed pairing always has, so it stands in for "has an auth
+    /// state at all" without needing a separate flag.</summary>
+    [HttpGet("auth-state/tenants")]
+    public async Task<ActionResult<IEnumerable<int>>> ListTenantsWithAuthState() =>
+        Ok(await db.WhatsAppAuthStates.IgnoreQueryFilters()
+            .Where(a => a.Key == "creds")
+            .Select(a => a.TenantId)
+            .ToListAsync());
 }

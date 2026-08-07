@@ -34,12 +34,16 @@ public sealed class RequireScreenAttribute(params string[] screens) : Attribute
 /// no-ops on every endpoint that doesn't carry the attribute, so the AllowedScreens lookup
 /// only runs for endpoints that actually opted in.
 ///
-/// Automatic-mode logins are untouched: their visibility is the role default, which the role
-/// policies already enforce. Owner logins are untouched too — StaffController.UpdateScreenAccess
-/// refuses to put an Owner into Custom mode in the first place, so this mirrors
-/// canAccessRoute's Owner short-circuit rather than adding a second, divergent rule.
+/// Two independent gates, checked in order:
+///  1. Tenant-level (Tenant.ScreenMode/EnabledScreens) — platform-admin packaging, applies to
+///     EVERY login in the cafe, Owner included. This is the same containment rule the client's
+///     canAccessRoute enforces (tenant check runs before the Owner short-circuit there too).
+///  2. Staff-level (AppUser.AccessMode/AllowedScreens) — Automatic-mode logins are untouched
+///     here (their visibility is the role default, already enforced by role policies), and
+///     Owner logins skip this one gate only (StaffController.UpdateScreenAccess refuses to put
+///     an Owner into Custom mode in the first place).
 /// </summary>
-public sealed class ScreenAccessFilter(CafePosDbContext db) : IAsyncAuthorizationFilter
+public sealed class ScreenAccessFilter(CafePosDbContext db, ITenantScreenAccessCache tenantScreens) : IAsyncAuthorizationFilter
 {
     public async Task OnAuthorizationAsync(AuthorizationFilterContext context)
     {
@@ -54,6 +58,32 @@ public sealed class ScreenAccessFilter(CafePosDbContext db) : IAsyncAuthorizatio
         // Anonymous/[AllowAnonymous] endpoints have no login to check against; the fallback
         // authorization policy handles anything that should have required a token.
         if (principal.Identity?.IsAuthenticated != true) return;
+        // The platform operator (you) — never a cafe Owner — bypasses both gates entirely,
+        // same convention as Policies.PlatformAdminOnly.
+        if (principal.FindFirst("isPlatformAdmin")?.Value == "true") return;
+
+        var tenantIdClaim = principal.FindFirst("tenantId")?.Value;
+        if (tenantIdClaim is null || !int.TryParse(tenantIdClaim, out var tenantId)) return;
+
+        var tenantAccess = await tenantScreens.GetAsync(tenantId, async () =>
+        {
+            var t = await db.Tenants.AsNoTracking()
+                .Where(t => t.Id == tenantId)
+                .Select(t => new TenantScreenSnapshot(t.ScreenMode, t.EnabledScreens))
+                .FirstOrDefaultAsync();
+            return t; // default struct (PlanDefault, null) if the tenant row is somehow gone
+        });
+
+        if (tenantAccess.Mode == TenantScreenMode.Custom)
+        {
+            var tenantAllowed = tenantAccess.EnabledScreens ?? [];
+            if (!required.Screens.Any(tenantAllowed.Contains))
+            {
+                context.Result = Forbidden(context, "This screen isn't part of this cafe's current setup. Ask the platform admin to enable it.");
+                return;
+            }
+        }
+
         if (principal.IsInRole(nameof(AppRole.Owner))) return;
 
         var idClaim = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
@@ -70,14 +100,16 @@ public sealed class ScreenAccessFilter(CafePosDbContext db) : IAsyncAuthorizatio
         var allowed = access.AllowedScreens ?? [];
         if (required.Screens.Any(allowed.Contains)) return;
 
-        context.Result = new ObjectResult(new ProblemDetails
-        {
-            Status = StatusCodes.Status403Forbidden,
-            Title = "This screen isn't switched on for your login. Ask the cafe owner to enable it under Screen Access.",
-            Instance = context.HttpContext.Request.Path,
-        })
-        {
-            StatusCode = StatusCodes.Status403Forbidden,
-        };
+        context.Result = Forbidden(context, "This screen isn't switched on for your login. Ask the cafe owner to enable it under Screen Access.");
     }
+
+    private static ObjectResult Forbidden(AuthorizationFilterContext context, string title) => new(new ProblemDetails
+    {
+        Status = StatusCodes.Status403Forbidden,
+        Title = title,
+        Instance = context.HttpContext.Request.Path,
+    })
+    {
+        StatusCode = StatusCodes.Status403Forbidden,
+    };
 }

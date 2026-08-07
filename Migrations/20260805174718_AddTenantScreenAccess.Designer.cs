@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260805174718_AddTenantScreenAccess")]
+    partial class AddTenantScreenAccess
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1300,7 +1303,7 @@ namespace CafePOS.Api.Migrations
 
                     b.HasIndex("OrderItemId", "InventoryItemId", "InventoryBatchId")
                         .IsUnique()
-                        .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL AND \"Reason\" IS NULL");
+                        .HasFilter("\"Type\" = 'Sale' AND \"OrderItemId\" IS NOT NULL");
 
                     b.ToTable("InventoryTransactions");
                 });
@@ -1427,9 +1430,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
-
-                    b.Property<bool>("Pinned")
-                        .HasColumnType("boolean");
 
                     b.Property<bool>("Popular")
                         .HasColumnType("boolean");
@@ -3181,40 +3181,6 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId");
 
                     b.ToTable("Vendors");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.WhatsAppAuthState", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("Key")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Value")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.HasIndex("TenantId", "Key")
-                        .IsUnique();
-
-                    b.ToTable("WhatsAppAuthStates");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.WhatsAppMessageLog", b =>

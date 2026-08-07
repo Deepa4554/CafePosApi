@@ -31,6 +31,7 @@ public class AuthController(
     IAuditService audit,
     IEmailService email,
     IWebHostEnvironment env,
+    ITenantScreenAccessCache tenantScreens,
     ILogger<AuthController> logger) : ControllerBase
 {
     /// <summary>
@@ -192,7 +193,7 @@ public class AuthController(
 
         var accessToken = tokenService.CreateAccessToken(user);
         AuthCookies.Set(Response, accessToken, refreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
-        return Ok(BuildResponse(user, accessToken, refreshToken));
+        return Ok(await BuildResponseAsync(user, accessToken, refreshToken));
     }
 
     /// <summary>
@@ -254,7 +255,7 @@ public class AuthController(
 
         var accessToken = tokenService.CreateAccessToken(user);
         AuthCookies.Set(Response, accessToken, refreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
-        return Ok(BuildResponse(user, accessToken, refreshToken));
+        return Ok(await BuildResponseAsync(user, accessToken, refreshToken));
     }
 
     private async Task<string> GenerateUniqueSlugAsync(string cafeName)
@@ -296,7 +297,7 @@ public class AuthController(
 
         var accessToken = tokenService.CreateAccessToken(user);
         AuthCookies.Set(Response, accessToken, refreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
-        return Ok(BuildResponse(user, accessToken, refreshToken));
+        return Ok(await BuildResponseAsync(user, accessToken, refreshToken));
     }
 
     /// <summary>
@@ -334,7 +335,7 @@ public class AuthController(
 
         var accessToken = tokenService.CreateAccessToken(user);
         AuthCookies.Set(Response, accessToken, newRefreshToken, env, jwtOptions.Value.AccessTokenMinutes, jwtOptions.Value.RefreshTokenDays);
-        return Ok(BuildResponse(user, accessToken, newRefreshToken));
+        return Ok(await BuildResponseAsync(user, accessToken, newRefreshToken));
     }
 
     /// <summary>Revokes only the calling device's own session — every other device
@@ -365,7 +366,7 @@ public class AuthController(
     public async Task<ActionResult<UserDto>> Me()
     {
         var user = await CurrentUserAsync();
-        return UserDto.From(user);
+        return UserDto.From(user, await TenantScreensAsync(user.TenantId));
     }
 
     [Authorize]
@@ -570,6 +571,16 @@ public class AuthController(
         foreach (var entry in active) entry.RevokedAt = DateTime.UtcNow;
     }
 
-    private static AuthResponse BuildResponse(AppUser user, string accessToken, string refreshToken) =>
-        new(accessToken, refreshToken, UserDto.From(user));
+    private async Task<AuthResponse> BuildResponseAsync(AppUser user, string accessToken, string refreshToken) =>
+        new(accessToken, refreshToken, UserDto.From(user, await TenantScreensAsync(user.TenantId)));
+
+    private Task<TenantScreenSnapshot> TenantScreensAsync(int tenantId) =>
+        tenantScreens.GetAsync(tenantId, async () =>
+        {
+            var t = await db.Tenants.AsNoTracking()
+                .Where(t => t.Id == tenantId)
+                .Select(t => new TenantScreenSnapshot(t.ScreenMode, t.EnabledScreens))
+                .FirstOrDefaultAsync();
+            return t; // default struct (PlanDefault, null) if the tenant row is somehow gone
+        });
 }
