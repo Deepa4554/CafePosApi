@@ -196,9 +196,39 @@ public class DeliveryController(
     /// </summary>
     [AllowAnonymous]
     [HttpPost("callback")]
-    public async Task<IActionResult> Callback([FromBody] BorzoCallbackPayload payload, CancellationToken ct)
+    public async Task<IActionResult> Callback(CancellationToken ct)
     {
-        var courierOrderId = payload.Order?.OrderId?.ToString();
+        // Body read by hand rather than via [FromBody] for one reason: System.Text.Json silently
+        // drops JSON properties a DTO doesn't declare, so if Borzo carries its callback token as a
+        // field the BorzoCallbackPayload type doesn't know about, model binding would throw it away
+        // before this method ever saw it. Reading the raw text keeps everything Borzo actually sent.
+        using var reader = new StreamReader(Request.Body);
+        var rawBody = await reader.ReadToEndAsync(ct);
+
+        // TEMPORARY DIAGNOSTIC — remove once the real callback shape is confirmed. Borzo's own docs
+        // don't document how their per-URL callback token is delivered (header? body field?), so
+        // this logs the whole incoming request once so the first real callback can settle it, and
+        // proper verification can then be wired to the actual format instead of a guess. It logs
+        // Borzo's own outbound payload only — no PrabandhOS user secret passes through here.
+        logger.LogInformation(
+            "[BORZO CALLBACK DIAGNOSTIC] headers={Headers} query={Query} body={Body}",
+            string.Join(" | ", Request.Headers.Select(h => $"{h.Key}: {h.Value}")),
+            Request.QueryString.Value,
+            rawBody);
+
+        BorzoCallbackPayload? payload;
+        try
+        {
+            // BorzoCallbackPayload/BorzoOrder carry explicit [JsonPropertyName] attributes, so no
+            // naming policy is needed for their declared fields to bind.
+            payload = System.Text.Json.JsonSerializer.Deserialize<BorzoCallbackPayload>(rawBody);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return Ok(); // Unparseable body — nothing to act on, and no point making Borzo retry it.
+        }
+
+        var courierOrderId = payload?.Order?.OrderId?.ToString();
         if (string.IsNullOrWhiteSpace(courierOrderId)) return Ok();
 
         // IgnoreQueryFilters: a callback arrives with no tenant context at all, and the courier
@@ -226,8 +256,11 @@ public class DeliveryController(
             return Ok();
         }
 
-        order.CourierStatus = payload.Order?.Status ?? order.CourierStatus;
-        if (payload.Order?.Courier is BorzoCourier courier)
+        // payload is non-null here: courierOrderId came off payload?.Order?.OrderId and was
+        // checked non-empty above, which a null payload could never have produced.
+        var borzoOrder = payload!.Order;
+        order.CourierStatus = borzoOrder?.Status ?? order.CourierStatus;
+        if (borzoOrder?.Courier is BorzoCourier courier)
         {
             order.CourierRiderName = courier.FullName ?? order.CourierRiderName;
             order.CourierRiderPhone = courier.Phone ?? order.CourierRiderPhone;
