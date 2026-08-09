@@ -100,7 +100,7 @@ public class PublicController(
     /// (DeliveryController) when it means to.
     /// </summary>
     [HttpPost("{token}/delivery-order")]
-    public async Task<ActionResult<object>> CreateDeliveryOrder(string token, CreateDeliveryOrderRequest req)
+    public async Task<ActionResult<object>> CreateDeliveryOrder(string token, CreateDeliveryOrderRequest req, CancellationToken ct)
     {
         var decoded = qrTokens.TryDecode(token);
         if (decoded is null) throw new ApiValidationException("This ordering link is invalid. Please re-scan the QR code.");
@@ -144,13 +144,24 @@ public class PublicController(
         order.DeliveryAddress = address;
         order.DeliveryLatitude = lat;
         order.DeliveryLongitude = lng;
-        await db.SaveChangesAsync();
+
+        // Same gate a table's QR order passes through (Staff-Confirm Mode), and for a stronger
+        // reason: a prank dine-in order wastes food, a prank delivery order can also send a paid
+        // rider across town. MarkPendingConfirmation holds the items unfired and alerts the floor
+        // — PendingOrdersHost already picks it up with no changes, since it filters on pending
+        // status, not order type, and shows Title ("Delivery – Priya") when there's no table.
+        var settings = await db.Settings.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.TenantId == tenantId, ct);
+        var pendingConfirmation = settings?.RequireStaffOrderConfirmation ?? true;
+        if (pendingConfirmation) orderBuilder.MarkPendingConfirmation(db, order, tenantId);
+
+        await db.SaveChangesAsync(ct);
 
         // Same push the POS uses, so the order appears on the cafe's screens as it is placed
         // rather than whenever someone next refreshes.
         await realtime.NotifyOrdersChangedAsync(new HashSet<int> { tenantId });
 
-        return new { order.Id, order.Title, order.Total, HasLocation = lat is not null };
+        return new { order.Id, order.Title, order.Total, HasLocation = lat is not null, PendingConfirmation = pendingConfirmation };
     }
 
     private const int MaxDeliveryNameLength = 60;

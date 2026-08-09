@@ -1447,6 +1447,10 @@ public static class CustomerOrderPage
       // that the kitchen already has.
       state.order = { items: [] };
       state.cart = {};
+
+      // Staff-Confirm Mode is on for this cafe, so the kitchen hasn't started yet — saying
+      // "sent to the kitchen" here would be a lie the customer plans their evening around.
+      if (placed.pendingConfirmation) { showDeliveryWaitingScreen(); return; }
       showPlacedScreen({ order: { items: sent, total: placed.total } });
     }).catch(function (err) {
       document.getElementById('processing-overlay').classList.remove('show');
@@ -1454,6 +1458,22 @@ public static class CustomerOrderPage
       btn.textContent = 'Place Order';
       showError(err.message);
     });
+  }
+
+  /**
+   * The delivery twin of the dine-in waiting screen. It deliberately does NOT poll: polling
+   * there reads the guest session, which a delivery order has none of, and inventing a public
+   * "is my order approved yet" endpoint would let anyone holding the QR walk order ids. The
+   * cafe has the customer's number and calls if there's a problem, so the copy says that
+   * plainly rather than leaving someone watching a spinner for an answer that isn't coming.
+   */
+  function showDeliveryWaitingScreen() {
+    hideAllScreens();
+    var screen = document.getElementById('waiting-screen');
+    screen.querySelector('h2').textContent = 'Order sent — waiting for the cafe to confirm';
+    screen.querySelector('p').textContent =
+      'The cafe will confirm your order shortly and start cooking. They have your number and will call if anything is unclear.';
+    screen.style.display = 'flex';
   }
 
   function placeOrder() {
