@@ -18,10 +18,17 @@ public record BorzoSettingsDto(
     decimal? PickupLongitude,
     /// <summary>False when something required is still missing (no token, or no pickup pin), so
     /// the UI can say what's blocking instead of failing at booking time.</summary>
-    bool ReadyToBook);
+    bool ReadyToBook,
+    /// <summary>The exact URL to paste into Borzo's cabinet (Integration tab), token embedded —
+    /// null until a callback token has been saved. Unlike the Borzo auth token this is safe to
+    /// return in full: it only secures a webhook that updates a delivery's displayed status, not
+    /// anything spendable, and the cafe needs to see it to copy it correctly. See
+    /// CafeSettings.BorzoCallbackToken for why it exists instead of verifying Borzo's own
+    /// signature scheme.</summary>
+    string? CallbackUrl);
 
 /// <summary>Every field optional — the settings screen saves one section at a time, and null
-/// means "leave as is". Sending an empty AuthToken clears the saved one.</summary>
+/// means "leave as is". Sending an empty AuthToken/CallbackToken clears the saved one.</summary>
 public record UpdateBorzoSettingsRequest(
     bool? Enabled,
     string? AuthToken,
@@ -29,7 +36,8 @@ public record UpdateBorzoSettingsRequest(
     bool? PassFeeToCustomer,
     string? PickupAddress,
     decimal? PickupLatitude,
-    decimal? PickupLongitude);
+    decimal? PickupLongitude,
+    string? CallbackToken);
 
 /// <summary>A price for a delivery that hasn't been booked. Fee is what the courier will charge
 /// the cafe; PassedToCustomer says whether it's going on the customer's bill.</summary>

@@ -716,6 +716,24 @@ public class CafeSettings : ITenantScoped
     public string? PickupAddress { get; set; }
     public decimal? PickupLatitude { get; set; }
     public decimal? PickupLongitude { get; set; }
+    /// <summary>
+    /// A random secret the cafe embeds as ?token=... in the callback URL it registers with
+    /// Borzo (see DeliveryController.Callback), so an incoming status update can be checked
+    /// against something only this cafe and this server know, rather than trusted on faith.
+    ///
+    /// This is not Borzo's own signature scheme — despite searching Borzo's published API docs,
+    /// no documented header or hash convention for verifying their callbacks could be found, and
+    /// guessing one wrong would be worse than not verifying at all (false confidence instead of
+    /// none). A URL-embedded shared secret sidesteps needing to know Borzo's internal convention
+    /// entirely: this server controls both what's registered and what's checked.
+    ///
+    /// [JsonIgnore] for the same defense-in-depth reason as BorzoAuthToken, though the actual
+    /// risk here is much smaller — this only guards a webhook that can change a delivery
+    /// status display, not something spendable. DeliveryController's own DTO returns it in
+    /// plain text (Owner/Manager only) so the cafe can copy the exact callback URL to paste.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? BorzoCallbackToken { get; set; }
 
     // Receipt Builder — which optional sections print on the customer bill (see
     // receiptFormat.ts buildReceiptLines, the one shared line-model every print

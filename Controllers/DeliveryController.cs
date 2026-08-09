@@ -39,7 +39,7 @@ public class DeliveryController(
     public async Task<BorzoSettingsDto> GetSettings()
     {
         var s = await db.Settings.AsNoTracking().FirstAsync();
-        return Describe(s);
+        return Describe(s, CallbackBaseUrl());
     }
 
     [HttpPut("settings")]
@@ -60,6 +60,8 @@ public class DeliveryController(
         // without the client having to hold the secret just to send it back.
         if (req.AuthToken is not null)
             s.BorzoAuthToken = string.IsNullOrWhiteSpace(req.AuthToken) ? null : req.AuthToken.Trim();
+        if (req.CallbackToken is not null)
+            s.BorzoCallbackToken = string.IsNullOrWhiteSpace(req.CallbackToken) ? null : req.CallbackToken.Trim();
 
         await db.SaveChangesAsync();
         // The token's value is never logged — only that it changed.
@@ -67,8 +69,13 @@ public class DeliveryController(
             $"Delivery partner settings updated (enabled={s.BorzoEnabled}, sandbox={s.BorzoUseTestEnvironment})",
             AuditSeverity.Medium);
 
-        return Describe(s);
+        return Describe(s, CallbackBaseUrl());
     }
+
+    /// <summary>This server's own origin, read off the current request rather than hardcoded, so
+    /// the composed callback URL is correct in every environment (production, a Render preview,
+    /// local dev) without a config value to keep in sync.</summary>
+    private string CallbackBaseUrl() => $"{Request.Scheme}://{Request.Host}";
 
     // ---------- Quote ----------
 
@@ -180,9 +187,12 @@ public class DeliveryController(
     /// neither create an order nor move money, and an unrecognised id is answered 200 and dropped
     /// (Borzo retries for 24 hours on any non-2xx, and there is nothing to retry here).
     ///
-    /// NOTE: Borzo signs callbacks with the account's callback token. Verifying that signature is
-    /// the next thing this should do — until then, treat the status shown as advisory, and the
-    /// Borzo cabinet as the source of truth for anything that matters.
+    /// Verified against CafeSettings.BorzoCallbackToken — see that property's doc comment for
+    /// why this checks a URL-embedded secret rather than a Borzo-issued signature: no documented
+    /// header or hash scheme for their callbacks could be found, and guessing one wrong would be
+    /// worse than not verifying (false confidence, not real protection). Soft-disabled for a
+    /// tenant that hasn't saved a callback token yet, so this stays backward compatible with
+    /// whatever's already registered in Borzo's cabinet.
     /// </summary>
     [AllowAnonymous]
     [HttpPost("callback")]
@@ -202,6 +212,20 @@ public class DeliveryController(
             return Ok();
         }
 
+        // Only now — having matched an order — is a tenant known, and only now can its own
+        // callback token be checked. Rejecting up front (before the lookup) would leak, via
+        // response timing, whether a guessed order id exists at all; this rejects exactly like
+        // the unknown-order case above once a mismatch is found.
+        var expectedToken = await db.Settings.IgnoreQueryFilters().AsNoTracking()
+            .Where(s => s.TenantId == order.TenantId)
+            .Select(s => s.BorzoCallbackToken)
+            .FirstOrDefaultAsync(ct);
+        if (!string.IsNullOrEmpty(expectedToken) && !CallbackTokenMatches(expectedToken))
+        {
+            logger.LogWarning("Borzo callback for order {OrderId} had a missing/incorrect callback token", order.Id);
+            return Ok();
+        }
+
         order.CourierStatus = payload.Order?.Status ?? order.CourierStatus;
         if (payload.Order?.Courier is BorzoCourier courier)
         {
@@ -210,6 +234,18 @@ public class DeliveryController(
         }
         await db.SaveChangesAsync(ct);
         return Ok();
+    }
+
+    /// <summary>Constant-time comparison against this request's `?token=` query parameter — a
+    /// naive string.Equals short-circuits on the first mismatched character, which leaks how
+    /// many leading characters a guess got right through response-time differences (same
+    /// reasoning as ReceiptTokenService's own signature compare).</summary>
+    private bool CallbackTokenMatches(string expectedToken)
+    {
+        var supplied = Request.Query["token"].ToString();
+        if (supplied.Length != expectedToken.Length) return false;
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(expectedToken), System.Text.Encoding.UTF8.GetBytes(supplied));
     }
 
     // ---------- Helpers ----------
@@ -256,7 +292,7 @@ public class DeliveryController(
         CashToCollect = order.Paid ? null : order.Total,
     };
 
-    private static BorzoSettingsDto Describe(CafeSettings s) => new(
+    private static BorzoSettingsDto Describe(CafeSettings s, string callbackBaseUrl) => new(
         s.BorzoEnabled,
         !string.IsNullOrWhiteSpace(s.BorzoAuthToken),
         s.BorzoUseTestEnvironment,
@@ -267,7 +303,10 @@ public class DeliveryController(
         s.BorzoEnabled
             && !string.IsNullOrWhiteSpace(s.BorzoAuthToken)
             && s.PickupLatitude is not null
-            && s.PickupLongitude is not null);
+            && s.PickupLongitude is not null,
+        string.IsNullOrWhiteSpace(s.BorzoCallbackToken)
+            ? null
+            : $"{callbackBaseUrl}/api/delivery/callback?token={Uri.EscapeDataString(s.BorzoCallbackToken)}");
 
     private static DeliveryStatusDto Describe(Order o) => new(
         o.Id,
