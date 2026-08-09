@@ -318,8 +318,12 @@ public class DeliveryController(
         PickupLongitude = s.PickupLongitude,
         PickupContactName = s.BusinessName,
         PickupContactPhone = s.Phone,
+        // ToOffset off the real UTC instant, NOT new DateTimeOffset(IstClock.NowIst, Offset):
+        // IstClock.NowIst is a Kind=Utc DateTime holding IST wall-clock, and the DateTimeOffset
+        // constructor throws when a Utc-kind value is paired with a non-zero offset — which is
+        // what 500'd every Book (Quote passes null here, so it never hit this path).
         PickupReadyAt = prepMinutes is int minutes
-            ? new DateTimeOffset(IstClock.NowIst, IstClock.Offset).AddMinutes(minutes)
+            ? DateTimeOffset.UtcNow.ToOffset(IstClock.Offset).AddMinutes(minutes)
             : null,
 
         DropoffAddress = order.DeliveryAddress,
