@@ -710,6 +710,12 @@ public class CafeSettings : ITenantScoped
     /// <summary>Whether what the courier charges is added to the customer's bill. Off means the
     /// cafe absorbs it — the order still books, the customer just never sees the fee.</summary>
     public bool BorzoPassFeeToCustomer { get; set; } = true;
+    /// <summary>Whether the rider collects the order total in cash at the door for unpaid orders
+    /// (Borzo's is_cod_cash_voucher_required). Off by default and deliberately so: COD is a
+    /// separate Borzo agreement per account, and an account without it rejects the whole order
+    /// with cod_agreement_required — so switching this on only makes sense once Borzo has enabled
+    /// COD for the cafe. Most cafes collect payment themselves (UPI/online) and never need it.</summary>
+    public bool BorzoCollectCodOnDelivery { get; set; }
     /// <summary>Where the rider collects from. Falls back to Address above when blank, but the
     /// coordinates have no fallback — without them nothing can be booked, which is why the
     /// settings screen makes the cafe pin its location once.</summary>

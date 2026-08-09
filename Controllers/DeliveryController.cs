@@ -51,6 +51,7 @@ public class DeliveryController(
         if (req.Enabled is bool enabled) s.BorzoEnabled = enabled;
         if (req.UseTestEnvironment is bool useTest) s.BorzoUseTestEnvironment = useTest;
         if (req.PassFeeToCustomer is bool passFee) s.BorzoPassFeeToCustomer = passFee;
+        if (req.CollectCod is bool collectCod) s.BorzoCollectCodOnDelivery = collectCod;
         if (req.PickupAddress is not null) s.PickupAddress = req.PickupAddress.Trim();
         if (req.PickupLatitude is decimal lat) s.PickupLatitude = lat;
         if (req.PickupLongitude is decimal lng) s.PickupLongitude = lng;
@@ -328,9 +329,11 @@ public class DeliveryController(
         DropoffContactPhone = order.GuestPhone,
 
         ClientOrderId = order.Id.ToString(),
-        // Unpaid orders send the rider to collect at the door; a prepaid one must not, or the
-        // customer is charged twice.
-        CashToCollect = order.Paid ? null : order.Total,
+        // COD only when the cafe has explicitly turned it on AND the order isn't already paid.
+        // Default-off matters: an account without Borzo's COD agreement rejects the entire order
+        // with cod_agreement_required the moment is_cod_cash_voucher_required is set, so this
+        // never sends it uninvited. A prepaid order never collects either — that'd double-charge.
+        CashToCollect = s.BorzoCollectCodOnDelivery && !order.Paid ? order.Total : null,
     };
 
     private static BorzoSettingsDto Describe(CafeSettings s, string callbackBaseUrl) => new(
@@ -338,6 +341,7 @@ public class DeliveryController(
         !string.IsNullOrWhiteSpace(s.BorzoAuthToken),
         s.BorzoUseTestEnvironment,
         s.BorzoPassFeeToCustomer,
+        s.BorzoCollectCodOnDelivery,
         string.IsNullOrWhiteSpace(s.PickupAddress) ? s.Address : s.PickupAddress,
         s.PickupLatitude,
         s.PickupLongitude,
