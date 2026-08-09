@@ -1450,7 +1450,7 @@ public static class CustomerOrderPage
 
       // Staff-Confirm Mode is on for this cafe, so the kitchen hasn't started yet — saying
       // "sent to the kitchen" here would be a lie the customer plans their evening around.
-      if (placed.pendingConfirmation) { showDeliveryWaitingScreen(); return; }
+      if (placed.pendingConfirmation) { showDeliveryWaitingScreen(placed.orderToken); return; }
       showPlacedScreen({ order: { items: sent, total: placed.total } });
     }).catch(function (err) {
       document.getElementById('processing-overlay').classList.remove('show');
@@ -1467,13 +1467,59 @@ public static class CustomerOrderPage
    * cafe has the customer's number and calls if there's a problem, so the copy says that
    * plainly rather than leaving someone watching a spinner for an answer that isn't coming.
    */
-  function showDeliveryWaitingScreen() {
+  var deliveryStatusTimer = null;
+
+  function stopDeliveryStatusPolling() {
+    if (deliveryStatusTimer) { clearInterval(deliveryStatusTimer); deliveryStatusTimer = null; }
+  }
+
+  function showDeliveryWaitingScreen(orderToken) {
     hideAllScreens();
     var screen = document.getElementById('waiting-screen');
     screen.querySelector('h2').textContent = 'Order sent — waiting for the cafe to confirm';
     screen.querySelector('p').textContent =
       'The cafe will confirm your order shortly and start cooking. They have your number and will call if anything is unclear.';
     screen.style.display = 'flex';
+    startDeliveryStatusPolling(orderToken);
+  }
+
+  /**
+   * The delivery twin of the dine-in session poll, reading a status endpoint scoped to this one
+   * order's own signed token rather than the shared guest session this flow never has (see
+   * PublicController.DeliveryOrderStatus). Runs only while a real reason exists to keep asking —
+   * pending confirmation — and stops itself the moment that stops being true, one way or the
+   * other, so it can never poll forever nor overlap a previous call still in flight.
+   */
+  function startDeliveryStatusPolling(orderToken) {
+    stopDeliveryStatusPolling();
+    var checking = false;
+    deliveryStatusTimer = setInterval(function () {
+      if (checking) return; // a slow response must not let two checks race each other
+      checking = true;
+      fetchJson('/api/public/delivery-order-status/' + encodeURIComponent(orderToken))
+        .then(function (s) {
+          checking = false;
+          if (s.cancelled) {
+            stopDeliveryStatusPolling();
+            showEnded(s.cancelReason
+              ? ('The cafe declined this order: ' + s.cancelReason)
+              : 'The cafe declined this order. Please call them if you\'d like to know why.');
+            return;
+          }
+          if (!s.pendingStaffConfirmation) {
+            // Confirmed — the kitchen has it now. There is no live item/status list to show
+            // (this order was never tracked client-side the way a table session is), so this
+            // simply says so rather than presenting a placed-screen it can't honestly fill in.
+            stopDeliveryStatusPolling();
+            hideAllScreens();
+            document.getElementById('waiting-screen').querySelector('h2').textContent = 'Confirmed — your order is being prepared';
+            document.getElementById('waiting-screen').querySelector('p').textContent =
+              'The cafe has accepted your order. Sit tight — they’ll get it on its way to you.';
+            document.getElementById('waiting-screen').style.display = 'flex';
+          }
+        })
+        .catch(function () { checking = false; }); // transient network blip — the next tick retries
+    }, 5000);
   }
 
   function placeOrder() {

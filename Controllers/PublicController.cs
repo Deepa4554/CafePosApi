@@ -161,7 +161,46 @@ public class PublicController(
         // rather than whenever someone next refreshes.
         await realtime.NotifyOrdersChangedAsync(new HashSet<int> { tenantId });
 
-        return new { order.Id, order.Title, order.Total, HasLocation = lat is not null, PendingConfirmation = pendingConfirmation };
+        return new {
+            order.Id,
+            order.Title,
+            order.Total,
+            HasLocation = lat is not null,
+            PendingConfirmation = pendingConfirmation,
+            // Lets the customer's own browser poll DeliveryOrderStatus below for exactly this
+            // order, without exposing a plain /order/{id} lookup that would let anyone holding
+            // the (shared, printed) delivery QR enumerate every other customer's order status.
+            // Reuses the same signed-id scheme as the bill-PDF link (ReceiptTokenService) rather
+            // than inventing a second one.
+            OrderToken = receiptTokens.Encode(order.Id),
+        };
+    }
+
+    /// <summary>
+    /// What the customer's own confirmation screen polls while Staff-Confirm Mode holds their
+    /// order — "has the cafe looked at this yet". Deliberately the bare minimum: pending/
+    /// cancelled and a total, nothing about who else ordered or what's in any other order. The
+    /// token (not the order id) is what's public, for the same reason GetReceipt below uses one
+    /// — Order.Id is a small sequential integer, and a plain /orders/{id}/status route would
+    /// let anyone holding the printed delivery QR walk every order this cafe has ever taken.
+    /// </summary>
+    [HttpGet("delivery-order-status/{orderToken}")]
+    public async Task<ActionResult<object>> DeliveryOrderStatus(string orderToken, CancellationToken ct)
+    {
+        var orderId = receiptTokens.TryDecode(orderToken);
+        if (orderId is null) return NotFound();
+
+        var order = await db.Orders.IgnoreQueryFilters().AsNoTracking()
+            .FirstOrDefaultAsync(o => o.Id == orderId.Value, ct);
+        if (order is null) return NotFound();
+
+        return new {
+            order.PendingStaffConfirmation,
+            order.Cancelled,
+            order.CancelReason,
+            order.Total,
+            CourierTrackingUrl = order.CourierTrackingUrl,
+        };
     }
 
     private const int MaxDeliveryNameLength = 60;
