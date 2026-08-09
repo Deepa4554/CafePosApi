@@ -22,6 +22,17 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
         return new { token = qrTokens.Encode(tenant.TenantIdOrDefault, "") };
     }
 
+    /// <summary>A QR token for home delivery — printed on flyers, packaging or a shopfront
+    /// board rather than a table. Scanning it opens the same ordering page in delivery mode,
+    /// where the customer gives an address and shares their location, and the order comes
+    /// through as DELIVERY (see PublicController.CreateDeliveryOrder). Kept as a separate code
+    /// from the table and menu-only QRs precisely so the dine-in flow is not involved at all.</summary>
+    [HttpGet("delivery-qr-token")]
+    public ActionResult<object> GetDeliveryQrToken()
+    {
+        return new { token = qrTokens.Encode(tenant.TenantIdOrDefault, QrTokenService.DeliveryTableCode) };
+    }
+
     /// <summary>Tables with live occupancy — a table only shows "empty" once its order
     /// is BOTH paid AND served (paying alone doesn't free it; the guest may still be
     /// sitting there waiting on food). Each table also carries an encrypted QrToken —

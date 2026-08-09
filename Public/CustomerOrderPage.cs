@@ -298,13 +298,29 @@ public static class CustomerOrderPage
     <div id="error-banner" class="banner error"></div>
 
     <div id="guest-card" class="guest-card">
-      <div class="field-label">Your name (optional)</div>
+      <div class="field-label" id="guest-name-label">Your name (optional)</div>
       <div class="guest-row">
         <input type="text" id="guest-name" placeholder="e.g. Priya" maxlength="60" />
       </div>
-      <div class="field-label" style="margin-top:12px">Mobile number (optional)</div>
+      <div class="field-label" style="margin-top:12px" id="guest-phone-label">Mobile number (optional)</div>
       <div class="guest-row">
         <input type="tel" id="guest-phone" placeholder="e.g. 9876543210" maxlength="10" inputmode="numeric" />
+      </div>
+
+      <!-- Home delivery only (delivery QR). Hidden and inert for every table/menu QR — the
+           dine-in flow never sees these fields. -->
+      <div id="delivery-fields" style="display:none">
+        <div class="field-label" style="margin-top:12px">Delivery address</div>
+        <div class="guest-row">
+          <textarea id="guest-address" rows="3" maxlength="300"
+            placeholder="House/flat, street, area, landmark"
+            style="width:100%;box-sizing:border-box;font:inherit;padding:10px;border-radius:10px;border:1px solid rgba(0,0,0,.15);resize:vertical"></textarea>
+        </div>
+        <button type="button" id="locate-btn"
+          style="margin-top:10px;width:100%;font:inherit;padding:10px;border-radius:10px;border:1px solid rgba(0,0,0,.15);background:#fff;cursor:pointer">
+          📍 Use my current location
+        </button>
+        <div id="locate-status" class="field-label" style="margin-top:8px"></div>
       </div>
     </div>
 
@@ -408,6 +424,16 @@ public static class CustomerOrderPage
     // items sat in the cart and the kitchen never saw them. Cleared once the round is actually
     // placed, or when the guest leaves the menu.
     addingMore: false,
+    // Home-delivery QR (see QrTokenService.DeliveryTableCode). There is no table, so there is
+    // no guest session either: the cart lives entirely in this browser and is sent once, as a
+    // whole order, by placeDeliveryOrder. Every delivery-only branch in this file is gated on
+    // this flag, so a table/menu QR runs exactly the code it always did.
+    deliveryMode: false,
+    // Coordinates from the browser's own geolocation, once the customer taps "Use my current
+    // location". Null means they didn't (or it failed) — the order still goes through, the cafe
+    // just can't hand it to a courier automatically.
+    deliveryLat: null,
+    deliveryLng: null,
   };
   var pollTimer = null;
   // One entry per cart line while its cart/items POST is in flight — see changeLineQty.
@@ -489,6 +515,10 @@ public static class CustomerOrderPage
   }
 
   function startPolling() {
+    // Polling reads the guest SESSION, which a home-delivery order doesn't have — left to run
+    // it would hammer /session/state with a table code matching no row, and the first 410 would
+    // throw a "this session has ended" screen over a perfectly good confirmation.
+    if (state.deliveryMode) return;
     stopPolling();
     pollTimer = setInterval(function () {
       fetchJson(sessionBase + '/state').then(handleStateUpdate).catch(function (err) {
@@ -946,6 +976,78 @@ public static class CustomerOrderPage
     return true;
   }
 
+  /**
+   * The delivery cart's only writer. Unlike applyLocalQty, which fabricates a line optimistically
+   * and waits for the server's real Order to replace it, this line IS the record — nothing is
+   * coming to correct it, so a brand-new combo has to be priced here rather than left for a round
+   * trip that never happens. The arithmetic is the same one the options modal already shows on
+   * its Add button (variant price, or base, plus each selected option), so what the customer was
+   * quoted and what lands in the cart cannot drift apart.
+   *
+   * The line shape deliberately mirrors a server OrderItem — fireBatch 0, voided false — because
+   * cartCount/cartSubtotal/renderCartBar read unfiredLines() and must not care which mode built it.
+   * The server prices the order again from menuItemId/variantId/option ids when it's placed, so
+   * these numbers are for display only and a stale menu can't be used to underpay.
+   */
+  function applyDeliveryQty(menuItemId, variantId, modifierOptionIds, nextQty) {
+    if (!state.order) state.order = { items: [] };
+    var items = state.order.items || (state.order.items = []);
+    var sortedIds = (modifierOptionIds || []).slice().sort(function (a, b) { return a - b; });
+    var isPlain = !variantId && sortedIds.length === 0;
+    if (isPlain) state.cart[menuItemId] = nextQty;
+
+    var idx = items.findIndex(function (i) {
+      if (i.menuItemId !== menuItemId) return false;
+      var lineIds = lineOptionIds(i).sort(function (a, b) { return a - b; });
+      return (i.variantId || null) === (variantId || null)
+        && lineIds.length === sortedIds.length
+        && lineIds.every(function (id, k) { return id === sortedIds[k]; });
+    });
+
+    if (nextQty <= 0) {
+      if (idx !== -1) items.splice(idx, 1);
+      return;
+    }
+    if (idx !== -1) { items[idx].qty = nextQty; return; }
+
+    var menuItem = state.menu.find(function (m) { return m.id === menuItemId; }) || {};
+    var variant = (menuItem.variants || []).find(function (v) { return v.id === variantId; });
+
+    // Every option this item offers, flattened across its groups — same walk the options modal
+    // does (optSelectedOptions), and the field is `modifiers`, not `modifierGroups`.
+    var catalogue = [];
+    (menuItem.modifiers || []).forEach(function (g) { catalogue = catalogue.concat(g.options || []); });
+
+    // sortedIds may hold the same option id more than once — that's how "extra cheese ×2" is
+    // expressed (see optOptionQty). Each occurrence is priced, and repeats are folded back into
+    // one {modifierOptionId, qty} entry so lineOptionIds() re-expands to exactly this list.
+    var byOption = [];
+    var optionsTotal = 0;
+    sortedIds.forEach(function (id) {
+      var option = catalogue.find(function (o) { return o.id === id; });
+      if (!option) return;
+      optionsTotal += option.price || 0;
+      var existing = byOption.find(function (e) { return e.modifierOptionId === id; });
+      if (existing) existing.qty += 1;
+      else byOption.push({ modifierOptionId: id, name: option.name, price: option.price, qty: 1 });
+    });
+
+    items.push({
+      menuItemId: menuItemId,
+      // Carried on the line because the confirmation screen lists items by name and, with no
+      // server Order to read back, this is the only place that name survives.
+      name: menuItem.name,
+      qty: nextQty,
+      price: (variant ? variant.price : (menuItem.price || 0)) + optionsTotal,
+      fireBatch: 0,
+      voided: false,
+      status: 'NEW',
+      variantId: variantId || null,
+      variantName: variant ? variant.name : null,
+      selectedModifiers: byOption,
+    });
+  }
+
   // Every tap updates the tapped item's own card instantly via applyLocalQty/patchItemCard
   // (no waiting on the network) — the request below is fired in the background and only
   // reconciles state afterward, which is normally a no-op since the optimistic guess already
@@ -968,6 +1070,17 @@ public static class CustomerOrderPage
       pending.target = next;
       var patched = applyLocalQty(menuItemId, variantId, modifierOptionIds, next);
       if (patched) { patchItemCard(menuItemId); patchBestSellerCard(menuItemId); renderCartBar(); }
+      return;
+    }
+
+    // Home delivery has no session to POST a cart line to — the whole order goes up in one
+    // request when the customer places it. So the local edit IS the cart here, and there is
+    // nothing to reconcile against afterwards.
+    if (state.deliveryMode) {
+      applyDeliveryQty(menuItemId, variantId, modifierOptionIds, next);
+      patchItemCard(menuItemId);
+      patchBestSellerCard(menuItemId);
+      renderCartBar();
       return;
     }
 
@@ -1242,7 +1355,109 @@ public static class CustomerOrderPage
     placeBtn.onclick = placeOrder;
   }
 
+  /**
+   * Asks the browser where the phone is. This is the whole reason a courier can be dispatched
+   * automatically: a typed Indian address ("gali no. 5, behind the temple") is something a rider
+   * can work with but a routing API cannot, and the device already knows the answer to within a
+   * few metres. Failure is never fatal — the address alone still places the order.
+   */
+  function requestLocation() {
+    var status = document.getElementById('locate-status');
+    var btn = document.getElementById('locate-btn');
+    if (!navigator.geolocation) {
+      status.textContent = 'This browser can’t share a location — your address alone is fine.';
+      return;
+    }
+    btn.disabled = true;
+    status.textContent = 'Finding your location…';
+    navigator.geolocation.getCurrentPosition(
+      function (position) {
+        btn.disabled = false;
+        state.deliveryLat = position.coords.latitude;
+        state.deliveryLng = position.coords.longitude;
+        status.textContent = '✅ Location shared — the rider will find you faster.';
+      },
+      function () {
+        btn.disabled = false;
+        state.deliveryLat = null;
+        state.deliveryLng = null;
+        // Deliberately not an error banner: declining is a legitimate choice, and the order is
+        // still perfectly placeable. Saying so stops people abandoning the cart here.
+        status.textContent = 'Couldn’t get your location. You can still order — just make the address as clear as you can.';
+      },
+      // A stale fix from another part of the city is worse than none, hence maximumAge 0.
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  }
+
+  /**
+   * Sends a home-delivery order as one request. No session, no fire batches, no partial state:
+   * either the whole order is accepted or nothing happened. The cafe still has to accept it and
+   * press Book rider — placing this books no courier and spends nothing.
+   */
+  function placeDeliveryOrder() {
+    if (cartCount() === 0) return;
+    clearError();
+
+    var name = (document.getElementById('guest-name').value || '').trim();
+    var phone = (document.getElementById('guest-phone').value || '').replace(/\D/g, '');
+    var address = (document.getElementById('guest-address').value || '').trim();
+    // Checked here as well as server-side so the customer is told before the round trip, not by
+    // a 400 after it. PublicController.CreateDeliveryOrder remains the authority.
+    if (!name) { showError('Please enter your name.'); return; }
+    if (phone.length !== 10) { showError('Enter a 10-digit mobile number so the rider can call you.'); return; }
+    if (!address) { showError('Please enter your delivery address.'); return; }
+
+    var items = unfiredLines().map(function (line) {
+      return {
+        menuItemId: line.menuItemId,
+        qty: line.qty,
+        modifier: null,
+        variantId: line.variantId || null,
+        modifierOptionIds: lineOptionIds(line).length ? lineOptionIds(line) : null,
+      };
+    });
+
+    var btn = document.getElementById('place-btn');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    document.getElementById('processing-overlay').classList.add('show');
+
+    fetchJson(apiBase + '/delivery-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        guestName: name,
+        guestPhone: phone,
+        address: address,
+        latitude: state.deliveryLat,
+        longitude: state.deliveryLng,
+        items: items,
+      }),
+    }).then(function (placed) {
+      document.getElementById('processing-overlay').classList.remove('show');
+      // The confirmation screen lists what was sent, and the server's reply carries only the id
+      // and total — so the lines come from the cart that was just accepted, marked as fired
+      // (fireBatch > 0) since that is exactly what they now are. Total comes from the server,
+      // which priced it, not from the local display arithmetic.
+      var sent = JSON.parse(JSON.stringify(state.order.items || []));
+      sent.forEach(function (line) { line.fireBatch = 1; line.status = 'NEW'; });
+
+      // Cleared before the screen switches: this is what stops a second tap re-sending food
+      // that the kitchen already has.
+      state.order = { items: [] };
+      state.cart = {};
+      showPlacedScreen({ order: { items: sent, total: placed.total } });
+    }).catch(function (err) {
+      document.getElementById('processing-overlay').classList.remove('show');
+      btn.disabled = false;
+      btn.textContent = 'Place Order';
+      showError(err.message);
+    });
+  }
+
   function placeOrder() {
+    if (state.deliveryMode) { placeDeliveryOrder(); return; }
     if (cartCount() === 0) return;
     clearError();
 
@@ -1340,10 +1555,38 @@ public static class CustomerOrderPage
       state.bestSellers = results[3];
 
       document.getElementById('business-name').textContent = results[2].businessName || 'CafePOS';
-      state.browseOnly = !state.table.code;
-      document.getElementById('table-line').textContent = state.table.code
-        ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
-        : 'Browsing the menu';
+
+      // Which of the three QRs was scanned (see QrTokenService.ModeFor). Only the delivery one
+      // changes anything below; a table or menu-only token behaves exactly as before.
+      state.deliveryMode = results[0].mode === 'delivery';
+
+      if (state.deliveryMode) {
+        // A delivery QR has no table, and the old rule "no table code means browse only" would
+        // otherwise lock the very customer this code exists for out of ordering.
+        state.browseOnly = false;
+        // The cart is local from the first tap, so it needs somewhere to live before one.
+        state.order = { items: [] };
+        document.getElementById('delivery-fields').style.display = 'block';
+        // Optional for a seated guest, unavoidable for a delivery: nobody can hand food to an
+        // address that isn't there, and the rider needs a number to call.
+        document.getElementById('guest-name-label').textContent = 'Your name';
+        document.getElementById('guest-phone-label').textContent = 'Mobile number';
+        document.getElementById('locate-btn').onclick = requestLocation;
+        // Both of these act on a guest session — "Add more items" appends to an open table tab,
+        // "Request Bill" locks it for payment. A delivery order is placed once and settled with
+        // the rider, so neither has anything to act on and both are hidden rather than left to
+        // fail against a session that was never created.
+        document.getElementById('add-more-btn').style.display = 'none';
+        document.getElementById('request-bill-btn').style.display = 'none';
+      } else {
+        state.browseOnly = !state.table.code;
+      }
+
+      document.getElementById('table-line').textContent = state.deliveryMode
+        ? 'Home delivery'
+        : (state.table.code
+          ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
+          : 'Browsing the menu');
       document.getElementById('place-btn').onclick = placeOrder;
       document.getElementById('join-btn').onclick = joinSession;
       document.getElementById('add-more-btn').onclick = function () {
@@ -1366,6 +1609,15 @@ public static class CustomerOrderPage
         // only, exactly as before this feature existed.
         document.getElementById('browse-banner').classList.add('show');
         document.getElementById('guest-card').style.display = 'none';
+        showMenuScreen();
+        return;
+      }
+
+      if (state.deliveryMode) {
+        // Straight to the menu. doScan below is the table/session handshake — it claims a seat,
+        // resolves JOIN/STAFF_ASSIST and starts the 5s poll, none of which exists without a
+        // table, and calling it here would fail against a table code that matches no row.
+        document.getElementById('loading').style.display = 'none';
         showMenuScreen();
         return;
       }

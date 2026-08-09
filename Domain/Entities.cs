@@ -229,6 +229,38 @@ public class Order : ITenantScoped
     /// identity value at insert time; only the InMemory provider assigns eagerly).
     /// </summary>
     public Customer? Customer { get; set; }
+
+    /// <summary>Where a DELIVERY order is going, as the customer typed it — flat/floor/landmark
+    /// included, because that part is for the human rider, not the map. Null for every other
+    /// order type. Latitude/Longitude come from the customer's own device (the QR page asks the
+    /// browser for its location) and are what a courier API actually routes on; the two are
+    /// captured together but neither substitutes for the other — a rooftop-accurate pin still
+    /// doesn't say "3rd floor, blue gate".</summary>
+    public string? DeliveryAddress { get; set; }
+    public decimal? DeliveryLatitude { get; set; }
+    public decimal? DeliveryLongitude { get; set; }
+
+    /// <summary>Set once a third-party rider has been booked for this order (see
+    /// DeliveryController / BorzoClient). CourierProvider names which service, so a cafe that
+    /// switches later can still read its old orders. All null until someone presses Book rider —
+    /// booking is never automatic, since every booking costs the cafe money.</summary>
+    public string? CourierProvider { get; set; }
+    public string? CourierOrderId { get; set; }
+    /// <summary>Provider's own status string, refreshed by their callback — e.g. Borzo's
+    /// new/available/active/completed/canceled. Kept as free text rather than an enum: it's
+    /// the provider's vocabulary, and inventing a mapping would only lose detail.</summary>
+    public string? CourierStatus { get; set; }
+    /// <summary>Per-drop link the customer can watch the rider on — safe to send over WhatsApp,
+    /// it exposes nothing but this one delivery.</summary>
+    public string? CourierTrackingUrl { get; set; }
+    /// <summary>What the courier charged the cafe. Distinct from DeliveryChargeAmount, which is
+    /// what the *customer* was billed — the two only match when BorzoPassFeeToCustomer is on,
+    /// and the gap between them is exactly what the cafe is absorbing.</summary>
+    public decimal? CourierFeeAmount { get; set; }
+    public string? CourierRiderName { get; set; }
+    public string? CourierRiderPhone { get; set; }
+    public DateTime? CourierBookedAt { get; set; }
+
     public decimal Subtotal { get; set; }
     public decimal DiscountPct { get; set; }
     /// <summary>The order-time manual discount only (from DiscountPct, applied when the
@@ -652,6 +684,38 @@ public class CafeSettings : ITenantScoped
     public bool DeliveryChargeAutoApplyTakeaway { get; set; }
     public bool DeliveryChargeAutoApplyDelivery { get; set; } = true;
     public bool DeliveryChargeAutoApplyToken { get; set; }
+
+    // Borzo courier integration — books a real rider for DELIVERY orders (see BorzoClient).
+    // Per-cafe rather than per-deployment: each tenant has its own Borzo account, its own
+    // balance, and its own pickup point.
+    public bool BorzoEnabled { get; set; }
+    /// <summary>
+    /// The cafe's own X-DV-Auth-Token. Anyone holding this can book rides on the cafe's account
+    /// and spend its balance, so it must never leave the server.
+    ///
+    /// [JsonIgnore] is load-bearing, not tidiness: SettingsController.Get is [AllowAnonymous]
+    /// (the app needs branding before login, and the QR menu is customer-facing) and returns
+    /// this whole entity, so any property added here is world-readable by default. This is the
+    /// first actual secret on CafeSettings — every other JsonIgnore in this file is just a
+    /// navigation property. DeliveryController reads it straight off the entity server-side;
+    /// BorzoSettingsDto reports only whether one is saved.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? BorzoAuthToken { get; set; }
+    /// <summary>Points at Borzo's sandbox instead of production. Defaults on so a cafe that
+    /// pastes a token before it has meant to go live can't accidentally summon a real rider;
+    /// sandbox prices are NOT real prices, which is the reason the UI has to say which one
+    /// it's on.</summary>
+    public bool BorzoUseTestEnvironment { get; set; } = true;
+    /// <summary>Whether what the courier charges is added to the customer's bill. Off means the
+    /// cafe absorbs it — the order still books, the customer just never sees the fee.</summary>
+    public bool BorzoPassFeeToCustomer { get; set; } = true;
+    /// <summary>Where the rider collects from. Falls back to Address above when blank, but the
+    /// coordinates have no fallback — without them nothing can be booked, which is why the
+    /// settings screen makes the cafe pin its location once.</summary>
+    public string? PickupAddress { get; set; }
+    public decimal? PickupLatitude { get; set; }
+    public decimal? PickupLongitude { get; set; }
 
     // Receipt Builder — which optional sections print on the customer bill (see
     // receiptFormat.ts buildReceiptLines, the one shared line-model every print

@@ -50,6 +50,7 @@ public static class ScreenCatalog
         // Plus, unlike the Integrations hub above it — see the matching note in
         // CafePOS/src/core/auth/screenCatalog.ts.
         ["WhatsAppSetup"] = PlanCategory.Plus,
+        ["DeliveryPartner"] = PlanCategory.Plus,
         ["Branches"] = PlanCategory.Plus,
         ["Expenses"] = PlanCategory.Normal,
         ["Reports"] = PlanCategory.Normal,
@@ -107,6 +108,7 @@ public static class ScreenCatalog
         ["CrmReport"] = "Reports",
         ["OrderDetailReport"] = "Reports",
         ["WhatsAppSetup"] = "Integrations",
+        ["DeliveryPartner"] = "Integrations",
         ["PrinterSettings"] = "Profile",
         ["KitchenFlowSettings"] = "Profile",
         ["StationManagement"] = "Profile",

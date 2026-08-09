@@ -231,6 +231,11 @@ builder.Services.AddHttpClient<WhatsAppNodeClient>((sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(10);
 });
 
+// Borzo courier booking for DELIVERY orders (see DeliveryController). No BaseAddress and no
+// auth configured here on purpose: both the environment (sandbox vs production) and the token
+// belong to the individual cafe, not the deployment, so BorzoClient carries them per call.
+builder.Services.AddHttpClient<BorzoClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
+
 builder.Services
     .AddAuthentication(options =>
     {
