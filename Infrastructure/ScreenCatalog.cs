@@ -22,6 +22,9 @@ public static class ScreenCatalog
         ["QRMenu"] = PlanCategory.Normal,
         ["Billing"] = PlanCategory.Normal,
         ["CRM"] = PlanCategory.Plus,
+        // Normal, deliberately below the CRM screens it shares a Customer record with —
+        // running a khata for regulars is what the smallest shops do most, not least.
+        ["Khatabook"] = PlanCategory.Normal,
         ["TeamPortal"] = PlanCategory.Normal,
         ["Attendance"] = PlanCategory.Plus,
         ["Leave"] = PlanCategory.Plus,

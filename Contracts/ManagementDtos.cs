@@ -79,8 +79,10 @@ public record StaffDto(
 /// <summary>
 /// Password/LoginRole are optional: leave both null to create a plain HR roster
 /// entry with no app access (matches StaffMember.UserId being nullable). Supply all
-/// three of Email/Password/LoginRole together to also provision a real login account
-/// for this tenant — Email becomes required in that case.
+/// three of Phone/Password/LoginRole together to also provision a real login account
+/// for this tenant — Phone becomes required (and must be a 10-digit mobile number) in
+/// that case. Login is mobile-number-based for staff, not email — see
+/// StaffController.Create.
 /// </summary>
 public record CreateStaffRequest(
     string Name, string Role, string? Email, string? Phone, decimal? HourlyRate, int? BranchId, string? Password, AppRole? LoginRole,
@@ -88,10 +90,10 @@ public record CreateStaffRequest(
     string? BankAccountNumber = null, string? BankIfsc = null, string? BankName = null, string? Aadhaar = null, string? Pan = null);
 public record UpdateStaffStatusRequest(StaffStatus Status);
 
-/// <summary>For a staff member created without app access (CreateStaffRequest's Email/
+/// <summary>For a staff member created without app access (CreateStaffRequest's Phone/
 /// Password/LoginRole left blank) — provisions a login for them after the fact, same
 /// validation as the create-time path in StaffController.Create.</summary>
-public record GrantStaffAccessRequest(string Email, string Password, AppRole LoginRole);
+public record GrantStaffAccessRequest(string Phone, string Password, AppRole LoginRole);
 
 /// <summary>Partial update for the Staff Profile edit flow — only non-null fields are
 /// applied, matching MenuController.Update's pattern.</summary>

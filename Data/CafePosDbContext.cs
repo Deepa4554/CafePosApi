@@ -157,6 +157,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<GiftCard> GiftCards => Set<GiftCard>();
     public DbSet<Reward> Rewards => Set<Reward>();
     public DbSet<FavoriteItem> FavoriteItems => Set<FavoriteItem>();
+    /// <summary>Khatabook (udhaar) ledger — see KhataEntry. Sits under CRM because a khata
+    /// hangs off a Customer record, but the Khatabook screen itself is Normal-plan: a cafe
+    /// that can't reach the CRM screens can still run credit for its regulars.</summary>
+    public DbSet<KhataEntry> KhataEntries => Set<KhataEntry>();
 
     // Management
     public DbSet<StaffTask> Tasks => Set<StaffTask>();
@@ -249,6 +253,16 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasForeignKey(f => f.CustomerId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        // No navigation collection on Customer for these on purpose — a khata is read as its
+        // own paged ledger (KhatabookController), never eager-loaded alongside a customer,
+        // and a long-running regular's ledger is exactly the collection you don't want
+        // quietly riding along on every CRM query.
+        modelBuilder.Entity<KhataEntry>()
+            .HasOne(e => e.Customer)
+            .WithMany()
+            .HasForeignKey(e => e.CustomerId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         modelBuilder.Entity<SupportTicket>()
             .HasMany(t => t.Messages)
             .WithOne()
@@ -310,6 +324,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<OrderItem>().Property(i => i.Status).HasConversion<string>();
         modelBuilder.Entity<AppUser>().Property(u => u.Role).HasConversion<string>();
         modelBuilder.Entity<Coupon>().Property(c => c.Type).HasConversion<string>();
+        modelBuilder.Entity<KhataEntry>().Property(e => e.Type).HasConversion<string>();
         modelBuilder.Entity<GiftCard>().Property(g => g.Status).HasConversion<string>();
         modelBuilder.Entity<StaffTask>().Property(t => t.Priority).HasConversion<string>();
         modelBuilder.Entity<StaffTask>().Property(t => t.Status).HasConversion<string>();
@@ -401,8 +416,14 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // both have a table "T1" or a coupon "WELCOME10" without colliding.
         modelBuilder.Entity<CafeTable>().HasIndex(t => new { t.TenantId, t.Code }).IsUnique();
         modelBuilder.Entity<Customer>().HasIndex(c => c.Name);
+        // Every khata read is "this customer's ledger, newest first" or "sum this customer's
+        // rows" — both are covered by one composite. Tenant-prefixed like the rest.
+        modelBuilder.Entity<KhataEntry>().HasIndex(e => new { e.TenantId, e.CustomerId, e.CreatedAt });
         // AppUser.Email stays globally unique (not tenant-scoped): one email = one
-        // login, and login must resolve it before any tenant is known.
+        // login, and login must resolve it before any tenant is known. Staff logins
+        // store their 10-digit mobile number in this same column instead of a real
+        // email (see AppUser.Email's doc comment) — the uniqueness rule applies to
+        // that value just the same, so two cafes can't hand out the same number.
         modelBuilder.Entity<AppUser>().HasIndex(u => u.Email).IsUnique();
         modelBuilder.Entity<Coupon>().HasIndex(c => new { c.TenantId, c.Code }).IsUnique();
         // One row per (user, category) at most — the upsert in NotificationsController's

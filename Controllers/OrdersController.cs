@@ -1514,8 +1514,22 @@ public class OrdersController(
     /// (see TablesController/PublicController's occupancy check, and the activeOnly filter
     /// in List() above).
     /// </summary>
+    /// <summary>The udhaar/credit tender. Unlike Cash/Card/UPI it moves no money at settle
+    /// time — it closes the bill (table frees up, the order leaves the active list like any
+    /// other settled bill) and parks the amount on the customer's khata instead, to be
+    /// collected later through KhatabookController. It's recorded as a real OrderPayment row
+    /// so the order's ledger still adds up to its Total and the Sales report's payment-mode
+    /// breakdown shows credit as its own line rather than silently inflating cash.</summary>
+    public const string DueMethod = "Due";
     private static readonly HashSet<string> ValidPaymentMethods =
-        new(StringComparer.OrdinalIgnoreCase) { "Cash", "Card", "UPI" };
+        new(StringComparer.OrdinalIgnoreCase) { "Cash", "Card", "UPI", DueMethod };
+    private static bool IsDue(string? method) => string.Equals(method?.Trim(), DueMethod, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The catalog's own spelling of a tender. Methods are matched case-insensitively
+    /// but stored verbatim, so without this a client sending "upi" and one sending "UPI" turn
+    /// into two separate lines in the Sales report's payment-mode breakdown.</summary>
+    private static string CanonicalMethod(string method) =>
+        ValidPaymentMethods.TryGetValue(method.Trim(), out var canonical) ? canonical : method.Trim();
 
     [HttpPatch("{id:int}/pay")]
     public Task<ActionResult<OrderDto>> Pay(int id, PayRequest? req = null) =>
@@ -1532,6 +1546,29 @@ public class OrdersController(
         if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
 
+        // Read the credit legs off the REQUEST, before either branch below starts adding
+        // OrderPayment rows — the rules a Due tender triggers (name + mobile compulsory, and
+        // the two combinations rejected just below) have to be settled before anything is
+        // written, not after.
+        var dueLegs = req?.Splits is { Count: > 0 } requested
+            ? requested.Count(s => IsDue(s.Method))
+            : IsDue(req?.PaymentMethod) ? 1 : 0;
+        if (dueLegs > 1)
+            throw new ApiValidationException("Put the whole credit on a single Due line — one bill can't go on the khata twice.");
+        if (dueLegs > 0)
+        {
+            // Both of these leave the order open, which is the one thing a khata bill can't
+            // be: the uncollected part has already moved onto the customer's ledger, so an
+            // order still showing a balance would have the same rupees owed in two places.
+            if (req!.AllowPartial)
+                throw new ApiValidationException("A bill going on the khata is settled in full here — whatever isn't tendered becomes the customer's Due, so there's nothing left to collect against the order itself.");
+            if (req.KeepOpen)
+                throw new ApiValidationException("A Pay First order can't be put on the khata — collect or close what's already been paid first.");
+        }
+        // How much of this settle is credit rather than money in the till. Set by whichever
+        // branch below runs; drives the khata entry recorded just before the bill closes.
+        decimal dueAmount = 0;
+
         if (req?.Splits is { Count: > 0 } splits)
         {
             foreach (var split in splits)
@@ -1541,6 +1578,7 @@ public class OrdersController(
                 if (split.Amount <= 0)
                     throw new ApiValidationException("Each split amount must be greater than zero.");
             }
+            dueAmount = splits.Where(s => IsDue(s.Method)).Sum(s => s.Amount);
             // Cumulative across every Pay call on this order — a partial payment (AllowPartial)
             // can be topped up by a later call, so what matters is the running total against
             // the bill, not just what this one call brought.
@@ -1558,7 +1596,7 @@ public class OrdersController(
             // consecutive slots and a later top-up continues the sequence — see
             // OrderPayment.LedgerIndex for why the slots have to be unique per order.
             foreach (var split in splits)
-                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = split.Method.Trim(), Amount = split.Amount, LedgerIndex = order.Payments.Count });
+                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = CanonicalMethod(split.Method), Amount = split.Amount, LedgerIndex = order.Payments.Count });
             order.PaymentMethod = order.Payments.Count > 1 ? "Multiple" : order.Payments[0].Method;
 
             // Balance fully covered (allowing for rounding) — settle for real. Otherwise this
@@ -1586,10 +1624,20 @@ public class OrdersController(
             // (AllowPartial) already has its own Payments rows; recording the full total
             // again would make the ledger exceed the bill.
             var owed = order.Total - order.Payments.Sum(p => p.Amount);
+            method = CanonicalMethod(method);
             if (owed > 0)
                 order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = method, Amount = owed, LedgerIndex = order.Payments.Count });
             order.PaymentMethod = order.Payments.Count > 1 ? "Multiple" : method;
+            // Whole-bill udhaar — the entire remaining balance goes on the khata, which is the
+            // common case (a regular who pays nothing at the counter today).
+            if (IsDue(method)) dueAmount = owed;
         }
+
+        // Everything below this point is the bill actually closing, so the khata row goes in
+        // first: a failure here (no name, no mobile) has to abort the settle rather than leave
+        // a bill marked paid-on-credit with no ledger row anyone can collect against.
+        if (dueAmount > 0)
+            await RecordKhataDueAsync(order, dueAmount, req!);
 
         // KeepOpen: the payment above fully covers the balance, but this is a deliberate
         // advance (Pay First) rather than a real settle — leave Paid false/PartiallyPaid true
@@ -1606,6 +1654,79 @@ public class OrdersController(
         await SavePaymentStateAsync(order);
         return OrderDto.From(order);
     });
+
+    /// <summary>
+    /// Opens (or adds to) the customer's khata for the credit leg of a settle — see
+    /// KhataEntry and PayRequest.GuestName/GuestPhone.
+    ///
+    /// Name and mobile are compulsory here and nowhere else in the payment flow, for the
+    /// obvious reason: every other tender ends the cafe's interest in who the guest was, this
+    /// one starts a debt they have to be able to find the person for later. The number is what
+    /// the khata is actually keyed by (it resolves to a CRM Customer through the same
+    /// FindOrCreateCustomerAsync lookup used everywhere else), so "Walk-in Guest" — the shared
+    /// placeholder record an unnamed order lands on — is explicitly rejected rather than
+    /// letting every credit in the cafe pile onto one anonymous ledger.
+    ///
+    /// Both values are stamped back onto the order too, so the bill and its receipt name
+    /// whoever took the credit instead of the walk-in placeholder they were rung up under.
+    /// </summary>
+    private async Task RecordKhataDueAsync(Order order, decimal dueAmount, PayRequest req)
+    {
+        var name = (string.IsNullOrWhiteSpace(req.GuestName) ? order.GuestName : req.GuestName)?.Trim();
+        var rawPhone = string.IsNullOrWhiteSpace(req.GuestPhone) ? order.GuestPhone : req.GuestPhone;
+        var phone = string.IsNullOrWhiteSpace(rawPhone) ? null : new string(rawPhone.Where(char.IsDigit).ToArray());
+
+        if (string.IsNullOrWhiteSpace(name) || string.Equals(name, "Walk-in Guest", StringComparison.OrdinalIgnoreCase))
+            throw new ApiValidationException("Enter the customer's name to put this bill on Due — a khata has to be against someone the cafe can actually come back to.");
+        if (phone is null || phone.Length != 10)
+            throw new ApiValidationException("Enter the customer's 10-digit mobile number to put this bill on Due — it's what their khata is looked up by.");
+
+        order.GuestName = name;
+        order.GuestPhone = phone;
+        var customer = await AttachCustomerAsync(order, name, phone);
+
+        db.KhataEntries.Add(new KhataEntry
+        {
+            // The navigation, not CustomerId — FindOrCreateCustomerAsync may have just created
+            // this record, in which case its real id doesn't exist until SaveChanges.
+            Customer = customer,
+            Type = KhataEntryType.Due,
+            Amount = dueAmount,
+            OrderId = order.Id,
+            BranchId = order.BranchId,
+            RecordedByUserId = CurrentUserId(),
+            RecordedByName = User.Identity?.Name ?? "Cafe Staff",
+        });
+    }
+
+    /// <summary>Points `order` at the CRM customer its name + mobile actually resolve to, and
+    /// moves this visit's spend/points credit off whatever record it was attached to before
+    /// (an order rung up without a number sits on the shared "Walk-in Guest" bucket, which
+    /// RecordVisit already credited at creation). Returns the customer the order now belongs to.
+    ///
+    /// Shared by UpdateGuest and the khata path in Pay — both are the same situation, a real
+    /// number arriving after the order was already rung up.</summary>
+    private async Task<Customer> AttachCustomerAsync(Order order, string name, string phone)
+    {
+        var previous = order.CustomerId is int prevId ? await db.Customers.FirstOrDefaultAsync(c => c.Id == prevId) : null;
+        var customer = await orderBuilder.FindOrCreateCustomerAsync(db, name, phone);
+        if (previous is not null && previous.Id == customer.Id) return customer;
+
+        // Clamped at zero: an order created before CRM linking existed can point at a record
+        // whose counters were never incremented for it.
+        if (previous is not null)
+        {
+            previous.VisitCount = Math.Max(0, previous.VisitCount - 1);
+            previous.TotalSpent = Math.Max(0m, previous.TotalSpent - order.Total);
+            previous.TotalPoints = Math.Max(0, previous.TotalPoints - (int)Math.Floor(order.Total));
+        }
+        customer.VisitCount += 1;
+        customer.TotalSpent += order.Total;
+        customer.TotalPoints += (int)Math.Floor(order.Total);
+        customer.LastVisitAt = DateTime.UtcNow;
+        order.Customer = customer;
+        return customer;
+    }
 
     /// <summary>Marks Paid and closes any linked guest session — the actual "this bill is now
     /// settled" transition, shared by Pay (once a payment fully covers the balance) and Close
@@ -1685,29 +1806,11 @@ public class OrdersController(
         if (trimmedName is not null) order.GuestName = trimmedName;
         if (normalizedPhone is not null) order.GuestPhone = normalizedPhone;
 
+        // Reverses what RecordVisit credited to the old record at creation and re-credits it to
+        // whoever this order actually belongs to — see AttachCustomerAsync, which the khata
+        // path in Pay shares.
         if (normalizedPhone is not null)
-        {
-            var previous = order.CustomerId is int prevId ? await db.Customers.FirstOrDefaultAsync(c => c.Id == prevId) : null;
-            var customer = await orderBuilder.FindOrCreateCustomerAsync(db, order.GuestName ?? "Walk-in Guest", normalizedPhone);
-            if (previous is null || previous.Id != customer.Id)
-            {
-                // Reverse what RecordVisit credited to the old record at creation, then credit
-                // the same visit to the one this order actually belongs to. Clamped at zero:
-                // an order created before CRM linking existed can have a CustomerId pointing at
-                // a record whose counters were never incremented for it.
-                if (previous is not null)
-                {
-                    previous.VisitCount = Math.Max(0, previous.VisitCount - 1);
-                    previous.TotalSpent = Math.Max(0m, previous.TotalSpent - order.Total);
-                    previous.TotalPoints = Math.Max(0, previous.TotalPoints - (int)Math.Floor(order.Total));
-                }
-                customer.VisitCount += 1;
-                customer.TotalSpent += order.Total;
-                customer.TotalPoints += (int)Math.Floor(order.Total);
-                customer.LastVisitAt = DateTime.UtcNow;
-                order.Customer = customer;
-            }
-        }
+            await AttachCustomerAsync(order, order.GuestName ?? "Walk-in Guest", normalizedPhone);
 
         await db.SaveChangesAsync();
         return OrderDto.From(order);

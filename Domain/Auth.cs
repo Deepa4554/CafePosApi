@@ -32,9 +32,16 @@ public class AppUser
     /// AppUser goes by Id, which is already globally unique.
     /// </summary>
     public int TenantId { get; set; }
+    /// <summary>The login identifier — unique across the whole system (see
+    /// CafePosDbContext). For Owner/demo accounts this is a real email address. For
+    /// staff logins (Waiter/Cashier/etc., created via StaffController) it holds their
+    /// 10-digit mobile number instead — staff sign in with a phone number, not an
+    /// email, but everything downstream (uniqueness, lookup, JWT) still keys off this
+    /// one column so login/refresh/OTP plumbing didn't need to change.</summary>
     public required string Email { get; set; }
     /// <summary>Required for /register-cafe (real cafe owners); nullable only because
-    /// the demo/role-switcher accounts created via /register never collect one.</summary>
+    /// the demo/role-switcher accounts created via /register never collect one.
+    /// Unrelated to staff logins' phone-as-Email above — this is just contact info.</summary>
     public string? Phone { get; set; }
     public required string Name { get; set; }
     public required string PasswordHash { get; set; }

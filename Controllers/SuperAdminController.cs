@@ -322,6 +322,92 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
         return NoContent();
     }
 
+    /// <summary>Roster for one tenant — feeds the staff picker for the per-user screen
+    /// access override below. IgnoreQueryFilters() for the same cross-tenant reach as
+    /// everywhere else in this controller.</summary>
+    [HttpGet("tenants/{tenantId:int}/staff")]
+    public async Task<ActionResult<IEnumerable<StaffDto>>> ListTenantStaff(int tenantId)
+    {
+        var tenant = await db.Tenants.FindAsync(tenantId);
+        if (tenant is null) return NotFound();
+
+        var staff = await db.Staff.IgnoreQueryFilters()
+            .Where(s => s.TenantId == tenantId)
+            .OrderBy(s => s.Name)
+            .ToListAsync();
+        return staff.Select(s => StaffDto.From(s, includeCompensation: false)).ToList();
+    }
+
+    /// <summary>Same shape as StaffController.GetScreenAccess, just reachable cross-tenant
+    /// by tenantId+staffId instead of relying on the caller's own ambient tenant (a platform
+    /// admin's JWT carries none it should be scoped to).</summary>
+    [HttpGet("tenants/{tenantId:int}/staff/{staffId:int}/screen-access")]
+    public async Task<ActionResult<StaffScreenAccessDto>> GetTenantStaffScreenAccess(int tenantId, int staffId)
+    {
+        var staff = await db.Staff.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.Id == staffId && s.TenantId == tenantId);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        var user = await db.Users.IgnoreQueryFilters().FirstOrDefaultAsync(u => u.Id == staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        return StaffScreenAccessDto.From(staff.Id, user);
+    }
+
+    /// <summary>Same validation as StaffController.UpdateScreenAccess (unknown-key/
+    /// above-plan/cascade-normalize), but checked against the TARGET tenant's plan — a
+    /// platform admin has no plan of their own to fall back to — and reachable regardless
+    /// of the admin's role, which the Owner/Manager-gated staff endpoint can't do.</summary>
+    [HttpPatch("tenants/{tenantId:int}/staff/{staffId:int}/screen-access")]
+    public async Task<ActionResult<StaffScreenAccessDto>> UpdateTenantStaffScreenAccess(int tenantId, int staffId, UpdateStaffScreenAccessRequest req)
+    {
+        var staff = await db.Staff.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.Id == staffId && s.TenantId == tenantId);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+
+        var user = await db.Users.IgnoreQueryFilters().FirstOrDefaultAsync(u => u.Id == staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access yet.");
+        if (user.Role == AppRole.Owner) throw new ApiValidationException("An Owner login always has full access and can't be restricted.");
+
+        if (req.AccessMode == StaffAccessMode.Custom)
+        {
+            var sub = await db.Subscriptions.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == tenantId);
+            var tenantPlan = (sub?.Plan ?? SubscriptionTier.FreeTrial).ToCategory();
+            var requested = (req.AllowedScreens ?? []).Distinct().ToList();
+
+            var unknown = requested.Where(k => !ScreenCatalog.IsValidKey(k)).ToList();
+            if (unknown.Count > 0) throw new ApiValidationException($"Unknown screen(s): {string.Join(", ", unknown)}.");
+
+            var abovePlan = requested.Where(k => !ScreenCatalog.IsAssignableAt(k, tenantPlan)).ToList();
+            if (abovePlan.Count > 0) throw new ApiValidationException($"These screens need a higher plan than this cafe currently has: {string.Join(", ", abovePlan)}.");
+
+            user.AllowedScreens = ScreenCatalog.Normalize(requested);
+        }
+        else
+        {
+            user.AllowedScreens = null;
+        }
+        user.AccessMode = req.AccessMode;
+
+        // Tagged to the AFFECTED tenant, same reasoning as ChangeTenantPlan above.
+        db.AuditLog.Add(new AuditLogEntry
+        {
+            TenantId = tenantId,
+            Action = AuditAction.PermissionChange,
+            Resource = AuditResource.Staff,
+            ResourceId = staff.Id.ToString(),
+            Details = req.AccessMode == StaffAccessMode.Custom
+                ? $"[Platform Admin] Set custom screen access for {staff.Name} ({(user.AllowedScreens ?? []).Count} screen(s))."
+                : $"[Platform Admin] Reset {staff.Name}'s screen access to Automatic (role default).",
+            Severity = AuditSeverity.High,
+        });
+
+        await db.SaveChangesAsync();
+        _ = realtime.NotifyAccessChangedAsync(user.TenantId, user.Id);
+
+        return StaffScreenAccessDto.From(staff.Id, user);
+    }
+
     /// <summary>Every failed request across every tenant — see ApiFailureLog's doc
     /// comment. Filterable so a spike of routine 401s (e.g. everyone re-logging-in
     /// after a session-model change) doesn't bury a real 500.</summary>

@@ -79,7 +79,9 @@ public record BillChargesRequest(
 /// ApplyBillLoyalty — capped at both the customer's available balance and what's left owed.</summary>
 public record BillLoyaltyRequest(int Points);
 
-/// <summary>One tender in a split payment — e.g. part Cash, part Card.</summary>
+/// <summary>One tender in a split payment — e.g. part Cash, part Card. "Due" is a tender
+/// here too, but a special one: it settles the bill without any money changing hands and
+/// parks the amount on the customer's khata instead (see OrdersController.Pay).</summary>
 public record PaymentSplitRequest(string Method, decimal Amount);
 
 /// <summary>How the settled bill was paid — Cash / Card / UPI / Multiple. Optional; the
@@ -94,8 +96,23 @@ public record PaymentSplitRequest(string Method, decimal Amount);
 /// fully covers (or exceeds) the balance, but the order should NOT close — e.g. a Pay First
 /// order that's still expected to have more items added. The order stays Paid=false/
 /// PartiallyPaid=true even at 100% covered; OrdersController.Close finalizes it later once
-/// nothing more will be added.</summary>
-public record PayRequest(string? PaymentMethod, List<PaymentSplitRequest>? Splits = null, bool AllowPartial = false, bool KeepOpen = false);
+/// nothing more will be added.
+///
+/// GuestName/GuestPhone are only read when a "Due" (udhaar) tender is in play, where they're
+/// compulsory: the credit has to land on an identifiable customer's khata, and the number is
+/// what that khata is looked up by. Both are stamped onto the order as a side effect, so a
+/// bill rung up as a walk-in ends up naming whoever actually took the credit. Leave them null
+/// when the order already carries a real name and number — they're an override for the ones
+/// the cashier types into the payment picker at settle time, not a repeat of what's on file.
+/// Due is deliberately incompatible with AllowPartial and KeepOpen (both leave the order open,
+/// which would put the same rupees on the order AND on the khata).</summary>
+public record PayRequest(
+    string? PaymentMethod,
+    List<PaymentSplitRequest>? Splits = null,
+    bool AllowPartial = false,
+    bool KeepOpen = false,
+    string? GuestName = null,
+    string? GuestPhone = null);
 
 /// <summary>
 /// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData
@@ -204,9 +221,16 @@ public record OrderDto(
     decimal TipAmount,
     decimal RoundOffAmount,
     // Sum of every OrderPayment recorded so far — non-zero before Paid flips true only when
-    // a partial payment has been collected (see OrdersController.Pay).
+    // a partial payment has been collected (see OrdersController.Pay). Deliberately counts the
+    // "Due" tender too, so BalanceDue below stays 0 on a settled credit bill: from the ORDER's
+    // point of view that bill is closed and there is nothing further to collect against it.
+    // What's still owed lives on the customer's khata instead — see DueAmount.
     decimal AmountPaid,
     decimal BalanceDue,
+    // How much of AmountPaid was credit rather than money in the till (the "Due" tender). Zero
+    // on an ordinary bill. Non-zero means this much moved onto the customer's khatabook at
+    // settle time and is collected there, not here.
+    decimal DueAmount,
     // True once at least one tender has been collected but the bill isn't fully settled yet.
     // Never true at the same time as Paid.
     bool PartiallyPaid,
@@ -269,6 +293,7 @@ public record OrderDto(
         o.RoundOffAmount,
         amountPaid,
         Math.Max(0, o.Total - amountPaid),
+        o.Payments.Where(p => p.Method == "Due").Sum(p => p.Amount),
         !o.Paid && amountPaid > 0,
         o.Customer?.AvailablePoints);
     }

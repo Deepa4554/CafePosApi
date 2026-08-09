@@ -20,6 +20,8 @@ namespace CafePOS.Api.Controllers;
 [Route("api/staff")]
 public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswordHasher<AppUser> hasher, IImageStorageService imageStorage, IAuditService audit, IRealtimeNotifier realtime) : ControllerBase
 {
+    private static readonly System.Text.RegularExpressions.Regex MobileNumberRegex = new(@"^\d{10}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     [HttpGet]
     public async Task<IEnumerable<StaffDto>> List([FromQuery] int? branchId)
     {
@@ -71,26 +73,28 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         if (string.IsNullOrWhiteSpace(req.Role)) throw new ApiValidationException("Role is required.");
 
         int? userId = null;
-        var wantsLogin = req.Password is not null || req.LoginRole is not null || !string.IsNullOrWhiteSpace(req.Email);
+        var wantsLogin = req.Password is not null || req.LoginRole is not null || !string.IsNullOrWhiteSpace(req.Phone);
         if (wantsLogin)
         {
-            if (string.IsNullOrWhiteSpace(req.Email) || !req.Email.Contains('@'))
-                throw new ApiValidationException("A valid email is required to give this staff member app access.");
+            if (string.IsNullOrWhiteSpace(req.Phone) || !MobileNumberRegex.IsMatch(req.Phone.Trim()))
+                throw new ApiValidationException("A valid 10-digit mobile number is required to give this staff member app access.");
             if (string.IsNullOrWhiteSpace(req.Password) || req.Password.Length < 6)
                 throw new ApiValidationException("Password must be at least 6 characters.");
             if (req.LoginRole is null)
                 throw new ApiValidationException("A role is required to give this staff member app access.");
-            if (req.LoginRole == AppRole.Owner)
-                throw new ApiValidationException("Owner accounts are created only via cafe signup, not here.");
+            if (req.LoginRole == AppRole.Owner && !User.IsInRole(nameof(AppRole.Owner)))
+                throw new ApiValidationException("Only an Owner can create another Owner account.");
 
-            var normalizedEmail = req.Email.Trim().ToLowerInvariant();
-            if (await db.Users.AnyAsync(u => u.Email == normalizedEmail))
-                throw new ApiConflictException("An account with this email already exists.");
+            var normalizedPhone = req.Phone.Trim();
+            if (await db.Users.AnyAsync(u => u.Email == normalizedPhone))
+                throw new ApiConflictException("An account with this mobile number already exists.");
 
             var user = new AppUser
             {
                 TenantId = tenant.TenantIdOrDefault,
-                Email = normalizedEmail,
+                // Staff sign in with their mobile number, stored in the Email column —
+                // see AppUser.Email's doc comment for why.
+                Email = normalizedPhone,
                 Name = req.Name.Trim(),
                 Role = req.LoginRole.Value,
                 PasswordHash = "",
@@ -242,21 +246,23 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         if (staff is null) return NotFound();
         if (staff.UserId is not null) throw new ApiConflictException("This staff member already has app access.");
 
-        if (string.IsNullOrWhiteSpace(req.Email) || !req.Email.Contains('@'))
-            throw new ApiValidationException("A valid email is required to give this staff member app access.");
+        if (string.IsNullOrWhiteSpace(req.Phone) || !MobileNumberRegex.IsMatch(req.Phone.Trim()))
+            throw new ApiValidationException("A valid 10-digit mobile number is required to give this staff member app access.");
         if (string.IsNullOrWhiteSpace(req.Password) || req.Password.Length < 6)
             throw new ApiValidationException("Password must be at least 6 characters.");
-        if (req.LoginRole == AppRole.Owner)
-            throw new ApiValidationException("Owner accounts are created only via cafe signup, not here.");
+        if (req.LoginRole == AppRole.Owner && !User.IsInRole(nameof(AppRole.Owner)))
+            throw new ApiValidationException("Only an Owner can create another Owner account.");
 
-        var normalizedEmail = req.Email.Trim().ToLowerInvariant();
-        if (await db.Users.AnyAsync(u => u.Email == normalizedEmail))
-            throw new ApiConflictException("An account with this email already exists.");
+        var normalizedPhone = req.Phone.Trim();
+        if (await db.Users.AnyAsync(u => u.Email == normalizedPhone))
+            throw new ApiConflictException("An account with this mobile number already exists.");
 
         var user = new AppUser
         {
             TenantId = tenant.TenantIdOrDefault,
-            Email = normalizedEmail,
+            // Staff sign in with their mobile number, stored in the Email column —
+            // see AppUser.Email's doc comment for why.
+            Email = normalizedPhone,
             Name = staff.Name,
             Role = req.LoginRole,
             PasswordHash = "",
@@ -266,7 +272,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         await db.SaveChangesAsync(); // assigns user.Id before StaffMember.UserId references it
 
         staff.UserId = user.Id;
-        staff.Email = normalizedEmail;
+        staff.Phone = normalizedPhone;
         await db.SaveChangesAsync();
 
         var actor = await CurrentUserAsync();
