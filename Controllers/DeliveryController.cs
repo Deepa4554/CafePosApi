@@ -291,6 +291,14 @@ public class DeliveryController(
         if (string.IsNullOrWhiteSpace(s.BorzoAuthToken)) return "No Borzo token saved yet.";
         if (s.PickupLatitude is null || s.PickupLongitude is null)
             return "The cafe’s pickup location isn’t pinned yet — set it in Integrations → Delivery Partner.";
+        // Borzo requires an address string and a contact phone on every point, not just
+        // coordinates (its own calculate-order returns "address: required" / "phone: required"
+        // otherwise) — the pickup ones come from cafe settings and are easy to leave blank after
+        // only pinning the map, which is exactly what makes a quote fail with no obvious reason.
+        if (string.IsNullOrWhiteSpace(s.PickupAddress) && string.IsNullOrWhiteSpace(s.Address))
+            return "The cafe’s pickup address isn’t set — add it in Integrations → Delivery Partner.";
+        if (string.IsNullOrWhiteSpace(s.Phone))
+            return "The cafe’s own phone number isn’t set — add it in Cafe Profile so the rider has a pickup contact.";
         if (order.OrderType != "DELIVERY") return "Only delivery orders can be sent to a rider.";
         if (order.DeliveryLatitude is null || order.DeliveryLongitude is null)
             return "This order has no delivery location — the customer didn’t share it when ordering.";
@@ -336,7 +344,11 @@ public class DeliveryController(
         s.BorzoEnabled
             && !string.IsNullOrWhiteSpace(s.BorzoAuthToken)
             && s.PickupLatitude is not null
-            && s.PickupLongitude is not null,
+            && s.PickupLongitude is not null
+            // Same required-on-every-point fields Borzo enforces (see Blocker) — a cafe that
+            // pinned the map but left its address or phone blank is not actually book-ready.
+            && (!string.IsNullOrWhiteSpace(s.PickupAddress) || !string.IsNullOrWhiteSpace(s.Address))
+            && !string.IsNullOrWhiteSpace(s.Phone),
         string.IsNullOrWhiteSpace(s.BorzoCallbackToken)
             ? null
             : $"{callbackBaseUrl}/api/delivery/callback?token={Uri.EscapeDataString(s.BorzoCallbackToken)}");

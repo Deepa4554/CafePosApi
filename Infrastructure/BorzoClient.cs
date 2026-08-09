@@ -152,10 +152,59 @@ public class BorzoClient(HttpClient http, ILogger<BorzoClient> logger)
             return BorzoResult.Failure("Couldn’t reach the delivery partner. Check the internet connection and try again.");
         }
 
-        if (!body.IsSuccessful)
-            return BorzoResult.Failure(DescribeErrors(body.Errors) ?? "The delivery partner rejected this order.");
+        // The exact fields Borzo objected to (pickup vs dropoff, address vs phone vs coordinates)
+        // live in parameter_warnings/parameter_errors, not the generic code — logged in full so a
+        // "couldn't use the details" report can always be traced to the actual missing field.
+        var detail = FlattenParameters(body.ParameterErrors) ?? FlattenParameters(body.ParameterWarnings);
+        if (detail is not null)
+            logger.LogWarning("Borzo {Method} parameter issues: {Detail}", method, detail);
 
-        return BorzoResult.Success(body.Order, DescribeErrors(body.Warnings));
+        if (!body.IsSuccessful)
+            return BorzoResult.Failure(WithDetail(DescribeErrors(body.Errors) ?? "The delivery partner rejected this order.", detail));
+
+        return BorzoResult.Success(body.Order, WithDetail(DescribeErrors(body.Warnings), detail));
+    }
+
+    private static string? WithDetail(string? message, string? detail)
+    {
+        if (detail is null) return message;
+        return message is null ? $"Missing/invalid: {detail}" : $"{message} ({detail})";
+    }
+
+    /// <summary>Flattens Borzo's nested parameter_warnings/parameter_errors into a compact
+    /// "points[0].contact_person.phone: required" list a person can read, walking whatever tree
+    /// shape came back rather than assuming one — the structure differs by which field failed.</summary>
+    private static string? FlattenParameters(JsonElement? node)
+    {
+        if (node is not JsonElement el || el.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return null;
+        var parts = new List<string>();
+        Walk(el, "", parts);
+        return parts.Count == 0 ? null : string.Join("; ", parts);
+
+        static void Walk(JsonElement e, string path, List<string> acc)
+        {
+            switch (e.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var p in e.EnumerateObject())
+                        Walk(p.Value, path.Length == 0 ? p.Name : $"{path}.{p.Name}", acc);
+                    break;
+                case JsonValueKind.Array:
+                    var i = 0;
+                    foreach (var item in e.EnumerateArray())
+                    {
+                        // A leaf array of strings ("required") is the error list itself, not more nesting.
+                        if (item.ValueKind is JsonValueKind.String) acc.Add($"{path}: {item.GetString()}");
+                        else Walk(item, $"{path}[{i}]", acc);
+                        i++;
+                    }
+                    break;
+                case JsonValueKind.String:
+                    acc.Add($"{path}: {e.GetString()}");
+                    break;
+            }
+        }
     }
 
     /// <summary>Turns Borzo's error codes into something a cashier can act on. Anything not
@@ -233,6 +282,11 @@ public record BorzoResponse
     [JsonPropertyName("order")] public BorzoOrder? Order { get; init; }
     [JsonPropertyName("errors")] public List<string>? Errors { get; init; }
     [JsonPropertyName("warnings")] public List<string>? Warnings { get; init; }
+    /// <summary>Per-field detail behind an invalid_parameters warning/error — a nested,
+    /// heterogeneous shape (points[].address, points[].contact_person.phone, …) that isn't worth
+    /// a strongly-typed model, so it's kept raw and flattened to a readable string on demand.</summary>
+    [JsonPropertyName("parameter_warnings")] public JsonElement? ParameterWarnings { get; init; }
+    [JsonPropertyName("parameter_errors")] public JsonElement? ParameterErrors { get; init; }
 }
 
 public record BorzoOrder
