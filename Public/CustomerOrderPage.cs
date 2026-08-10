@@ -1616,7 +1616,11 @@ public static class CustomerOrderPage
       fetchJson(apiBase + '/best-sellers').catch(function () { return []; }),
     ]).then(function (results) {
       state.table = results[0];
-      state.menu = results[1];
+      // MRP items (see MenuItem.IsOpenPrice) are priced by the biller at the till, so a
+      // customer has no rate to order at — drop them here rather than showing a card whose
+      // Add can only ever fail (the guest cart path refuses them too). The POS reads this
+      // same endpoint and must still see them, which is why the filter lives here.
+      state.menu = results[1].filter(function (m) { return !m.isOpenPrice; });
       state.taxRatePct = results[2].taxRatePct;
       state.bestSellers = results[3];
 

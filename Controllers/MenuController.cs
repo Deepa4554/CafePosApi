@@ -148,6 +148,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             item.ItemType = itemType;
         if (!string.IsNullOrWhiteSpace(req.VegNonVegType) && Enum.TryParse<VegNonVegType>(req.VegNonVegType, ignoreCase: true, out var vegType))
             item.VegNonVegType = vegType;
+        item.IsOpenPrice = req.IsOpenPrice ?? false;
         item.TaxGroupId = await ValidatedTaxGroupIdAsync(req.TaxGroupId);
         db.MenuItems.Add(item);
         await db.SaveChangesAsync();
@@ -327,6 +328,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             item.ItemType = itemType;
         if (!string.IsNullOrWhiteSpace(req.VegNonVegType) && Enum.TryParse<VegNonVegType>(req.VegNonVegType, ignoreCase: true, out var vegType))
             item.VegNonVegType = vegType;
+        if (req.IsOpenPrice is bool isOpenPrice) item.IsOpenPrice = isOpenPrice;
         // 0 is the "clear it" sentinel — a null TaxGroupId on a PATCH means "leave unchanged"
         // like every other field here, so it can't also mean "back to the tenant default".
         if (req.TaxGroupId is not null)

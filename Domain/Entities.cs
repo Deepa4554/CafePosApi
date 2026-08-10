@@ -58,6 +58,21 @@ public class MenuItem : ITenantScoped
     [NotMapped]
     public string StationName => Station?.Name ?? "Kitchen";
     public ItemType ItemType { get; set; } = ItemType.Recipe;
+    /// <summary>MRP item — the biller types this line's rate at billing time instead of it
+    /// coming from <see cref="Price"/>. For packaged goods (soft drinks, bottled water,
+    /// chips) whose rate is whatever is printed on that particular pack, which changes
+    /// between batches and suppliers.
+    ///
+    /// Two consequences, both in OrderBuildingService: the typed rate REPLACES Price (and any
+    /// Variant price) for that line, and the line is billed tax-INCLUSIVE — an MRP is the
+    /// final price a customer may legally be charged, so GST is back-calculated out of it
+    /// rather than added on top (see OrderItem.PriceIncludesTax).
+    ///
+    /// Price is still kept as the last-known rate, so the item has something to show in the
+    /// menu grid. A guest can't type a rate, so these items are filtered out of the QR menu
+    /// (CustomerOrderPage — MenuController.List can't do it, the POS reads the same endpoint)
+    /// and the guest cart path refuses them outright.</summary>
+    public bool IsOpenPrice { get; set; }
     public VegNonVegType? VegNonVegType { get; set; } // null if not applicable
     /// <summary>Which tax slab this item is billed at. Null falls back to the tenant's
     /// default TaxGroup, then CafeSettings.TaxRatePct — see <see cref="TaxGroup"/>.</summary>
@@ -404,6 +419,16 @@ public class OrderItem : ITenantScoped
     /// before tax groups existed, and on any line whose item had no group and no default —
     /// RecomputeTotals bills those at CafeSettings.TaxRatePct, exactly as it always did.</summary>
     public decimal? TaxRatePct { get; set; }
+    /// <summary>True when <see cref="Price"/> ALREADY contains this line's tax, so RecomputeTotals
+    /// back-calculates the tax out of it (taxable = price / (1 + rate)) instead of adding it on
+    /// top, and the line contributes nothing extra to Order.Total.
+    ///
+    /// Snapshotted at order time from MenuItem.IsOpenPrice — an MRP is the maximum a customer
+    /// may be charged, so billing ₹40 + 5% would put the bill above it. The tax is still
+    /// reported, just carved out of the ₹40 rather than added to it, which is what the GST
+    /// breakdown on the bill has to show. False on every ordinary line (and on every line
+    /// placed before this column existed), which is exactly the previous arithmetic.</summary>
+    public bool PriceIncludesTax { get; set; }
     /// <summary>This line's share of the order's taxable value — gross (Price * Qty) minus its
     /// proportional slice of every order-level discount. Stored rather than derived because the
     /// bill has to show taxable value per rate, and the discount split can't be recovered from

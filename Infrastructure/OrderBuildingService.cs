@@ -36,12 +36,19 @@ public interface IOrderBuildingService
     /// .Include(m => m.Station) for this to resolve to anything but the "Kitchen" fallback.
     /// Also resolves the line's tax slab (item's TaxGroup → tenant default group → null,
     /// meaning "bill at CafeSettings.TaxRatePct") for RecomputeTotals to snapshot.
-    /// Throws ApiValidationException on an unknown/unavailable variant or an option that
-    /// belongs to a different item. Shared by BuildOrderAsync, AddOrUpdateCartItemAsync, and
-    /// OrdersController.AddItem so the three order-item-creation paths can never compute this
-    /// differently.</summary>
-    Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct)> ResolveLinePricingAsync(
-        CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId);
+    ///
+    /// <paramref name="openPrice"/> is the rate the biller typed for an MRP item (see
+    /// MenuItem.IsOpenPrice) — required for such an item, and ignored for every other one so
+    /// pricing stays server-authoritative. The returned PriceIncludesTax rides along with it:
+    /// an MRP is a ceiling, so that line's tax is carved out of the rate rather than added on.
+    ///
+    /// Throws ApiValidationException on an unknown/unavailable variant, an option that
+    /// belongs to a different item, or a missing/non-positive rate on an MRP item. Shared by
+    /// BuildOrderAsync, AddOrUpdateCartItemAsync, and OrdersController.AddItem so the three
+    /// order-item-creation paths can never compute this differently.</summary>
+    Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax)> ResolveLinePricingAsync(
+        CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
+        decimal? openPrice = null);
 
     /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
     /// batch's own kitchen-ticket row, notifies the kitchen about just those items, and
@@ -154,7 +161,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (line.Qty <= 0)
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
-            var (linePrice, variantName, selections, stationName, lineTaxRatePct) = await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId);
+            var (linePrice, variantName, selections, stationName, lineTaxRatePct, linePriceIncludesTax) =
+                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice);
             var orderItem = new OrderItem
             {
                 MenuItemId = menuItem.Id,
@@ -168,6 +176,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 StationName = stationName,
                 VegNonVegType = menuItem.VegNonVegType,
                 TaxRatePct = lineTaxRatePct,
+                PriceIncludesTax = linePriceIncludesTax,
             };
             // Anonymous guest requests have no JWT, so StampTenantIds would fall back to the
             // default tenant — and the ambient query filter would then hide these lines from
@@ -365,13 +374,21 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         if (!menuItem.Available)
             throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
 
+        // MRP items are priced by the biller at the till (see MenuItem.IsOpenPrice) and a guest
+        // has no way to type a rate, so they can't be self-ordered. MenuController.List already
+        // keeps them off the QR menu; this is the matching guard on the write path, phrased for
+        // a customer rather than reusing ResolveLinePricingAsync's "enter its rate" message.
+        if (menuItem.IsOpenPrice)
+            throw new ApiValidationException($"{menuItem.Name} has to be added by a staff member — please ask them for it.");
+
         if (existing is not null)
         {
             existing.Qty = qty;
         }
         else
         {
-            var (linePrice, variantName, selections, stationName, taxRatePct) = await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId);
+            var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax) =
+                await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId);
             existing = new OrderItem
             {
                 OrderId = order.Id,
@@ -386,6 +403,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 StationName = stationName,
                 VegNonVegType = menuItem.VegNonVegType,
                 TaxRatePct = taxRatePct,
+                PriceIncludesTax = priceIncludesTax,
                 FireBatch = 0,
                 // Guest cart lines are created without a JWT — stamp the tenant explicitly or
                 // StampTenantIds defaults them to tenant 1, hiding them from the cafe's staff.
@@ -403,8 +421,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         return existing;
     }
 
-    public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct)> ResolveLinePricingAsync(
-        CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId)
+    public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax)> ResolveLinePricingAsync(
+        CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
+        decimal? openPrice = null)
     {
         var price = menuItem.Price;
         string? variantName = null;
@@ -417,6 +436,24 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 throw new ApiValidationException($"'{variant.Name}' is currently unavailable.");
             price = variant.Price;
             variantName = variant.Name;
+        }
+
+        // MRP item (see MenuItem.IsOpenPrice): the rate the biller typed replaces whatever the
+        // catalog holds — base price OR the selected variant's — because the number printed on
+        // this particular pack is the only rate actually valid for it. The variant is still
+        // resolved above, so "Coke 500ml" keeps its name/availability check and only the money
+        // comes from the till. Add-on deltas below still apply on top of the typed rate.
+        //
+        // openPrice on an ordinary item is IGNORED rather than honoured: pricing stays
+        // server-authoritative everywhere the cafe didn't explicitly open it up, so a crafted
+        // request can't re-price the menu.
+        if (menuItem.IsOpenPrice)
+        {
+            if (openPrice is not decimal typedRate)
+                throw new ApiValidationException($"{menuItem.Name} is billed at MRP — enter its rate to add it to the order.");
+            if (typedRate <= 0)
+                throw new ApiValidationException($"Enter a rate greater than zero for {menuItem.Name}.");
+            price = decimal.Round(typedRate, 2);
         }
 
         // Every modifier group on this item, needed for three separate checks below:
@@ -494,7 +531,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var taxRatePct = taxGroups.FirstOrDefault(t => t.Id == menuItem.TaxGroupId)?.RatePct
             ?? taxGroups.FirstOrDefault(t => t.IsDefault)?.RatePct;
 
-        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen", taxRatePct);
+        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen", taxRatePct, menuItem.IsOpenPrice);
     }
 
     public async Task<bool> FireUnfiredItemsAsync(CafePosDbContext db, Order order, int? explicitTenantId)
@@ -608,7 +645,12 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     /// Order-level discounts (item, bill, coupon, gift card) are split across lines in
     /// proportion to each line's gross, because a discount on a mixed-slab bill has to
     /// reduce the taxable value of each slab — putting it all against one slab would
-    /// understate or overstate the tax due on the other.</summary>
+    /// understate or overstate the tax due on the other.
+    ///
+    /// A line flagged OrderItem.PriceIncludesTax (an MRP item) has its tax carved OUT of its
+    /// price instead of added on top, so its total lands exactly on the printed rate. This
+    /// method therefore also restates o.Subtotal — callers set it to the plain gross first,
+    /// which is still the right answer whenever no such line is present.</summary>
     public static void RecomputeTotals(Order o, decimal fallbackTaxRatePct)
     {
         // Per-line tax means this now reads o.Items, where the old flat-rate version only
@@ -626,6 +668,12 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var discount = Math.Min(Math.Max(0, totalDiscount), gross);
 
         decimal tax = 0;
+        // Tax already sitting INSIDE tax-inclusive lines' prices (MRP items — see
+        // OrderItem.PriceIncludesTax). It's real tax, so it counts towards o.Tax and the bill's
+        // GST breakdown, but it must not be charged a second time on top: both o.Subtotal and
+        // o.Total back it out below, which lands an MRP line's total exactly on its printed
+        // rate. Stays 0 on an order with no such line, so ordinary bills are untouched.
+        decimal embeddedTax = 0;
         // The last line absorbs the rounding remainder so the per-line taxable amounts
         // always add back up to the order's taxable total, however the shares divide.
         var allocated = 0m;
@@ -638,13 +686,32 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 : (gross > 0 ? Math.Round(discount * (lineGross / gross), 2) : 0);
             allocated += lineDiscount;
 
-            line.TaxableAmount = Math.Max(0, lineGross - lineDiscount);
-            line.TaxAmount = Math.Round(line.TaxableAmount * (line.TaxRatePct ?? fallbackTaxRatePct) / 100, 2);
+            var net = Math.Max(0, lineGross - lineDiscount);
+            var ratePct = line.TaxRatePct ?? fallbackTaxRatePct;
+            if (line.PriceIncludesTax)
+            {
+                // Carve the tax out of the rate rather than adding it on: taxable = net / (1 + rate).
+                // Deriving TaxAmount by subtraction (not a second Round) keeps taxable + tax
+                // exactly equal to net, so the line can't drift a paisa off the printed MRP.
+                line.TaxableAmount = Math.Round(net / (1 + ratePct / 100), 2);
+                line.TaxAmount = net - line.TaxableAmount;
+                embeddedTax += line.TaxAmount;
+            }
+            else
+            {
+                line.TaxableAmount = net;
+                line.TaxAmount = Math.Round(net * ratePct / 100, 2);
+            }
             tax += line.TaxAmount;
         }
 
         o.Tax = tax;
-        o.Total = Math.Max(0, gross - discount) + tax
+        // Restated (callers set it to the plain gross before calling) so the printed
+        // Subtotal + Tax = Total still holds once an inclusive line's tax has been carved out
+        // of its price. With no inclusive line embeddedTax is 0 and this is the gross, exactly
+        // as before.
+        o.Subtotal = gross - embeddedTax;
+        o.Total = Math.Max(0, gross - discount) - embeddedTax + tax
             + o.ServiceChargeAmount + o.PackingChargeAmount + o.DeliveryChargeAmount + o.TipAmount + o.RoundOffAmount;
     }
 

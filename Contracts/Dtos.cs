@@ -6,8 +6,13 @@ namespace CafePOS.Api.Contracts;
 
 /// <summary>VariantId picks a Half/Full/... price instead of the item's base MenuItem.Price;
 /// ModifierOptionIds are the selected toppings/add-ons, each adding its own price delta.
-/// Both are validated (and priced) server-side — see OrderBuildingService.ResolveLinePricingAsync.</summary>
-public record CreateOrderItemDto(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null);
+/// Both are validated (and priced) server-side — see OrderBuildingService.ResolveLinePricingAsync.
+///
+/// OpenPrice is the rate the biller typed for an MRP item (MenuItem.IsOpenPrice) — required
+/// for one, ignored for everything else, so an ordinary item can never be re-priced from the
+/// wire.</summary>
+public record CreateOrderItemDto(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null,
+    decimal? OpenPrice = null);
 
 public record CreateOrderRequest(
     string OrderType, // DINE_IN / TAKEAWAY / DELIVERY
@@ -44,7 +49,9 @@ public record ShiftTableRequest(string NewTableCode);
 
 // ---------- Order lifecycle (add item / fire / billing-time discounts / payment) ----------
 
-public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null);
+/// <summary>OpenPrice carries the biller's typed rate for an MRP item — see CreateOrderItemDto.</summary>
+public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null,
+    decimal? OpenPrice = null);
 
 /// <summary>Corrects an existing line's quantity — <paramref name="Qty"/> is the line's FINAL
 /// quantity, not a delta. Must be ≥ 1; removing a line entirely is still DELETE .../items/{itemId},
@@ -355,7 +362,9 @@ public record CreateMenuItemRequest(
     int? StationId = null,
     string? ItemType = null,
     string? VegNonVegType = null,
-    int? TaxGroupId = null);
+    int? TaxGroupId = null,
+    /// <summary>MRP item — the biller types the rate at billing time. See MenuItem.IsOpenPrice.</summary>
+    bool? IsOpenPrice = null);
 
 /// <summary>ImageDataUri is a "data:image/...;base64,..." string — same shape the client's
 /// own image picker already produces for every other photo upload in the app.</summary>
@@ -381,7 +390,9 @@ public record UpdateMenuItemRequest(
     string? VegNonVegType = null,
     /// <summary>Which tax slab to bill this item at. Pass 0 to clear it back to the
     /// tenant default (null on a PATCH means "leave unchanged", so it can't clear).</summary>
-    int? TaxGroupId = null);
+    int? TaxGroupId = null,
+    /// <summary>MRP item — the biller types the rate at billing time. See MenuItem.IsOpenPrice.</summary>
+    bool? IsOpenPrice = null);
 
 public record BulkImportResultDto(int CreatedCount, int SkippedCount);
 
