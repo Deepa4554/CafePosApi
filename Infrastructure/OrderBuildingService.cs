@@ -58,6 +58,13 @@ public interface IOrderBuildingService
     /// but does not save — the caller saves.</summary>
     Task<bool> FireUnfiredItemsAsync(CafePosDbContext db, Order order, int? explicitTenantId);
 
+    /// <summary>Re-prices the tenant's active Offers against the order's current cart and stamps
+    /// the result onto each line (OrderItem.OfferDiscountAmount) plus the order
+    /// (OfferDiscountAmount / AppliedOfferTitle). Call it before RecomputeTotals at every point
+    /// the cart changes — offers are a pure function of the lines, so anywhere else re-running it
+    /// is a no-op, but a cart edit that skips it leaves a stale discount. Does not save.</summary>
+    Task ApplyOffersAsync(CafePosDbContext db, Order order, int? explicitTenantId);
+
     /// <summary>Staff-Confirm Mode: flags the order as awaiting a staff member's OK instead of
     /// firing straight to the kitchen (see Order.PendingStaffConfirmation) and notifies the
     /// floor (not kitchen — see NotificationCategory.OrderPendingConfirmation). Items stay
@@ -265,6 +272,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             PackingChargeAmount = defaultPackingCharge,
             DeliveryChargeAmount = defaultDeliveryCharge,
         };
+        await ApplyOffersAsync(db, order, explicitTenantId);
         RecomputeTotals(order, taxRatePct);
         if (explicitTenantId is int tid2) order.TenantId = tid2;
         db.Orders.Add(order);
@@ -367,6 +375,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (order.PendingStaffConfirmation && !order.Items.Any(i => i.FireBatch == 0))
                 order.PendingStaffConfirmation = false;
             order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+            await ApplyOffersAsync(db, order, explicitTenantId);
             RecomputeTotals(order, await GetTaxRatePctAsync(db, explicitTenantId));
             return null;
         }
@@ -413,6 +422,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
 
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        await ApplyOffersAsync(db, order, explicitTenantId);
         RecomputeTotals(order, await GetTaxRatePctAsync(db, explicitTenantId));
 
         // No inventory deduction here — this line stays FireBatch == 0 (unfired) until the
@@ -651,6 +661,51 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     /// price instead of added on top, so its total lands exactly on the printed rate. This
     /// method therefore also restates o.Subtotal — callers set it to the plain gross first,
     /// which is still the right answer whenever no such line is present.</summary>
+    /// <inheritdoc cref="IOrderBuildingService.ApplyOffersAsync"/>
+    public async Task ApplyOffersAsync(CafePosDbContext db, Order order, int? explicitTenantId)
+    {
+        var active = order.Items.Where(i => !i.Voided).ToList();
+
+        // Clear first, so an offer that stopped qualifying (a BOGO whose items were removed, a
+        // happy hour that ended before a re-price) leaves nothing stale behind.
+        foreach (var item in order.Items) item.OfferDiscountAmount = 0;
+        order.OfferDiscountAmount = 0;
+        order.AppliedOfferTitle = null;
+
+        if (active.Count == 0) return;
+
+        var offers = await TenantScoped(db.Offers, explicitTenantId)
+            .Include(o => o.Items)
+            .Where(o => o.IsActive)
+            .ToListAsync();
+        if (offers.Count == 0) return;
+
+        // Category scope matches on MenuItem.Category, which the line doesn't carry — resolve it
+        // for every distinct item on the cart in one query.
+        var menuItemIds = active.Select(i => i.MenuItemId).Distinct().ToList();
+        var categoryByItemId = await TenantScoped(db.MenuItems, explicitTenantId)
+            .Where(m => menuItemIds.Contains(m.Id))
+            .Select(m => new { m.Id, m.Category })
+            .ToDictionaryAsync(m => m.Id, m => m.Category);
+
+        // Key each cart line by its index in `active` (not OrderItem.Id, which is still 0 for a
+        // not-yet-saved order being created) so the engine's per-line result maps straight back.
+        var lines = active
+            .Select((it, idx) => new OfferCartLine(
+                idx, it.MenuItemId, categoryByItemId.GetValueOrDefault(it.MenuItemId), it.Name, it.Price, it.Qty))
+            .ToList();
+
+        var evaluation = OfferEngine.Evaluate(lines, offers, DateTime.UtcNow);
+
+        foreach (var (lineIndex, amount) in evaluation.PerLineDiscount)
+            active[lineIndex].OfferDiscountAmount = amount;
+
+        order.OfferDiscountAmount = evaluation.TotalDiscount;
+        order.AppliedOfferTitle = evaluation.Applied.Count == 0
+            ? null
+            : string.Join(", ", evaluation.Applied.Select(a => a.Title));
+    }
+
     public static void RecomputeTotals(Order o, decimal fallbackTaxRatePct)
     {
         // Per-line tax means this now reads o.Items, where the old flat-rate version only
@@ -662,10 +717,23 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             throw new InvalidOperationException(
                 $"RecomputeTotals needs order {o.Id}'s Items loaded — fetch it with .Include(o => o.Items).");
 
-        var totalDiscount = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount;
         var lines = o.Items.Where(i => !i.Voided).ToList();
         var gross = lines.Sum(i => i.Price * i.Qty);
-        var discount = Math.Min(Math.Max(0, totalDiscount), gross);
+
+        // Offers are attributed to specific lines (OrderItem.OfferDiscountAmount, set by
+        // ApplyOffersAsync) so they land on the right GST slab — they come off each line directly,
+        // BEFORE the proportional pool below, rather than being spread across the whole bill. The
+        // order's own OfferDiscountAmount is restated from the clamped per-line sum so the stored
+        // total can never claim more than was actually deducted.
+        var offerTotal = lines.Sum(i => Math.Min(Math.Max(0, i.OfferDiscountAmount), i.Price * i.Qty));
+        o.OfferDiscountAmount = offerTotal;
+        var afterOfferGross = gross - offerTotal;
+
+        // The order-level discounts (manual, bill, coupon, gift card, loyalty) still spread
+        // proportionally, now over what's left once offers have been taken off — so a line an
+        // offer already made free doesn't also soak up a share of the coupon.
+        var poolRaw = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount;
+        var pool = Math.Min(Math.Max(0, poolRaw), Math.Max(0, afterOfferGross));
 
         decimal tax = 0;
         // Tax already sitting INSIDE tax-inclusive lines' prices (MRP items — see
@@ -681,12 +749,18 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         {
             var line = lines[idx];
             var lineGross = line.Price * line.Qty;
-            var lineDiscount = idx == lines.Count - 1
-                ? discount - allocated
-                : (gross > 0 ? Math.Round(discount * (lineGross / gross), 2) : 0);
-            allocated += lineDiscount;
+            // This line's own offer discount comes off first (clamped to its value), so tax is
+            // charged on what's actually paid for it and the discount stays on its own slab.
+            var lineOffer = Math.Min(Math.Max(0, line.OfferDiscountAmount), lineGross);
+            var lineAfterOffer = lineGross - lineOffer;
+            // Proportional share of the order-level pool, split over the post-offer value. Last
+            // line absorbs the rounding remainder so the shares always add back to `pool`.
+            var poolShare = idx == lines.Count - 1
+                ? pool - allocated
+                : (afterOfferGross > 0 ? Math.Round(pool * (lineAfterOffer / afterOfferGross), 2) : 0);
+            allocated += poolShare;
 
-            var net = Math.Max(0, lineGross - lineDiscount);
+            var net = Math.Max(0, lineAfterOffer - poolShare);
             var ratePct = line.TaxRatePct ?? fallbackTaxRatePct;
             if (line.PriceIncludesTax)
             {
@@ -711,7 +785,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // of its price. With no inclusive line embeddedTax is 0 and this is the gross, exactly
         // as before.
         o.Subtotal = gross - embeddedTax;
-        o.Total = Math.Max(0, gross - discount) - embeddedTax + tax
+        // Both the offer (per line) and the pool (proportional) come off the gross; clamped to 0
+        // so a bill fully covered by discounts never goes negative before charges are added.
+        o.Total = Math.Max(0, gross - offerTotal - pool) - embeddedTax + tax
             + o.ServiceChargeAmount + o.PackingChargeAmount + o.DeliveryChargeAmount + o.TipAmount + o.RoundOffAmount;
     }
 

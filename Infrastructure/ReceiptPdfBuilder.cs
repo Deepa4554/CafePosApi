@@ -73,26 +73,66 @@ public static class ReceiptPdfBuilder
                             row.RelativeItem().AlignRight().Text($"-{order.DiscountAmount:0.00}");
                         });
                     }
-                    // One row per tax slab on the bill — a mixed 5%/12% order has to show the
-                    // taxable value and tax for each rate separately, not one combined figure.
-                    // Collapses to a single "Tax" row when everything is on one rate.
-                    var taxLines = OrderTaxLineDto.From(order, settings.TaxRatePct);
-                    if (taxLines.Count <= 1)
+                    if (order.OfferDiscountAmount > 0)
                     {
                         col.Item().Row(row =>
                         {
-                            row.RelativeItem().Text(taxLines.Count == 1 ? $"Tax ({taxLines[0].RatePct:0.##}%)" : "Tax");
+                            // Name the offer that fired ("Buy 2 Get 1 — Coffee") so the customer
+                            // sees why the bill dropped, not an unexplained line.
+                            row.RelativeItem().Text(string.IsNullOrWhiteSpace(order.AppliedOfferTitle) ? "Offer" : order.AppliedOfferTitle);
+                            row.RelativeItem().AlignRight().Text($"-{order.OfferDiscountAmount:0.00}");
+                        });
+                    }
+                    // One row per tax slab on the bill — a mixed 5%/12% order has to show the
+                    // taxable value and tax for each rate separately, not one combined figure —
+                    // and each slab is split into its CGST and SGST halves, which is what makes
+                    // this a tax invoice rather than just a receipt (see GstSplit).
+                    var taxLines = OrderTaxLineDto.From(order, settings.TaxRatePct);
+                    if (order.Tax <= 0)
+                    {
+                        // No GST charged (unregistered or composition scheme) — one plain row
+                        // beats printing a CGST and an SGST line that both read 0.00.
+                        col.Item().Row(row =>
+                        {
+                            row.RelativeItem().Text("Tax");
                             row.RelativeItem().AlignRight().Text($"{order.Tax:0.00}");
+                        });
+                    }
+                    else if (taxLines.Count <= 1)
+                    {
+                        // Halve order.Tax rather than the slab's own figure so the two printed
+                        // rows always reconcile against the total the customer is paying.
+                        var singleRate = taxLines.Count == 1 ? taxLines[0].RatePct : settings.TaxRatePct;
+                        var half = GstSplit.HalfRate(singleRate);
+                        var (cgst, sgst) = GstSplit.Split(order.Tax);
+
+                        col.Item().Row(row =>
+                        {
+                            row.RelativeItem().Text($"CGST ({half:0.##}%)");
+                            row.RelativeItem().AlignRight().Text($"{cgst:0.00}");
+                        });
+                        col.Item().Row(row =>
+                        {
+                            row.RelativeItem().Text($"SGST ({half:0.##}%)");
+                            row.RelativeItem().AlignRight().Text($"{sgst:0.00}");
                         });
                     }
                     else
                     {
                         foreach (var taxLine in taxLines)
                         {
+                            var half = GstSplit.HalfRate(taxLine.RatePct);
+                            var (cgst, sgst) = GstSplit.Split(taxLine.TaxAmount);
+
                             col.Item().Row(row =>
                             {
-                                row.RelativeItem().Text($"Tax {taxLine.RatePct:0.##}% (on {taxLine.TaxableAmount:0.00})");
-                                row.RelativeItem().AlignRight().Text($"{taxLine.TaxAmount:0.00}");
+                                row.RelativeItem().Text($"CGST {half:0.##}% (on {taxLine.TaxableAmount:0.00})");
+                                row.RelativeItem().AlignRight().Text($"{cgst:0.00}");
+                            });
+                            col.Item().Row(row =>
+                            {
+                                row.RelativeItem().Text($"SGST {half:0.##}% (on {taxLine.TaxableAmount:0.00})");
+                                row.RelativeItem().AlignRight().Text($"{sgst:0.00}");
                             });
                         }
                     }

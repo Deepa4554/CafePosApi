@@ -157,6 +157,11 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<GiftCard> GiftCards => Set<GiftCard>();
     public DbSet<Reward> Rewards => Set<Reward>();
     public DbSet<FavoriteItem> FavoriteItems => Set<FavoriteItem>();
+    /// <summary>Rule-driven promotions (BOGO, happy hour, category discounts) as opposed to
+    /// Coupons, which are codes a customer presents. Priced by OfferEngine on every recompute
+    /// rather than redeemed by hand — see Offer for why the two can't share a table.</summary>
+    public DbSet<Offer> Offers => Set<Offer>();
+    public DbSet<OfferMenuItem> OfferMenuItems => Set<OfferMenuItem>();
     /// <summary>Khatabook (udhaar) ledger — see KhataEntry. Sits under CRM because a khata
     /// hangs off a Customer record, but the Khatabook screen itself is Normal-plan: a cafe
     /// that can't reach the CRM screens can still run credit for its regulars.</summary>
@@ -650,6 +655,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         [typeof(GiftCard)] = RealtimeScopes.Customers,
         [typeof(Reward)] = RealtimeScopes.Customers,
         [typeof(FavoriteItem)] = RealtimeScopes.Customers,
+        // Menu, not Customers: changing an offer changes what the POS charges, so the till
+        // needs the same nudge it gets when a price or an item changes.
+        [typeof(Offer)] = RealtimeScopes.Menu,
+        [typeof(OfferMenuItem)] = RealtimeScopes.Menu,
 
         [typeof(StaffMember)] = RealtimeScopes.Staff,
         [typeof(Shift)] = RealtimeScopes.Staff,

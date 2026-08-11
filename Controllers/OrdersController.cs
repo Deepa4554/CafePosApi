@@ -590,6 +590,10 @@ public class OrdersController(
         };
         order.Items.Add(newItem);
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        // Cart changed, so any auto-applied offer has to be re-priced against it (a BOGO can
+        // gain or lose its free unit) before totals are recomputed. Tenant comes from the JWT
+        // here, so no explicit id — the ambient filter scopes db.Offers to this cafe.
+        await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
 
         await db.SaveChangesAsync();
@@ -627,6 +631,10 @@ public class OrdersController(
 
         await VoidItemAsync(order, item, reason);
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        // Cart changed, so any auto-applied offer has to be re-priced against it (a BOGO can
+        // gain or lose its free unit) before totals are recomputed. Tenant comes from the JWT
+        // here, so no explicit id — the ambient filter scopes db.Offers to this cafe.
+        await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         // Pulling/voiding a fired item can shift its batch's rollup (e.g. removing the last
         // still-New item leaves the batch all-Ready) — and the order status with it.
@@ -749,6 +757,10 @@ public class OrdersController(
         }
 
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        // Cart changed, so any auto-applied offer has to be re-priced against it (a BOGO can
+        // gain or lose its free unit) before totals are recomputed. Tenant comes from the JWT
+        // here, so no explicit id — the ambient filter scopes db.Offers to this cafe.
+        await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
 
         await db.SaveChangesAsync();
@@ -902,6 +914,10 @@ public class OrdersController(
 
         await ReleaseBillRedemptionsAsync(order);
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        // Cart changed, so any auto-applied offer has to be re-priced against it (a BOGO can
+        // gain or lose its free unit) before totals are recomputed. Tenant comes from the JWT
+        // here, so no explicit id — the ambient filter scopes db.Offers to this cafe.
+        await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         foreach (var batch in order.FireBatches)
             orderBuilder.RecomputeBatchStatus(db, order, batch.BatchNumber);
@@ -982,6 +998,10 @@ public class OrdersController(
             await VoidItemAsync(order, item, req.Reason);
 
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        // Cart changed, so any auto-applied offer has to be re-priced against it (a BOGO can
+        // gain or lose its free unit) before totals are recomputed. Tenant comes from the JWT
+        // here, so no explicit id — the ambient filter scopes db.Offers to this cafe.
+        await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         orderBuilder.RecomputeBatchStatus(db, order, batchNumber);
         OrderBuildingService.RecomputeOrderStatus(order);

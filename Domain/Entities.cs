@@ -305,6 +305,16 @@ public class Order : ITenantScoped
     /// summed into the same discount pool as Coupon/GiftCard by RecomputeTotals.</summary>
     public decimal LoyaltyDiscountAmount { get; set; }
     public int LoyaltyPointsRedeemed { get; set; }
+    /// <summary>Total taken off by auto-applied rule-driven Offers (BOGO, happy hour, category/
+    /// item discounts — see Offer). Unlike the discounts above this is NOT part of the
+    /// proportional discount pool in RecomputeTotals: an offer attributes to specific lines
+    /// (OrderItem.OfferDiscountAmount) so it lands on the right GST slab, and this is just their
+    /// sum for display and the bill's offer line. Recomputed from the cart by ApplyOffersAsync
+    /// whenever the cart changes, never entered by hand.</summary>
+    public decimal OfferDiscountAmount { get; set; }
+    /// <summary>Human-readable names of the offers that fired, comma-joined ("Buy 2 Get 1 —
+    /// Coffee"), for the receipt's offer line. Null when no offer applied.</summary>
+    public string? AppliedOfferTitle { get; set; }
     /// <summary>Billing-time charges — added on top of tax, not themselves taxed (kept simple
     /// rather than re-running per-line GST on a flat add-on). ServiceCharge/Packing/Delivery/
     /// Tip are always ≥ 0; RoundOff can be either sign (negative rounds the total down).</summary>
@@ -437,6 +447,12 @@ public class OrderItem : ITenantScoped
     /// <summary>Tax charged on this line = TaxableAmount * rate. Order.Tax is the sum of these.
     /// Written by RecomputeTotals.</summary>
     public decimal TaxAmount { get; set; }
+    /// <summary>What an auto-applied Offer took off THIS line specifically (a BOGO's free unit,
+    /// a category discount's share). Attributed per line rather than pooled so the reduction
+    /// lands on this line's own GST slab; RecomputeTotals subtracts it before tax and before the
+    /// proportional order-level discount pool. Written by ApplyOffersAsync, 0 on a line no offer
+    /// touched (and on every line placed before this column existed). See Order.OfferDiscountAmount.</summary>
+    public decimal OfferDiscountAmount { get; set; }
     public string? Modifier { get; set; }
     /// <summary>Which Variant (Half/Full/...) was picked, if any — null means the item's own
     /// base MenuItem.Price was used. VariantName is a snapshot (survives the variant being
