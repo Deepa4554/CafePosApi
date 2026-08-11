@@ -219,6 +219,30 @@ public class PublicController(
         return (lat, lng);
     }
 
+    /// <summary>
+    /// Serves the cafe's uploaded PDF menu for a scanned QR (see MenuPdf). This is the target
+    /// PublicOrderPageController redirects a general (menu-only) QR to when the cafe has an
+    /// enabled PDF — and it's also what the admin screen previews. Content-Disposition inline
+    /// so a phone opens it in its built-in PDF viewer rather than force-downloading it.
+    ///
+    /// Deliberately re-checks Enabled here, not just at redirect time: this URL is public and
+    /// stable, so a cafe that turns the PDF off must have it disappear from anyone who saved or
+    /// re-scans the link, falling back to a 404 (which the general QR's live page handles).
+    /// </summary>
+    [HttpGet("{token}/menu-pdf")]
+    public async Task<IActionResult> GetMenuPdf(string token)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) return NotFound();
+
+        var pdf = await db.MenuPdfs.IgnoreQueryFilters().AsNoTracking()
+            .FirstOrDefaultAsync(p => p.TenantId == decoded.Value.TenantId && p.Enabled);
+        if (pdf is null) return NotFound();
+
+        Response.Headers.ContentDisposition = $"inline; filename=\"{pdf.FileName}\"";
+        return File(pdf.Data, "application/pdf");
+    }
+
     [HttpGet("{token}/menu-items")]
     public async Task<ActionResult<IEnumerable<MenuItem>>> GetMenu(string token)
     {

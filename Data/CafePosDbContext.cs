@@ -128,6 +128,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<MenuCategory> MenuCategories => Set<MenuCategory>();
     public DbSet<TaxGroup> TaxGroups => Set<TaxGroup>();
     public DbSet<MenuItemImage> MenuItemImages => Set<MenuItemImage>();
+    /// <summary>The optional designed PDF menu a cafe can serve from its general QR instead of
+    /// the live digital menu — see <see cref="MenuPdf"/>. One row per tenant.</summary>
+    public DbSet<MenuPdf> MenuPdfs => Set<MenuPdf>();
     public DbSet<Variant> Variants => Set<Variant>();
     public DbSet<Modifier> Modifiers => Set<Modifier>();
     public DbSet<ModifierOption> ModifierOptions => Set<ModifierOption>();
@@ -442,6 +445,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // One recipe per menu item per tenant.
         modelBuilder.Entity<Recipe>().HasIndex(r => new { r.TenantId, r.MenuItemId }).IsUnique();
         modelBuilder.Entity<MenuItemImage>().HasIndex(i => i.MenuItemId);
+        // At most one menu PDF per cafe — a re-upload replaces the row (see MenuPdfController),
+        // so the general-QR redirect never has to pick between two.
+        modelBuilder.Entity<MenuPdf>().HasIndex(m => m.TenantId).IsUnique();
         // ShortCode is optional but must be unique when set (per tenant).
         modelBuilder.Entity<MenuItem>().HasIndex(m => new { m.TenantId, m.ShortCode }).IsUnique()
             .HasFilter("\"ShortCode\" IS NOT NULL");

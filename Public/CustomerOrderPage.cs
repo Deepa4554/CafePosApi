@@ -304,7 +304,7 @@ public static class CustomerOrderPage
       </div>
       <div class="field-label" style="margin-top:12px" id="guest-phone-label">Mobile number (optional)</div>
       <div class="guest-row">
-        <input type="tel" id="guest-phone" placeholder="e.g. 9876543210" maxlength="10" inputmode="numeric" />
+        <input type="tel" id="guest-phone" placeholder="10-digit mobile number" maxlength="10" inputmode="numeric" />
       </div>
 
       <!-- Home delivery only (delivery QR). Hidden and inert for every table/menu QR — the

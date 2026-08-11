@@ -12,7 +12,7 @@ public class WhatsAppSession : ITenantScoped
     public int Id { get; set; }
     public int TenantId { get; set; }
     public WhatsAppSessionStatus Status { get; set; } = WhatsAppSessionStatus.Disconnected;
-    /// <summary>The connected business number, digits only, e.g. "919876543210".</summary>
+    /// <summary>The connected business number, digits only, e.g. "91XXXXXXXXXX".</summary>
     public string? PhoneNumberE164 { get; set; }
     public DateTime? ConnectedAt { get; set; }
     public DateTime? LastQrGeneratedAt { get; set; }
@@ -53,7 +53,7 @@ public class WhatsAppOrderTracking : ITenantScoped
     /// e.g. "A9F7D12KX" — generated once, at first print.</summary>
     public required string TrackingId { get; set; }
     /// <summary>Null until the customer's first inbound WhatsApp message links it. Digits
-    /// only, matching the existing wa.me/91... convention (e.g. "919876543210").</summary>
+    /// only, matching the existing wa.me/91... convention (e.g. "91XXXXXXXXXX").</summary>
     public string? WhatsAppNumberE164 { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LinkedAt { get; set; }
