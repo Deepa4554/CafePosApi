@@ -28,4 +28,13 @@ public record PunchRequest(DateOnly LocalDate, DateTime? OccurredAt, decimal? La
 
 public record ManualAttendanceRequest(int StaffId, DateOnly Date, DateTime? PunchInAt, DateTime? PunchOutAt, int BreakMinutes, string EditNote);
 
+/// <summary>One tap on the Attendance screen's roll-call row — "this staff member was
+/// Present/Half Day/On Leave/Absent on this day" — with no punch times and no note for
+/// the Owner/Manager to fill in; AttendanceController.Mark derives the times from the
+/// day's Shift (or CafeSettings.StandardShiftHours) and writes the note itself. Batched
+/// so "Mark all present" is one request rather than one per staff member.</summary>
+public record MarkAttendanceRequest(DateOnly Date, IReadOnlyList<MarkAttendanceEntry> Entries);
+
+public record MarkAttendanceEntry(int StaffId, AttendanceStatus Status);
+
 public record CorrectAttendanceRequest(DateTime? PunchInAt, DateTime? PunchOutAt, int? BreakMinutes, AttendanceStatus? Status, string EditNote);

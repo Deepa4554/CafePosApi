@@ -33,6 +33,18 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
     /// are told to get the Owner to set it first) — see EnsureWithinGeofenceAsync.</summary>
     private const double GeofenceRadiusMeters = 500;
 
+    /// <summary>A roll-call mark for a day with no scheduled Shift has to start the
+    /// worked window somewhere — 9 AM cafe time, the same "we had to pick something"
+    /// role CafeSettings.StandardShiftHours plays for its length. Only the duration
+    /// reaches payroll, so the choice of start only shows as the row's displayed
+    /// punch-in time.</summary>
+    private static readonly TimeSpan DefaultDayStartIst = TimeSpan.FromHours(9);
+
+    /// <summary>Ceiling on one roll-call batch — comfortably above any single cafe's
+    /// roster, low enough that a hand-crafted request can't turn one call into thousands
+    /// of shift lookups.</summary>
+    private const int MaxMarkEntries = 200;
+
     // ---------- Self-service punch state machine ----------
 
     [Authorize(Policy = Policies.RequirePlus)]
@@ -279,7 +291,120 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         return AttendanceRecordDto.From(record, staff.Name);
     }
 
+    /// <summary>
+    /// Roll-call marking: one tap sets a staff member's status for a day, no punch times
+    /// and no note required (CreateManual's note is mandatory because it invents times
+    /// out of nothing; here the times are derived from the day's Shift, so the note is
+    /// generated). Entries are batched so "Mark all present" is a single round trip.
+    /// Real punches always win — a day the staff member actually punched keeps its
+    /// timestamps and only has its Status/derived fields recomputed, so marking someone
+    /// Present can never quietly erase the fact that they clocked in at 11:40.
+    /// </summary>
+    [Authorize(Policy = Policies.RequirePlus)]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("mark")]
+    public async Task<ActionResult<IEnumerable<AttendanceRecordDto>>> Mark(MarkAttendanceRequest req)
+    {
+        if (req.Entries is null || req.Entries.Count == 0)
+            throw new ApiValidationException("Choose at least one staff member to mark.");
+        if (req.Entries.Count > MaxMarkEntries)
+            throw new ApiValidationException($"Attendance can be marked for at most {MaxMarkEntries} staff at a time.");
+        // Backdating is fine (that's the point — yesterday's roll call gets filled in this
+        // morning), but a future day has no attendance to record yet.
+        if (req.Date > TodayIst())
+            throw new ApiValidationException("Attendance can't be marked for a future date.");
+
+        var entries = req.Entries.DistinctBy(e => e.StaffId).ToList();
+        var staffIds = entries.Select(e => e.StaffId).ToList();
+        var staff = await db.Staff.Where(s => staffIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id);
+        if (staff.Count != staffIds.Count) throw new ApiValidationException("Staff member not found.");
+
+        var settings = await CurrentSettingsAsync();
+        var actor = await CurrentUserAsync();
+        var existing = await db.AttendanceRecords
+            .Where(a => a.Date == req.Date && staffIds.Contains(a.StaffId)).ToListAsync();
+
+        var records = new List<AttendanceRecord>();
+        foreach (var entry in entries)
+        {
+            var record = existing.FirstOrDefault(a => a.StaffId == entry.StaffId);
+            if (record is null)
+            {
+                record = new AttendanceRecord { StaffId = entry.StaffId, Date = req.Date };
+                db.AttendanceRecords.Add(record);
+            }
+
+            var shift = record.ShiftId is int shiftId ? await db.Shifts.FindAsync(shiftId) : await FindShiftForDay(entry.StaffId, req.Date);
+            record.ShiftId = shift?.Id;
+            ApplyMarkedStatus(record, entry.Status, shift, settings);
+            record.IsManuallyEdited = true;
+            record.EditedByUserId = actor.Id;
+            record.EditNote = $"Marked {StatusLabel(entry.Status)} by {actor.Name}.";
+            records.Add(record);
+        }
+
+        await db.SaveChangesAsync();
+
+        var summary = string.Join(", ", records.Select(r => $"{staff[r.StaffId].Name}: {StatusLabel(r.Status)}"));
+        if (summary.Length > 400) summary = summary[..400] + "…";
+        await audit.LogAsync(AuditAction.Update, AuditResource.Attendance,
+            records.Count == 1 ? records[0].Id.ToString() : null,
+            $"{actor.Name} marked attendance for {req.Date} — {summary}", AuditSeverity.Medium, actor.Id, actor.Name);
+
+        return records.Select(r => AttendanceRecordDto.From(r, staff[r.StaffId].Name)).ToList();
+    }
+
     // ---------- Shared derivation logic ----------
+
+    /// <summary>Fills in the times a roll-call mark implies, then stamps the status the
+    /// Owner/Manager actually chose (unlike ApplyTimesAsync, which derives the status
+    /// from the times — here the human's choice is the input, not the output). Present/
+    /// Late/Half Day get a full/half scheduled day; Absent/On Leave/Holiday clear the
+    /// times so payroll counts no worked day (see PayrollController.BuildLineAsync,
+    /// which counts a day as worked exactly when WorkedMinutes is non-null).</summary>
+    private static void ApplyMarkedStatus(AttendanceRecord record, AttendanceStatus status, Shift? shift, CafeSettings settings)
+    {
+        var workedDay = status is AttendanceStatus.Present or AttendanceStatus.Late or AttendanceStatus.HalfDay;
+        if (!workedDay)
+        {
+            record.PunchInAt = null;
+            record.PunchOutAt = null;
+            record.BreakMinutes = 0;
+            record.WorkedMinutes = null;
+            record.LateMinutes = 0;
+            record.OvertimeMinutes = 0;
+            record.Status = status;
+            return;
+        }
+
+        var scheduledMinutes = shift is not null
+            ? Math.Max(1, (int)(shift.EndsAt - shift.StartsAt).TotalMinutes)
+            : settings.StandardShiftHours * 60;
+        var targetMinutes = status == AttendanceStatus.HalfDay ? scheduledMinutes / 2 : scheduledMinutes;
+
+        // An existing punch-in is kept as-is; only a day with no punch at all invents a
+        // start, from the shift if there is one and otherwise from DefaultDayStartIst.
+        var punchIn = record.PunchInAt ?? shift?.StartsAt ?? IstClock.IstDateStartUtc(record.Date) + DefaultDayStartIst;
+        record.PunchInAt = punchIn;
+        // Someone who punched in and forgot to punch out gets closed out here — leaving
+        // PunchOutAt null would leave WorkedMinutes null and payroll would ignore the day
+        // the manager just said was worked.
+        if (record.PunchOutAt is null || record.PunchOutAt <= punchIn)
+            record.PunchOutAt = punchIn.AddMinutes(targetMinutes + record.BreakMinutes);
+
+        record.WorkedMinutes = (int)Math.Max(0, (record.PunchOutAt.Value - punchIn).TotalMinutes - record.BreakMinutes);
+        record.LateMinutes = ComputeLateMinutes(punchIn, shift, settings.LateGraceMinutes);
+        var scheduledEnd = shift?.EndsAt ?? punchIn.AddHours(settings.StandardShiftHours);
+        record.OvertimeMinutes = (int)Math.Max(0, (record.PunchOutAt.Value - scheduledEnd).TotalMinutes);
+        record.Status = status;
+    }
+
+    private static string StatusLabel(AttendanceStatus status) => status switch
+    {
+        AttendanceStatus.HalfDay => "Half Day",
+        AttendanceStatus.OnLeave => "On Leave",
+        _ => status.ToString(),
+    };
 
     private async Task ApplyTimesAsync(AttendanceRecord record, DateTime? punchIn, DateTime? punchOut, int breakMinutes, Shift? shift, int editedByUserId, string editNote)
     {
