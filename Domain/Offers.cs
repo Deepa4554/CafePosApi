@@ -19,6 +19,13 @@ public enum OfferType
     /// away the dearest would let a customer pair one expensive item with cheap ones and walk
     /// off with the expensive one).</summary>
     BuyXGetY,
+
+    /// <summary>A meal deal: one each of the items in <see cref="Offer.Items"/> for a fixed
+    /// <see cref="Offer.ComboPrice"/> (Burger + Fries + Coke for ₹199). The discount is what the
+    /// set would have cost à la carte minus the combo price, and a bill with two of every combo
+    /// item is two combos. Always item-scoped — the set IS the scope — so Scope is forced to
+    /// SpecificItems and CategoryName is irrelevant.</summary>
+    Combo,
 }
 
 /// <summary>Which of the bill's lines an offer is allowed to touch. This is what makes
@@ -85,6 +92,12 @@ public class Offer : ITenantScoped
     /// <summary>How many units come free once BuyQty is met. "Buy 1 Get 1" is 1/1, "Buy 2 Get 1"
     /// is 2/1 — so a complete set is BuyQty + GetQty units.</summary>
     public int GetQty { get; set; }
+
+    // ---------- Combo ----------
+
+    /// <summary>The fixed total a Combo's item set sells for (one each of <see cref="Items"/>).
+    /// The engine discounts the à-la-carte total down to this. Unused by the other types.</summary>
+    public decimal ComboPrice { get; set; }
 
     // ---------- Conditions ----------
 

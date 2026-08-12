@@ -22,6 +22,12 @@ public record CreateOrderRequest(
     // Order-time manual discount only. Coupons and gift cards are NO LONGER applied here —
     // they're billing-time actions on a served order (see bill-coupon / bill-giftcard).
     decimal DiscountPct = 0,
+    // A flat rupee discount, as an alternative to DiscountPct — sent when the biller typed
+    // "₹50 off" rather than a percentage. Stored as-is so it stays exactly ₹50 however the cart
+    // changes afterwards; the POS used to convert it to a percentage, which then drifted (₹50 on
+    // a ₹400 bill became ₹62.50 once another item was added). When both are sent, the flat amount
+    // wins. See OrderBuildingService.BuildOrderAsync.
+    decimal DiscountAmount = 0,
     int? BranchId = null,
     string? GuestPhone = null,
     // Who actually took/served this order — omit to default to the logged-in user's
@@ -424,11 +430,28 @@ public record UpdateStationRequest(string? Name, string? Icon, int? SortOrder, b
 
 // ---------- Menu Categories (default-station lookup) ----------
 
-public record CategoryDto(string Name, int? DefaultStationId, string? DefaultStationName, int ItemCount);
+public record CategoryDto(string Name, int? DefaultStationId, string? DefaultStationName, int ItemCount, int SortOrder);
 
 public record SetCategoryDefaultStationRequest(int? StationId);
 
 public record ApplyCategoryStationRequest(int StationId);
+
+public record CreateCategoryRequest(string Name);
+
+public record RenameCategoryRequest(string NewName);
+
+/// <summary>The categories in the order they should appear, front first. Any category left
+/// out keeps whatever position it already had.</summary>
+public record ReorderCategoriesRequest(List<string> Names);
+
+/// <summary>What a rename/delete actually touched. Both operations move rows around behind
+/// one tap, so the client reports the counts back rather than claiming a silent success —
+/// MergedInto is set when a rename landed on a name that already existed.</summary>
+public record CategoryMutationResultDto(
+    string Name,
+    int MovedItemCount,
+    int UpdatedOfferCount,
+    bool MergedInto);
 
 public record MenuItemImageDto(int Id, string DataUri, int SortOrder)
 {

@@ -18,6 +18,7 @@ public record OfferDto(
     decimal MaxDiscountAmount,
     int BuyQty,
     int GetQty,
+    decimal ComboPrice,
     decimal MinOrderValue,
     int MaxApplicationsPerBill,
     bool Stackable,
@@ -32,7 +33,7 @@ public record OfferDto(
     public static OfferDto From(Offer o) => new(
         o.Id, o.Title, o.Type, o.Scope, o.CategoryName,
         [.. o.Items.Select(i => i.MenuItemId)],
-        o.Value, o.MaxDiscountAmount, o.BuyQty, o.GetQty,
+        o.Value, o.MaxDiscountAmount, o.BuyQty, o.GetQty, o.ComboPrice,
         o.MinOrderValue, o.MaxApplicationsPerBill, o.Stackable,
         o.StartsAtUtc, o.EndsAtUtc, OfferDays.Parse(o.DaysOfWeek),
         o.StartTime, o.EndTime, o.AutoApply, o.IsActive);
@@ -51,6 +52,7 @@ public record CreateOfferRequest(
     decimal MaxDiscountAmount = 0,
     int BuyQty = 0,
     int GetQty = 0,
+    decimal ComboPrice = 0,
     decimal MinOrderValue = 0,
     int MaxApplicationsPerBill = 0,
     List<int>? DaysOfWeek = null,
@@ -61,7 +63,13 @@ public record CreateOfferRequest(
     bool Stackable = false,
     bool AutoApply = true);
 
-/// <summary>PATCH shape — every field optional, only the supplied ones are written.</summary>
+/// <summary>PATCH shape — every field optional, only the supplied ones are written.
+///
+/// A null therefore means "leave alone", which is what lets a one-field call like the
+/// active/inactive toggle avoid wiping the rest of the offer. That makes clearing an optional
+/// window impossible to express as a value, so the two that a user can genuinely remove — the
+/// daily time window and the run-date range — get an explicit flag each. Without them the
+/// editor's Clear button saves cleanly and changes nothing.</summary>
 public record UpdateOfferRequest(
     string? Title = null,
     OfferType? Type = null,
@@ -72,6 +80,7 @@ public record UpdateOfferRequest(
     decimal? MaxDiscountAmount = null,
     int? BuyQty = null,
     int? GetQty = null,
+    decimal? ComboPrice = null,
     decimal? MinOrderValue = null,
     int? MaxApplicationsPerBill = null,
     List<int>? DaysOfWeek = null,
@@ -81,7 +90,9 @@ public record UpdateOfferRequest(
     TimeOnly? EndTime = null,
     bool? Stackable = null,
     bool? AutoApply = null,
-    bool? IsActive = null);
+    bool? IsActive = null,
+    bool ClearTimeWindow = false,
+    bool ClearRunDates = false);
 
 // ---------- Preview ----------
 

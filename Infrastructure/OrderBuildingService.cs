@@ -18,7 +18,7 @@ public interface IOrderBuildingService
     Task<Order> BuildOrderAsync(
         CafePosDbContext db, string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
         decimal discountPct, ClaimsPrincipal? user, int? explicitTenantId = null, int? branchId = null,
-        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null);
+        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null, decimal flatDiscountAmount = 0);
 
     /// <summary>Adds a new unfired cart line or overwrites an existing unfired line's qty for
     /// the same (menuItemId, modifier) pair — qty is the line's FINAL quantity, not a delta.
@@ -124,7 +124,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     public Task<Order> BuildOrderAsync(
         CafePosDbContext db, string orderType, string? tableCode, string? guestName, List<CreateOrderItemDto> items,
         decimal discountPct, ClaimsPrincipal? user, int? explicitTenantId = null, int? branchId = null,
-        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null) =>
+        string? guestPhone = null, int? servedByStaffId = null, string? guestAddress = null, decimal flatDiscountAmount = 0) =>
         DbConcurrency.InTransactionAsync(db, async () =>
     {
         if (items.Count == 0)
@@ -195,8 +195,22 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var effectiveTenantId = explicitTenantId ?? tenantContext.TenantIdOrDefault;
         var taxRatePct = await GetTaxRatePctAsync(db, effectiveTenantId);
         var subtotal = orderItems.Sum(i => i.Price * i.Qty);
-        var clampedDiscountPct = Math.Clamp(discountPct, 0, 100);
-        var discountAmount = Math.Round(subtotal * clampedDiscountPct / 100, 2);
+        // A flat rupee discount is stored exactly as typed (clamped to the bill) and wins over a
+        // percentage — the whole point of the flat option is that "₹50 off" stays ₹50, so it must
+        // NOT be turned back into a percentage. A percentage discount keeps its old behaviour:
+        // pct is snapshotted and the amount derived from this subtotal once, at creation.
+        decimal clampedDiscountPct;
+        decimal discountAmount;
+        if (flatDiscountAmount > 0)
+        {
+            clampedDiscountPct = 0;
+            discountAmount = Math.Min(flatDiscountAmount, subtotal);
+        }
+        else
+        {
+            clampedDiscountPct = Math.Clamp(discountPct, 0, 100);
+            discountAmount = Math.Round(subtotal * clampedDiscountPct / 100, 2);
+        }
 
         var settings = await TenantScoped(db.Settings, explicitTenantId).FirstAsync();
         var (defaultServiceCharge, defaultPackingCharge, defaultDeliveryCharge) = ComputeDefaultCharges(settings, orderType, subtotal);
@@ -290,14 +304,18 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // transaction (DbConcurrency.InTransactionAsync at the top of this method) is what
         // keeps them atomic, exactly as the hand-rolled one here used to.
         await db.SaveChangesAsync();
-        if (clampedDiscountPct > 0)
+        if (discountAmount > 0)
         {
+            // A flat discount audits by its rupee value; a percentage one still names the rate.
+            var discountDetail = clampedDiscountPct > 0
+                ? $"Order {order.Id} applied {clampedDiscountPct}% discount (−{discountAmount:C})."
+                : $"Order {order.Id} applied a flat {discountAmount:C} discount.";
             var discountEntry = new AuditLogEntry
             {
                 Action = AuditAction.Discount,
                 Resource = AuditResource.Order,
                 ResourceId = order.Id.ToString(),
-                Details = $"Order {order.Id} applied {clampedDiscountPct}% discount (−{discountAmount:C}).",
+                Details = discountDetail,
                 Severity = AuditSeverity.Medium,
             };
             if (explicitTenantId is int auditTid) discountEntry.TenantId = auditTid;

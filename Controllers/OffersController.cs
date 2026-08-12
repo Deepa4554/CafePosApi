@@ -39,16 +39,21 @@ public class OffersController(CafePosDbContext db) : ControllerBase
     [HttpPost]
     public async Task<ActionResult<OfferDto>> Create(CreateOfferRequest req)
     {
+        // A combo is defined by its item set, so it is always item-scoped regardless of what the
+        // request said — forcing it here keeps the wizard from having to send a redundant Scope.
+        var scope = req.Type == OfferType.Combo ? OfferScope.SpecificItems : req.Scope;
+
         var offer = new Offer
         {
             Title = (req.Title ?? "").Trim(),
             Type = req.Type,
-            Scope = req.Scope,
-            CategoryName = req.Scope == OfferScope.Category ? req.CategoryName?.Trim() : null,
+            Scope = scope,
+            CategoryName = scope == OfferScope.Category ? req.CategoryName?.Trim() : null,
             Value = req.Value,
             MaxDiscountAmount = req.MaxDiscountAmount,
             BuyQty = req.BuyQty,
             GetQty = req.GetQty,
+            ComboPrice = req.ComboPrice,
             MinOrderValue = req.MinOrderValue,
             MaxApplicationsPerBill = req.MaxApplicationsPerBill,
             Stackable = req.Stackable,
@@ -60,7 +65,7 @@ public class OffersController(CafePosDbContext db) : ControllerBase
             AutoApply = req.AutoApply,
         };
 
-        if (req.Scope == OfferScope.SpecificItems)
+        if (scope == OfferScope.SpecificItems)
             offer.Items = [.. (req.MenuItemIds ?? []).Distinct().Select(id => new OfferMenuItem { MenuItemId = id })];
 
         Validate(offer);
@@ -86,6 +91,7 @@ public class OffersController(CafePosDbContext db) : ControllerBase
         if (req.MaxDiscountAmount is not null) offer.MaxDiscountAmount = req.MaxDiscountAmount.Value;
         if (req.BuyQty is not null) offer.BuyQty = req.BuyQty.Value;
         if (req.GetQty is not null) offer.GetQty = req.GetQty.Value;
+        if (req.ComboPrice is not null) offer.ComboPrice = req.ComboPrice.Value;
         if (req.MinOrderValue is not null) offer.MinOrderValue = req.MinOrderValue.Value;
         if (req.MaxApplicationsPerBill is not null) offer.MaxApplicationsPerBill = req.MaxApplicationsPerBill.Value;
         if (req.Stackable is not null) offer.Stackable = req.Stackable.Value;
@@ -94,6 +100,10 @@ public class OffersController(CafePosDbContext db) : ControllerBase
         if (req.DaysOfWeek is not null) offer.DaysOfWeek = OfferDays.ToCsv(req.DaysOfWeek);
         if (req.StartTime is not null) offer.StartTime = req.StartTime;
         if (req.EndTime is not null) offer.EndTime = req.EndTime;
+
+        // Explicit removals — see UpdateOfferRequest on why a null cannot carry these.
+        if (req.ClearTimeWindow) { offer.StartTime = null; offer.EndTime = null; }
+        if (req.ClearRunDates) { offer.StartsAtUtc = null; offer.EndsAtUtc = null; }
         if (req.AutoApply is not null) offer.AutoApply = req.AutoApply.Value;
         if (req.IsActive is not null) offer.IsActive = req.IsActive.Value;
 
@@ -102,6 +112,9 @@ public class OffersController(CafePosDbContext db) : ControllerBase
             db.OfferMenuItems.RemoveRange(offer.Items);
             offer.Items = [.. req.MenuItemIds.Distinct().Select(mid => new OfferMenuItem { MenuItemId = mid, OfferId = offer.Id })];
         }
+
+        // A combo is defined by its item set — keep it item-scoped no matter what was sent.
+        if (offer.Type == OfferType.Combo) offer.Scope = OfferScope.SpecificItems;
 
         // A scope the offer no longer uses must not keep a stale target around — an offer
         // switched from Category to EntireBill that still carried a CategoryName would read as
@@ -152,12 +165,13 @@ public class OffersController(CafePosDbContext db) : ControllerBase
                 Id = 0,
                 Title = string.IsNullOrWhiteSpace(req.Draft.Title) ? "This offer" : req.Draft.Title.Trim(),
                 Type = req.Draft.Type,
-                Scope = req.Draft.Scope,
+                Scope = req.Draft.Type == OfferType.Combo ? OfferScope.SpecificItems : req.Draft.Scope,
                 CategoryName = req.Draft.CategoryName,
                 Value = req.Draft.Value,
                 MaxDiscountAmount = req.Draft.MaxDiscountAmount,
                 BuyQty = req.Draft.BuyQty,
                 GetQty = req.Draft.GetQty,
+                ComboPrice = req.Draft.ComboPrice,
                 MinOrderValue = req.Draft.MinOrderValue,
                 MaxApplicationsPerBill = req.Draft.MaxApplicationsPerBill,
                 Stackable = req.Draft.Stackable,
@@ -195,11 +209,16 @@ public class OffersController(CafePosDbContext db) : ControllerBase
                 throw new ApiValidationException("Buy quantity must be at least 1.");
             case OfferType.BuyXGetY when o.GetQty < 1:
                 throw new ApiValidationException("Free quantity must be at least 1.");
+            case OfferType.Combo when o.Items.Count < 2:
+                throw new ApiValidationException("A combo needs at least two items.");
+            case OfferType.Combo when o.ComboPrice <= 0:
+                throw new ApiValidationException("Enter the combo's price.");
         }
 
         if (o.Scope == OfferScope.Category && string.IsNullOrWhiteSpace(o.CategoryName))
             throw new ApiValidationException("Pick the category this offer applies to.");
-        if (o.Scope == OfferScope.SpecificItems && o.Items.Count == 0)
+        // A combo already required ≥ 2 items above; this covers the other item-scoped types.
+        if (o.Scope == OfferScope.SpecificItems && o.Type != OfferType.Combo && o.Items.Count == 0)
             throw new ApiValidationException("Pick at least one item this offer applies to.");
 
         if (o.MinOrderValue < 0) throw new ApiValidationException("Minimum order value cannot be negative.");
@@ -220,9 +239,15 @@ public class OffersController(CafePosDbContext db) : ControllerBase
     /// the owner as the feature being broken.</summary>
     private async Task ValidateScopeTargetsExistAsync(Offer o)
     {
+        // Check the category against the menu items themselves, not MenuCategories: that side
+        // table only gets a row once someone sets a default station for a category, so it is
+        // sparse. GET /categories (what the offer form's picker lists) derives its names from
+        // MenuItems.Category, so validating against MenuCategories rejected perfectly good
+        // categories the user had just picked from that list. This is also the basis OfferEngine
+        // matches on when it fires the offer, so all three now agree.
         if (o.Scope == OfferScope.Category && !string.IsNullOrWhiteSpace(o.CategoryName))
         {
-            if (!await db.MenuCategories.AnyAsync(c => c.Name == o.CategoryName))
+            if (!await db.MenuItems.AnyAsync(m => m.Category == o.CategoryName))
                 throw new ApiValidationException("That category no longer exists.");
         }
 

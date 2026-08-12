@@ -107,6 +107,18 @@ public class MenuCategory : ITenantScoped
     public int Id { get; set; }
     public int TenantId { get; set; }
     public required string Name { get; set; }
+
+    /// <summary>Where this category sits in the POS category strip and every other category
+    /// list — low first. A cafe that sells mostly drinks wants Beverages in front, which
+    /// alphabetical order will never give them.
+    ///
+    /// null means "no position configured", and those fall in alphabetically BEHIND every
+    /// category that has one (see CategoriesController.List). Nullable rather than defaulting
+    /// to 0 on purpose: rows already exist for any category with a default station, and a
+    /// non-null default would have silently shot every one of them to the front of the strip
+    /// the moment this column was added.</summary>
+    public int? SortOrder { get; set; }
+
     public int? DefaultStationId { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
     public Station? DefaultStation { get; set; }
@@ -389,6 +401,28 @@ public class Order : ITenantScoped
     /// stays a quick-glance summary ("Cash" or "Multiple"); this is the real breakdown, set
     /// once at Pay time and never touched again (see OrdersController.Pay).</summary>
     public List<OrderPayment> Payments { get; set; } = [];
+    /// <summary>One row per auto-applied Offer that fired on this order, with the rupees it took
+    /// off — the raw material for offer-performance analytics (ReportsController). Rewritten by
+    /// OrderBuildingService.ApplyOffersAsync on every cart change so it always matches the order's
+    /// final state; unlike Order.AppliedOfferTitle (a display string) this keeps each offer's ID
+    /// and amount separate, which a comma-joined title can't. See OrderAppliedOffer.</summary>
+    public List<OrderAppliedOffer> AppliedOffers { get; set; } = [];
+}
+
+/// <summary>An offer that fired on one order, priced. Deliberately a separate row per (order,
+/// offer) rather than folded into Order.OfferDiscountAmount, so "how many times did Buy-2-Get-1
+/// run, and what did it cost" is a plain GROUP BY instead of unrecoverable from a summed total.
+/// OfferTitle is snapshotted so the report still reads correctly after the offer is renamed or
+/// deleted. OfferId is kept unlinked (no FK navigation) on purpose — a soft-deleted offer must
+/// not drag its history away, same reasoning as the receipt keeping AppliedOfferTitle.</summary>
+public class OrderAppliedOffer : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int OrderId { get; set; }
+    public int OfferId { get; set; }
+    public required string OfferTitle { get; set; }
+    public decimal DiscountAmount { get; set; }
 }
 
 /// <summary>A single tender applied toward settling a bill — see Order.Payments. Recorded

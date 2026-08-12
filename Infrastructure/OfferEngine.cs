@@ -156,8 +156,47 @@ public static class OfferEngine
             OfferType.Percentage => PricePercentage(offer, qualifying),
             OfferType.Flat => PriceFlat(offer, qualifying),
             OfferType.BuyXGetY => PriceBuyXGetY(offer, qualifying),
+            OfferType.Combo => PriceCombo(offer, lines),
             _ => null,
         };
+    }
+
+    /// <summary>Discounts a meal deal down to its fixed price. A combo needs EVERY item in its
+    /// set present; the number of complete combos is the least-stocked item's count (2 burgers +
+    /// 2 fries + 1 coke makes one combo, not two), capped by MaxApplicationsPerBill. The saving
+    /// per combo is the à-la-carte total of one of each minus ComboPrice, and it's distributed
+    /// across the combo's lines so each lands on its own GST slab — same reason BuyXGetY does.</summary>
+    private static AppliedOffer? PriceCombo(Offer offer, IReadOnlyList<OfferCartLine> lines)
+    {
+        var requiredIds = offer.Items.Select(i => i.MenuItemId).Distinct().ToList();
+        if (requiredIds.Count < 2 || offer.ComboPrice <= 0) return null;
+
+        // One representative cart line per required item (its unit price), plus how many are on
+        // the bill. A required item that's missing means no combo at all.
+        var byItem = new Dictionary<int, (OfferCartLine Line, int Qty)>();
+        foreach (var id in requiredIds)
+        {
+            var forItem = lines.Where(l => l.MenuItemId == id).ToList();
+            if (forItem.Count == 0) return null;
+            byItem[id] = (forItem[0], forItem.Sum(l => l.Qty));
+        }
+
+        var combos = byItem.Values.Min(v => v.Qty);
+        if (offer.MaxApplicationsPerBill > 0) combos = Math.Min(combos, offer.MaxApplicationsPerBill);
+        if (combos <= 0) return null;
+
+        var alaCartePerCombo = byItem.Values.Sum(v => v.Line.UnitPrice);
+        var savingPerCombo = alaCartePerCombo - offer.ComboPrice;
+        if (savingPerCombo <= 0) return null; // combo priced at or above à la carte — nothing to give
+
+        var amount = savingPerCombo * combos;
+
+        // Attribute across the combo's lines in proportion to their price, so the reduction sits
+        // on the right items (and the right tax rates).
+        var comboLines = byItem.Values.Select(v => v.Line).ToList();
+        return new AppliedOffer(offer.Id, offer.Title, amount,
+            combos == 1 ? $"Combo — ₹{offer.ComboPrice:0.##}" : $"Combo ×{combos} — ₹{offer.ComboPrice:0.##} each",
+            Distribute(amount, comboLines));
     }
 
     private static AppliedOffer? PricePercentage(Offer offer, List<OfferCartLine> qualifying)
