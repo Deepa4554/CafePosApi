@@ -118,14 +118,28 @@ public record PaymentSplitRequest(string Method, decimal Amount);
 /// when the order already carries a real name and number — they're an override for the ones
 /// the cashier types into the payment picker at settle time, not a repeat of what's on file.
 /// Due is deliberately incompatible with AllowPartial and KeepOpen (both leave the order open,
-/// which would put the same rupees on the order AND on the khata).</summary>
+/// which would put the same rupees on the order AND on the khata).
+///
+/// UnfiredItems answers "what about the lines that never went to the kitchen?" and takes exactly
+/// one value, "keep" — an explicit "yes, bill them anyway". It is REQUIRED whenever such a line
+/// exists and the call would close the bill; without it the settle is refused (see
+/// OrdersController.EnsureUnfiredItemsResolved, which explains why the answers that change the
+/// total are separate calls made before settling rather than values here). Null on every bill
+/// that has no unfired line, which is almost all of them.</summary>
 public record PayRequest(
     string? PaymentMethod,
     List<PaymentSplitRequest>? Splits = null,
     bool AllowPartial = false,
     bool KeepOpen = false,
     string? GuestName = null,
-    string? GuestPhone = null);
+    string? GuestPhone = null,
+    string? UnfiredItems = null);
+
+/// <summary>Body for OrdersController.Close — see PayRequest.UnfiredItems, which this carries for
+/// exactly the same reason: Close is the other call that flips a bill to Paid, so it needs the
+/// same answer about lines the kitchen never saw. Optional as a whole; a Close on an order with
+/// no unfired line needs no body at all.</summary>
+public record CloseOrderRequest(string? UnfiredItems = null);
 
 /// <summary>
 /// Real math on real order history, not AI — see OrdersController.RushForecast. HasEnoughData

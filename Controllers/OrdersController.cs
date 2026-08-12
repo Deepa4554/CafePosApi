@@ -1568,6 +1568,12 @@ public class OrdersController(
         if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
 
+        // Skipped for KeepOpen (Pay First), which deliberately leaves the order open with more
+        // items still expected — an unfired line there is a round that hasn't been sent yet
+        // rather than one that never will be.
+        if (req?.KeepOpen != true)
+            EnsureUnfiredItemsResolved(order, req?.UnfiredItems);
+
         // Read the credit legs off the REQUEST, before either branch below starts adding
         // OrderPayment rows — the rules a Due tender triggers (name + mobile compulsory, and
         // the two combinations rejected just below) have to be settled before anything is
@@ -1750,6 +1756,37 @@ public class OrdersController(
         return customer;
     }
 
+    /// <summary>Settles what happens to lines that never reached the kitchen, for the two calls
+    /// that close a bill (Pay and Close). Returns silently when there are none, which is the
+    /// overwhelmingly common case.
+    ///
+    /// RecomputeTotals bills every non-voided line regardless of FireBatch, so an unfired line is
+    /// a charge on the bill for food nobody was ever asked to make. That used to go through
+    /// unchallenged: the POS cart's Hold-and-append path could leave a round sitting unfired, and
+    /// settling simply billed it. (It also stranded the table, since the order stayed pinned at
+    /// New — see OrderBuildingService.RecomputeOrderStatus. That half is fixed, which is precisely
+    /// why this guard is needed: without the stuck table as a symptom, a wrong bill would now
+    /// settle silently.)
+    ///
+    /// The only answer this accepts is "keep" — deliberately. The other two answers change what
+    /// the bill comes to, and this runs mid-settle, after the caller has already priced its
+    /// tenders against the current total: dropping lines here would close a ₹270 bill against
+    /// ₹500 of collected payment, with the difference silently pocketed. So the two answers that
+    /// move the total are the existing endpoints, taken BEFORE settling with the new total on
+    /// screen — Fire to send them to the kitchen, RemoveItem to take them off the bill. Either
+    /// leaves no unfired line, and the settle then passes this with no flag at all.</summary>
+    private static void EnsureUnfiredItemsResolved(Order order, string? choice)
+    {
+        var unfired = order.Items.Where(i => i.FireBatch == 0 && !i.Voided).ToList();
+        if (unfired.Count == 0) return;
+        if (string.Equals(choice, "keep", StringComparison.OrdinalIgnoreCase)) return;
+
+        var names = string.Join(", ", unfired.Select(i => $"{i.Name} ×{i.Qty}"));
+        throw new ApiConflictException(
+            $"{unfired.Count} item{(unfired.Count == 1 ? "" : "s")} on this bill never went to the kitchen ({names}). " +
+            "Fire them, remove them from the bill, or confirm they should stay charged.");
+    }
+
     /// <summary>Marks Paid and closes any linked guest session — the actual "this bill is now
     /// settled" transition, shared by Pay (once a payment fully covers the balance) and Close
     /// (finalizing a KeepOpen/Pay First order that already covers its balance with no further
@@ -1757,6 +1794,13 @@ public class OrdersController(
     private async Task CloseOrderAsync(Order order)
     {
         order.Paid = true;
+
+        // Re-roll the status now that Paid has flipped: any leftover unfired line stops counting
+        // as outstanding kitchen work the moment the bill closes (see
+        // OrderBuildingService.RecomputeOrderStatus). Without this the order stayed pinned at New
+        // with no way back — Fire/AddItem/RemoveItem/Cancel all refuse a paid order — so its table
+        // could never be freed again.
+        OrderBuildingService.RecomputeOrderStatus(order);
 
         // Guest-session settle hook (doc Section 5.1): the exact instant a table's bill
         // is settled, close its GuestSession too — this is what makes the old phone's
@@ -1778,7 +1822,7 @@ public class OrdersController(
     /// can't express (it always requires a positive amount to submit). Rejects if anything's
     /// still owed; use Pay to collect that first.</summary>
     [HttpPatch("{id:int}/close")]
-    public Task<ActionResult<OrderDto>> Close(int id) =>
+    public Task<ActionResult<OrderDto>> Close(int id, CloseOrderRequest? req = null) =>
         // Flips Paid, exactly like Pay — so it needs the same serialisation, or Close racing
         // a final Pay could settle the same bill twice over.
         DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
@@ -1787,6 +1831,11 @@ public class OrdersController(
         if (order is null) return NotFound();
         if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
+
+        // This is the call that ends a Pay First order, so unlike Pay's KeepOpen branch there is
+        // no "more items still coming" left to excuse an unfired line — same question, same answer
+        // required.
+        EnsureUnfiredItemsResolved(order, req?.UnfiredItems);
 
         var remaining = order.Total - order.Payments.Sum(p => p.Amount);
         if (remaining > 0.01m)

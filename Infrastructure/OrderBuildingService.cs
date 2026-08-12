@@ -665,10 +665,20 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     /// one (added late via Add Item, or a quantity top-up, see OrdersController.UpdateItemQty)
     /// rolled up to SERVED with an item the kitchen had never been told about. That order then
     /// dropped out of the activeOnly list, freed its table, and could be settled for a total that
-    /// billed food nobody ever made.</summary>
+    /// billed food nobody ever made.
+    ///
+    /// That pin lifts once the bill is Paid, and it has to: settled means nothing more is going to
+    /// the kitchen, so an unfired line left over is a line that never will be made, not outstanding
+    /// work. Pinning it at New past the settle stranded the order — a table frees only once its
+    /// order is both Paid AND Served (see TablesController's occupancy query), while every route
+    /// out (Fire, AddItem, RemoveItem, Cancel) refuses a paid order, so the seat could never be
+    /// cleared again. Serving progress is deliberately still allowed after payment (see
+    /// OrdersController.AdvanceUnitsEndpoint/ServeAll), so the fired KOTs alone decide the rollup
+    /// from here and marking them served releases the table exactly as it does on any other
+    /// bill.</summary>
     public static void RecomputeOrderStatus(Order order)
     {
-        var hasUnfired = order.Items.Any(i => i.FireBatch == 0 && !i.Voided);
+        var hasUnfired = !order.Paid && order.Items.Any(i => i.FireBatch == 0 && !i.Voided);
         var active = order.FireBatches.Where(b => b.Status != OrderStatus.Served).ToList();
         order.Status = hasUnfired
             ? OrderStatus.New

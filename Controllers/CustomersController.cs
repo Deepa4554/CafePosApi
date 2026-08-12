@@ -256,7 +256,9 @@ public class CustomersController(CafePosDbContext db) : ControllerBase
             .ToListAsync();
 
         var visits = recentOrders.Select(o => new VisitDto(
-            o.Id, $"#{1000 + o.Id}", o.CreatedAt, o.Total, (int)Math.Floor(o.Total), o.Items.Select(i => i.Name).ToList()));
+            // Cancelled lines are off the bill this visit's Total came from, so listing them
+            // would tell the cafe the guest ate something they were never charged for.
+            o.Id, $"#{1000 + o.Id}", o.CreatedAt, o.Total, (int)Math.Floor(o.Total), o.Items.Where(i => !i.Voided).Select(i => i.Name).ToList()));
 
         var favoriteMenuIds = customer.FavoriteItems.Select(f => f.MenuItemId).ToList();
         var favoriteMenu = await db.MenuItems.Where(m => favoriteMenuIds.Contains(m.Id)).ToDictionaryAsync(m => m.Id);

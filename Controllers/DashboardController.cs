@@ -120,8 +120,11 @@ public class DashboardController : ControllerBase
             .Select((b, i) => new HourlyLoadDto(b.Label, hourCounts[i], (int)Math.Round(hourCounts[i] * 100.0 / maxHourCount)))
             .ToList();
 
+        // Cancelled lines were never sold — the guest was not charged for them (RecomputeTotals
+        // sums live lines only), so counting their Qty here would rank a dish by food that was
+        // voided rather than served, against a revenue figure that excludes it.
         var topItems = currentPaid
-            .SelectMany(o => o.Items)
+            .SelectMany(o => o.Items.Where(i => !i.Voided))
             .GroupBy(i => i.Name)
             .Select(g => new TopItemDto(g.Key, g.Sum(i => i.Qty)))
             .OrderByDescending(t => t.Qty)
