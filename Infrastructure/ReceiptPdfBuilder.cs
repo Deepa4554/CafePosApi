@@ -46,7 +46,12 @@ public static class ReceiptPdfBuilder
 
                     col.Item().PaddingTop(6).LineHorizontal(0.5f);
 
-                    foreach (var item in order.Items)
+                    // Live lines only. A voided line stays on the order forever (never deleted,
+                    // so the KOT and void history survive) but is not billed — every money
+                    // figure below comes from RecomputeTotals, which sums non-voided lines
+                    // alone. Itemising the voided ones here printed food the guest was not
+                    // charged for, on the very document handed to them as the bill.
+                    foreach (var item in order.Items.Where(i => !i.Voided))
                     {
                         var variantSuffix = item.VariantName is null ? "" : $" ({item.VariantName})";
                         col.Item().Row(row =>
