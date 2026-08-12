@@ -170,6 +170,16 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     /// that can't reach the CRM screens can still run credit for its regulars.</summary>
     public DbSet<KhataEntry> KhataEntries => Set<KhataEntry>();
 
+    /// <summary>Tiffin/thali plan — see TiffinSubscriber. Sits under CRM like the khata because a
+    /// subscription hangs off a Customer record, but the Tiffin screen is Normal-plan and open to
+    /// floor staff for the daily roster (billing within it stays Owner/Manager, enforced in the
+    /// controller, not here).</summary>
+    public DbSet<TiffinSubscriber> TiffinSubscribers => Set<TiffinSubscriber>();
+    public DbSet<TiffinMark> TiffinMarks => Set<TiffinMark>();
+    public DbSet<TiffinInvoice> TiffinInvoices => Set<TiffinInvoice>();
+    public DbSet<TiffinPayment> TiffinPayments => Set<TiffinPayment>();
+    public DbSet<TiffinWalletTransaction> TiffinWalletTransactions => Set<TiffinWalletTransaction>();
+
     // Management
     public DbSet<StaffTask> Tasks => Set<StaffTask>();
     public DbSet<AppNotification> Notifications => Set<AppNotification>();
@@ -271,6 +281,38 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
             .HasForeignKey(e => e.CustomerId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        // A tiffin subscription hangs off a Customer; deleting the customer takes the plan and
+        // (via the cascades below) its marks and invoices with it, same as the khata.
+        modelBuilder.Entity<TiffinSubscriber>()
+            .HasOne(s => s.Customer)
+            .WithMany()
+            .HasForeignKey(s => s.CustomerId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // A day-mark and an invoice have no meaning without their subscriber — cascade both.
+        modelBuilder.Entity<TiffinMark>()
+            .HasOne(m => m.Subscriber)
+            .WithMany()
+            .HasForeignKey(m => m.SubscriberId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<TiffinInvoice>()
+            .HasOne(i => i.Subscriber)
+            .WithMany()
+            .HasForeignKey(i => i.SubscriberId)
+            .OnDelete(DeleteBehavior.Cascade);
+        // A payment has no existence outside its invoice, same reasoning as Order.Items.
+        modelBuilder.Entity<TiffinInvoice>()
+            .HasMany(i => i.Payments)
+            .WithOne(p => p.Invoice)
+            .HasForeignKey(p => p.InvoiceId)
+            .OnDelete(DeleteBehavior.Cascade);
+        // Same reasoning — a wallet entry has no existence outside its subscriber.
+        modelBuilder.Entity<TiffinWalletTransaction>()
+            .HasOne(t => t.Subscriber)
+            .WithMany()
+            .HasForeignKey(t => t.SubscriberId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         modelBuilder.Entity<SupportTicket>()
             .HasMany(t => t.Messages)
             .WithOne()
@@ -333,6 +375,12 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<AppUser>().Property(u => u.Role).HasConversion<string>();
         modelBuilder.Entity<Coupon>().Property(c => c.Type).HasConversion<string>();
         modelBuilder.Entity<KhataEntry>().Property(e => e.Type).HasConversion<string>();
+        modelBuilder.Entity<TiffinSubscriber>().Property(s => s.Type).HasConversion<string>();
+        modelBuilder.Entity<TiffinSubscriber>().Property(s => s.MealType).HasConversion<string>();
+        modelBuilder.Entity<TiffinSubscriber>().Property(s => s.PaymentMode).HasConversion<string>();
+        modelBuilder.Entity<TiffinMark>().Property(m => m.Status).HasConversion<string>();
+        modelBuilder.Entity<TiffinInvoice>().Property(i => i.Status).HasConversion<string>();
+        modelBuilder.Entity<TiffinWalletTransaction>().Property(t => t.Type).HasConversion<string>();
         modelBuilder.Entity<GiftCard>().Property(g => g.Status).HasConversion<string>();
         modelBuilder.Entity<StaffTask>().Property(t => t.Priority).HasConversion<string>();
         modelBuilder.Entity<StaffTask>().Property(t => t.Status).HasConversion<string>();
@@ -427,6 +475,20 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // Every khata read is "this customer's ledger, newest first" or "sum this customer's
         // rows" — both are covered by one composite. Tenant-prefixed like the rest.
         modelBuilder.Entity<KhataEntry>().HasIndex(e => new { e.TenantId, e.CustomerId, e.CreatedAt });
+        // The roster reads "this cafe's active subscribers"; billing scans them all. One
+        // tenant-prefixed index by customer covers the lookups and the one-active-plan check.
+        modelBuilder.Entity<TiffinSubscriber>().HasIndex(s => new { s.TenantId, s.CustomerId });
+        // At most one override per (subscriber, date) — the roster upserts on this, so it must be
+        // unique, and the roster/billing scans both filter by subscriber + date range.
+        modelBuilder.Entity<TiffinMark>().HasIndex(m => new { m.TenantId, m.SubscriberId, m.Date }).IsUnique();
+        // Invoices are read by subscriber + period (the "already billed?" check) and listed by
+        // tenant; this composite covers both.
+        modelBuilder.Entity<TiffinInvoice>().HasIndex(i => new { i.TenantId, i.SubscriberId, i.PeriodStart });
+        modelBuilder.Entity<TiffinPayment>().HasIndex(p => new { p.TenantId, p.InvoiceId });
+        // At most one Deduction row per (subscriber, date) — SyncWalletDeductionAsync upserts on
+        // this, same shape as TiffinMark's index. Postgres treats each Recharge's null ForDate as
+        // distinct, so recharges never collide with each other or with a deduction.
+        modelBuilder.Entity<TiffinWalletTransaction>().HasIndex(t => new { t.TenantId, t.SubscriberId, t.ForDate }).IsUnique();
         // AppUser.Email stays globally unique (not tenant-scoped): one email = one
         // login, and login must resolve it before any tenant is known. Staff logins
         // store their 10-digit mobile number in this same column instead of a real

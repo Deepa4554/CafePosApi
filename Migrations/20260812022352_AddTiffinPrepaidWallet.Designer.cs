@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260812022352_AddTiffinPrepaidWallet")]
+    partial class AddTiffinPrepaidWallet
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1457,9 +1460,6 @@ namespace CafePOS.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<int?>("SortOrder")
-                        .HasColumnType("integer");
-
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
@@ -1746,112 +1746,6 @@ namespace CafePOS.Api.Migrations
                     b.ToTable("ModifierOptions");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.Offer", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<bool>("AutoApply")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("BuyQty")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("CategoryName")
-                        .HasColumnType("text");
-
-                    b.Property<decimal>("ComboPrice")
-                        .HasColumnType("numeric");
-
-                    b.Property<string>("DaysOfWeek")
-                        .HasColumnType("text");
-
-                    b.Property<TimeOnly?>("EndTime")
-                        .HasColumnType("time without time zone");
-
-                    b.Property<DateTime?>("EndsAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("GetQty")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("MaxApplicationsPerBill")
-                        .HasColumnType("integer");
-
-                    b.Property<decimal>("MaxDiscountAmount")
-                        .HasColumnType("numeric");
-
-                    b.Property<decimal>("MinOrderValue")
-                        .HasColumnType("numeric");
-
-                    b.Property<int>("Scope")
-                        .HasColumnType("integer");
-
-                    b.Property<bool>("Stackable")
-                        .HasColumnType("boolean");
-
-                    b.Property<TimeOnly?>("StartTime")
-                        .HasColumnType("time without time zone");
-
-                    b.Property<DateTime?>("StartsAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<int>("Type")
-                        .HasColumnType("integer");
-
-                    b.Property<decimal>("Value")
-                        .HasColumnType("numeric");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.ToTable("Offers");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.OfferMenuItem", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("MenuItemId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("OfferId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OfferId");
-
-                    b.HasIndex("TenantId");
-
-                    b.ToTable("OfferMenuItems");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.Order", b =>
                 {
                     b.Property<int>("Id")
@@ -1859,9 +1753,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("integer");
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("AppliedOfferTitle")
-                        .HasColumnType("text");
 
                     b.Property<decimal>("BillDiscountAmount")
                         .HasColumnType("numeric");
@@ -1959,9 +1850,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<int>("LoyaltyPointsRedeemed")
                         .HasColumnType("integer");
 
-                    b.Property<decimal>("OfferDiscountAmount")
-                        .HasColumnType("numeric");
-
                     b.Property<string>("OrderType")
                         .IsRequired()
                         .HasColumnType("text");
@@ -2057,41 +1945,6 @@ namespace CafePOS.Api.Migrations
                     b.ToTable("Orders");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.OrderAppliedOffer", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<decimal>("DiscountAmount")
-                        .HasColumnType("numeric");
-
-                    b.Property<int>("OfferId")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("OfferTitle")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<int>("OrderId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OrderId");
-
-                    b.HasIndex("TenantId");
-
-                    b.ToTable("OrderAppliedOffer");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.OrderFireBatch", b =>
                 {
                     b.Property<int>("Id")
@@ -2148,9 +2001,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
-
-                    b.Property<decimal>("OfferDiscountAmount")
-                        .HasColumnType("numeric");
 
                     b.Property<int>("OrderId")
                         .HasColumnType("integer");
@@ -4062,15 +3912,6 @@ namespace CafePOS.Api.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.OfferMenuItem", b =>
-                {
-                    b.HasOne("CafePOS.Api.Domain.Offer", null)
-                        .WithMany("Items")
-                        .HasForeignKey("OfferId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.Order", b =>
                 {
                     b.HasOne("CafePOS.Api.Domain.Customer", "Customer")
@@ -4079,15 +3920,6 @@ namespace CafePOS.Api.Migrations
                         .OnDelete(DeleteBehavior.SetNull);
 
                     b.Navigation("Customer");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.OrderAppliedOffer", b =>
-                {
-                    b.HasOne("CafePOS.Api.Domain.Order", null)
-                        .WithMany("AppliedOffers")
-                        .HasForeignKey("OrderId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.OrderFireBatch", b =>
@@ -4266,15 +4098,8 @@ namespace CafePOS.Api.Migrations
                     b.Navigation("Options");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.Offer", b =>
-                {
-                    b.Navigation("Items");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.Order", b =>
                 {
-                    b.Navigation("AppliedOffers");
-
                     b.Navigation("FireBatches");
 
                     b.Navigation("Items");

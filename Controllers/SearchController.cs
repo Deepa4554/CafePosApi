@@ -41,11 +41,17 @@ public class SearchController : ControllerBase
         // which Postgres CAN use for a leading wildcard, so the shape of this query is
         // deliberately left alone: it's the index that changed, not the predicate.
         var term = q.Trim().ToLower();
+        // A fully-numeric term is a short code typed in full (e.g. "24") — match it exactly,
+        // not as a substring, so "24" doesn't also surface "124"/"244". Alphabetic codes stay
+        // substring-matched so partials still work.
+        var numericTerm = term.All(char.IsDigit);
         var results = new List<SearchResultDto>();
 
         var menu = await db.MenuItems
             .Where(m => m.Name.ToLower().Contains(term)
-                || (m.ShortCode != null && m.ShortCode.ToLower().Contains(term)))
+                || (m.ShortCode != null && (numericTerm
+                    ? m.ShortCode.ToLower() == term
+                    : m.ShortCode.ToLower().Contains(term))))
             .Take(PerCategoryLimit).ToListAsync();
         results.AddRange(menu.Select(m => new SearchResultDto("Menu", m.Id.ToString(), m.Name, $"{m.Category} · ₹{m.Price:F2}")));
 

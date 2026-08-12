@@ -25,6 +25,9 @@ public static class ScreenCatalog
         // Normal, deliberately below the CRM screens it shares a Customer record with —
         // running a khata for regulars is what the smallest shops do most, not least.
         ["Khatabook"] = PlanCategory.Normal,
+        // Normal, like the khata it sits beside — a tiffin/thali round is exactly the standing
+        // credit-and-plate business the smallest shops run, not a premium add-on.
+        ["Tiffin"] = PlanCategory.Normal,
         ["TeamPortal"] = PlanCategory.Normal,
         ["Attendance"] = PlanCategory.Plus,
         ["Leave"] = PlanCategory.Plus,
