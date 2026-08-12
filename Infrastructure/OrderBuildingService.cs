@@ -615,6 +615,23 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         db.Notifications.Add(notification);
     }
 
+    /// <summary>What one fire batch's status should be, given the statuses of its own NON-VOIDED
+    /// lines — the batch sits at its least-progressed live line, and is Served once none of them
+    /// is outstanding.
+    ///
+    /// An empty sequence means every line on that KOT has since been voided, and it rolls up
+    /// Served for the same reason a finished batch does: there is nothing left for the kitchen to
+    /// make. This case used to leave the batch pinned at whatever it held before the last void
+    /// (New/Preparing), which RecomputeOrderStatus below then picked as the order's
+    /// least-progressed work forever. Since a table only frees once its order is both Paid AND
+    /// Served (see TablesController's occupancy query), a table whose last remaining KOT was
+    /// voided stayed Occupied even after the bill was fully settled, with no way to clear it.</summary>
+    public static OrderStatus BatchRollup(IReadOnlyCollection<OrderStatus> liveItemStatuses)
+    {
+        var active = liveItemStatuses.Where(s => s != OrderStatus.Served).ToList();
+        return active.Count > 0 ? active.Min() : OrderStatus.Served;
+    }
+
     public void RecomputeBatchStatus(CafePosDbContext db, Order order, int batchNumber)
     {
         var batch = order.FireBatches.FirstOrDefault(b => b.BatchNumber == batchNumber);
@@ -623,11 +640,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // (nobody advances it further, the kitchen was told to stop), so counting it here
         // would permanently block the batch from ever rolling up to Ready/Served.
         var items = order.Items.Where(i => i.FireBatch == batchNumber && !i.Voided).ToList();
-        if (items.Count == 0) return;
 
         var previous = batch.Status;
-        var active = items.Where(i => i.Status != OrderStatus.Served).ToList();
-        batch.Status = active.Count > 0 ? active.Min(i => i.Status) : OrderStatus.Served;
+        batch.Status = BatchRollup(items.Select(i => i.Status).ToList());
 
         if (previous != OrderStatus.Ready && batch.Status == OrderStatus.Ready)
         {
