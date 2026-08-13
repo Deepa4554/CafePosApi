@@ -35,3 +35,33 @@ resets every time you restart, but every endpoint works today.
 
 For production traffic, switch to the **transaction pooler (port 6543)**
 connection string instead — but always run migrations against port 5432.
+
+## Razorpay (subscription checkout)
+
+`POST /api/payments/create-order` + `POST /api/payments/verify` back the Upgrade
+button on the app's Subscription screen (Razorpay Standard Checkout — see
+`Controllers/PaymentsController.cs`). Both are Owner-only, and the plan is only
+applied after Razorpay's signature is re-computed server-side.
+
+Leave the keys unset and the feature stays off: the endpoints answer "online
+payments aren't set up yet" and the app keeps showing the old *Contact to
+Upgrade* message. Nothing else in the product depends on it.
+
+Credentials **never** go in `appsettings.json` / `appsettings.Development.json`
+— both are committed. Locally:
+
+```
+dotnet user-secrets set "Razorpay:KeyId"     "rzp_test_xxxxxxxxxxxx"
+dotnet user-secrets set "Razorpay:KeySecret" "xxxxxxxxxxxxxxxxxxxxxx"
+```
+
+On Render, set the env vars `Razorpay__KeyId` and `Razorpay__KeySecret`
+(double underscore). Get both from Razorpay Dashboard → **Account & Settings →
+API Keys**; test keys start `rzp_test_`, live keys `rzp_live_`. The **key id** is
+public — the browser receives it in the create-order response, which is why the
+web build has no copy of its own. The **key secret** is both the API password and
+the HMAC key that makes a payment signature mean anything, so it must never
+reach the frontend or the repository.
+
+Prices live in `Infrastructure/SubscriptionPricing.cs` and must stay in step
+with `GRID_PLANS` in the app's `SubscriptionScreen.tsx`.

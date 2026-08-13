@@ -14,7 +14,11 @@ public class SubscriptionExpiryMiddleware(RequestDelegate next)
 {
     private static readonly string[] AllowedPrefixes =
     [
-        "/api/auth", "/api/subscription", "/api/settings", "/api/public", "/order", "/health", "/swagger",
+        // /api/payments belongs on this list for the same reason /api/subscription does, and
+        // more urgently: an expired tenant renewing is the single most important request this
+        // middleware must not block — 402-ing the checkout would leave the only way out of
+        // the lockout behind the lockout.
+        "/api/auth", "/api/subscription", "/api/payments", "/api/settings", "/api/public", "/order", "/health", "/swagger",
     ];
 
     public async Task InvokeAsync(HttpContext context, CafePosDbContext db, ITenantContext tenant, ISubscriptionCache subscriptions)

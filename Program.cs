@@ -231,6 +231,18 @@ builder.Services.AddHttpClient<WhatsAppNodeClient>((sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(10);
 });
 
+// ---------- Payments (Razorpay Standard Checkout, subscription plans) ----------
+// Left unconfigured (no Razorpay:KeyId/KeySecret), PaymentsController answers "online
+// payments aren't set up yet" and the app falls back to the old "contact your provider"
+// message — nothing else in the product depends on this. Credentials come from the
+// Razorpay__KeyId/Razorpay__KeySecret env vars in deployment and `dotnet user-secrets`
+// locally; they are deliberately absent from the committed appsettings.*.json.
+builder.Services.Configure<RazorpayOptions>(builder.Configuration.GetSection("Razorpay"));
+builder.Services.AddHttpClient<IRazorpayClient, RazorpayClient>(client =>
+    // Well under the 100s HttpClient default: the owner is sitting in front of a modal
+    // waiting for this, and a create-order that's still going after 20s has failed.
+    client.Timeout = TimeSpan.FromSeconds(20));
+
 // Borzo courier booking for DELIVERY orders (see DeliveryController). No BaseAddress and no
 // auth configured here on purpose: both the environment (sandbox vs production) and the token
 // belong to the individual cafe, not the deployment, so BorzoClient carries them per call.

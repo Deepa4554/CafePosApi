@@ -109,7 +109,10 @@ public class TiffinController(CafePosDbContext db) : ControllerBase
             PlanName = string.IsNullOrWhiteSpace(req.PlanName) ? "Tiffin" : req.PlanName.Trim(),
             MealType = mealType,
             Rate = req.Rate,
-            DefaultQty = req.DefaultQty > 0 ? req.DefaultQty : 1,
+            // Daily delivers this qty every day by default, so it can't be 0. Occasional
+            // delivers nothing by default regardless (see BuildRosterEntry) — 0 there just means
+            // no standing qty until someone marks a day, so it's left as entered.
+            DefaultQty = type == TiffinType.Occasional ? Math.Max(req.DefaultQty, 0) : (req.DefaultQty > 0 ? req.DefaultQty : 1),
             DeliveryAddress = string.IsNullOrWhiteSpace(req.DeliveryAddress) ? null : req.DeliveryAddress.Trim(),
             StartDate = req.StartDate ?? TodayIst,
             Notes = string.IsNullOrWhiteSpace(req.Notes) ? null : req.Notes.Trim(),
@@ -137,7 +140,7 @@ public class TiffinController(CafePosDbContext db) : ControllerBase
         sub.PaymentMode = ParsePaymentMode(req.PaymentMode);
         sub.PlanName = string.IsNullOrWhiteSpace(req.PlanName) ? "Tiffin" : req.PlanName.Trim();
         sub.Rate = req.Rate;
-        sub.DefaultQty = req.DefaultQty > 0 ? req.DefaultQty : 1;
+        sub.DefaultQty = sub.Type == TiffinType.Occasional ? Math.Max(req.DefaultQty, 0) : (req.DefaultQty > 0 ? req.DefaultQty : 1);
         sub.DeliveryAddress = string.IsNullOrWhiteSpace(req.DeliveryAddress) ? null : req.DeliveryAddress.Trim();
         sub.IsActive = req.IsActive;
         sub.Notes = string.IsNullOrWhiteSpace(req.Notes) ? null : req.Notes.Trim();
