@@ -63,8 +63,22 @@ public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, int
 /// quantity, not a delta. Must be ≥ 1; removing a line entirely is still DELETE .../items/{itemId},
 /// which carries its own "order must keep at least one item" rule. Reason is required only when the
 /// change pulls back units that are already Preparing/Ready or recorded as served (same wastage
-/// rule as RemoveItem) — see OrdersController.UpdateItemQty.</summary>
-public record UpdateOrderItemQtyRequest(int Qty, string? Reason = null);
+/// rule as RemoveItem) — see OrdersController.UpdateItemQty.
+///
+/// <paramref name="ReasonCode"/> is the picked one of the fixed reasons; <paramref name="Reason"/>
+/// is the free-text note beside it, and is what's required when the code is Other.
+/// <paramref name="Unprepared"/> is the staff member's assertion that the units being pulled back
+/// were never actually made, and is the only thing that puts their stock back. It's honoured ONLY
+/// for units the line had recorded as SERVED — at every other stage the server knows the answer
+/// itself and ignores this.</summary>
+public record UpdateOrderItemQtyRequest(int Qty, string? Reason = null,
+    VoidReasonCode ReasonCode = VoidReasonCode.Other, bool Unprepared = false);
+
+/// <summary>Overrides one line's per-unit rate on THIS order only — <paramref name="Price"/> is the
+/// new effective rate, replacing whatever the catalog priced the line at, and the menu is left
+/// untouched. Must be > 0. Reason is required only when the rate goes DOWN (the direction that
+/// costs the cafe money) — see OrdersController.UpdateItemPrice.</summary>
+public record UpdateOrderItemPriceRequest(decimal Price, string? Reason = null);
 
 /// <summary>Manager-only markdown applied at the billing stage (Served). Supply exactly
 /// one of Pct (percentage of subtotal) or Amount (flat).</summary>

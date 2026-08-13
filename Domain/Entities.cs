@@ -11,6 +11,31 @@ public enum OrderStatus
     Served,
 }
 
+/// <summary>Why a line was taken off a bill — a fixed list rather than free text so the same
+/// reason reads identically on every screen and can be grouped in reports later. Deliberately
+/// says nothing about stock on its own: what the code carries is the cafe's WHY, while
+/// OrderItem.VoidedUnprepared carries the physical fact that actually drives the reversal (see
+/// OrdersController.VoidItemAsync). They're independent — "guest sent it back" can be either
+/// food that was cooked or food that never left the counter.
+///
+/// Other is 0 so every line voided before this list existed reads as exactly what it was: a
+/// free-text reason in VoidReason and nothing more.</summary>
+public enum VoidReasonCode
+{
+    Other,
+    /// <summary>A mis-tap marked the line Served — the guest never actually got it. The one
+    /// this list mainly exists for: serving is a single tap with no confirmation
+    /// (OrdersController.ServeItem), and JumpToServed wipes the per-stage unit counts, so
+    /// afterwards nothing in the data says whether the kitchen had made it.</summary>
+    MisTappedServed,
+    /// <summary>Wrong dish rung up at the till.</summary>
+    WrongItemPunched,
+    /// <summary>Guest sent it back, or complained and it was taken off.</summary>
+    GuestReturned,
+    /// <summary>Kitchen made the wrong thing, or made it badly.</summary>
+    KitchenError,
+}
+
 /// <summary>Prepared items consume ingredients via a Recipe (BOM) on sale; Independent
 /// items decrease their own linked InventoryItem stock directly (e.g. bottled water).</summary>
 public enum ProductType { Prepared, Independent }
@@ -534,6 +559,16 @@ public class OrderItem : ITenantScoped
     public bool Voided { get; set; }
     public DateTime? VoidedAt { get; set; }
     public string? VoidReason { get; set; }
+    /// <summary>Which of the fixed reasons the staff member picked. VoidReason stays alongside
+    /// it as the free-text note (required when the code is Other).</summary>
+    public VoidReasonCode VoidReasonCode { get; set; } = VoidReasonCode.Other;
+    /// <summary>Staff's assertion, at void time, that the kitchen never actually made this food
+    /// — the fact that decides whether its ingredients go back on the shelf. Only ever settable
+    /// for a line already recorded as SERVED: at every other stage the system knows the answer
+    /// itself (New/Read = not made, Preparing/Ready = made) and doesn't ask. Stored rather than
+    /// just acted on, so "which voids put stock back, and who signed for them" is a query rather
+    /// than an audit-log grep. See OrdersController.VoidItemAsync.</summary>
+    public bool VoidedUnprepared { get; set; }
 
     /// <summary>Units still at New (not yet acknowledged) — derived, not stored.</summary>
     [NotMapped]

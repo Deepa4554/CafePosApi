@@ -603,13 +603,33 @@ public class OrdersController(
     /// <summary>Removes/voids an item from a not-yet-paid order.
     /// Unfired (FireBatch == 0): freely hard-deleted — nothing was ever deducted, even if
     /// other items on the same order are already Served (this one never reached the kitchen).
-    /// Fired: only an Owner/Manager may pull it back, only if it hasn't been Served, and it's
-    /// VOIDED rather than deleted (see VoidItemAsync) so KOT/ledger history survives. Still
-    /// New/Read (prep hasn't started) reverses its inventory deduction automatically; once
-    /// Preparing/Ready a reason is required and stock is NOT reversed (food is genuinely
-    /// spent) — matches the doc's "void before cooking vs void with wastage" rule.</summary>
+    /// Fired: only an Owner/Manager may pull it back, and it's VOIDED rather than deleted (see
+    /// VoidItemAsync) so KOT/ledger history survives. Still New/Read (prep hasn't started)
+    /// reverses its inventory deduction automatically; once Preparing/Ready a reason is required
+    /// and stock is NOT reversed (food is genuinely spent) — matches the doc's "void before
+    /// cooking vs void with wastage" rule.
+    ///
+    /// A SERVED line is voidable too, rather than being refused outright as it used to be. The
+    /// refusal contradicted UpdateItemQty, which deliberately lets the till cut served units off a
+    /// bill ("they had 3 lassis, not 4") because counts get settled at the till, not in the
+    /// kitchen. With qty floored at 1, a wrongly-rung single served line was the one correction
+    /// neither endpoint could make: 3→1 was allowed, 1→0 was not.
+    ///
+    /// Served is also the ONE stage where the server can't work out the stock answer for itself.
+    /// New/Read means nothing was cooked, Preparing/Ready means it was — but JumpToServed zeroes
+    /// the per-stage unit counts, so a served line no longer says which it had been. So this is
+    /// the only stage that accepts <paramref name="unprepared"/>: the staff member's assertion
+    /// that the kitchen never actually made the food, which is what puts its ingredients back.
+    /// Everywhere else the flag is ignored rather than rejected — the server owns the policy, and
+    /// there's nothing for a caller to gain by lying about a stage the server can already see.
+    ///
+    /// Both served outcomes audit at High: taking served food off a bill and crediting stock back
+    /// for food "never made" are the two shapes till-side leakage takes, and the second is the
+    /// quieter one — it reconciles perfectly, so it's the one that most needs to be loud in the
+    /// log. VoidedUnprepared is persisted alongside so it can be reported on per staff member.</summary>
     [HttpDelete("{id:int}/items/{itemId:int}")]
-    public Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId, [FromQuery] string? reason = null) =>
+    public Task<ActionResult<OrderDto>> RemoveItem(int id, int itemId, [FromQuery] string? reason = null,
+        [FromQuery] VoidReasonCode reasonCode = VoidReasonCode.Other, [FromQuery] bool unprepared = false) =>
         // Same lost-update exposure as AddItem, plus this one can reverse stock — see
         // VoidItemAsync.
         DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
@@ -624,12 +644,14 @@ public class OrdersController(
         if (item.FireBatch > 0)
         {
             if (!IsOwnerOrManager()) return Forbid();
-            if (item.Status == OrderStatus.Served) throw new ApiConflictException("Cannot remove an item that's already been served.");
-            if (item.Status is OrderStatus.Preparing or OrderStatus.Ready && string.IsNullOrWhiteSpace(reason))
-                throw new ApiValidationException("A reason is required to void an item that's already in preparation.");
+            // The picked reason IS the reason once the list covers it — free text is only the
+            // fallback, so it's only demanded when the staff member fell back to Other.
+            if (item.Status is OrderStatus.Preparing or OrderStatus.Ready or OrderStatus.Served
+                && reasonCode == VoidReasonCode.Other && string.IsNullOrWhiteSpace(reason))
+                throw new ApiValidationException("A reason is required to void an item that's already in preparation or served.");
         }
 
-        await VoidItemAsync(order, item, reason);
+        await VoidItemAsync(order, item, reason, reasonCode, unprepared);
         order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
         // Cart changed, so any auto-applied offer has to be re-priced against it (a BOGO can
         // gain or lose its free unit) before totals are recomputed. Tenant comes from the JWT
@@ -676,13 +698,16 @@ public class OrdersController(
     /// till, not in the kitchen ("was it 3 lassis or 4?"), and by then every unit is served — a
     /// floor at ServedQty would make the one correction this endpoint exists for impossible.
     ///
-    /// Only New/Read units put ingredients back (see ReverseItemStockAsync). Preparing/Ready is
-    /// genuinely spent food, and a SERVED unit is one this system already believes left the
-    /// kitchen — crediting its stock back would let "served 4, billed 3" balance itself out and
-    /// leave nothing anywhere looking wrong. The cafe instead counts slightly MORE on the shelf
-    /// than the system claims, which is the direction that gets noticed. Both cases require a
-    /// reason and are audited; pulling back a served unit is logged at High severity, since that
-    /// is the shape till-side leakage takes.</summary>
+    /// New/Read units always put ingredients back (see ReverseItemStockAsync). Preparing/Ready
+    /// never do — genuinely spent food. A SERVED unit depends on <c>req.Unprepared</c>, exactly
+    /// as in RemoveItem: by default it doesn't, because crediting stock back for food the system
+    /// believes went out would let "served 4, billed 3" balance itself out and leave nothing
+    /// anywhere looking wrong (the cafe instead counts slightly MORE on the shelf than the system
+    /// claims, the direction that gets noticed). Set, it says those units were never actually
+    /// made — a mis-tap, not a discount — so their deduction was for food that doesn't exist and
+    /// is credited back. Every case past the not-yet-cooked units needs a reason and is audited;
+    /// anything touching served units is High, since that is the shape till-side leakage
+    /// takes.</summary>
     [HttpPatch("{id:int}/items/{itemId:int}/qty")]
     public Task<ActionResult<OrderDto>> UpdateItemQty(int id, int itemId, UpdateOrderItemQtyRequest req) =>
         // Same lost-update exposure as AddItem (totals are recomputed from the line collection as
@@ -732,23 +757,34 @@ public class OrdersController(
 
             var removed = ReduceFiredLineQty(item, req.Qty);
             // Anything past the not-yet-cooked units is either food already in the pass or food
-            // the system believes has gone out — both need a reason on the record.
-            if (removed.FromPrepOrReady + removed.FromServed > 0 && string.IsNullOrWhiteSpace(req.Reason))
+            // the system believes has gone out — both need a reason on the record. Same bargain
+            // as RemoveItem: the picked code is the reason, free text only backs up Other.
+            if (removed.FromPrepOrReady + removed.FromServed > 0
+                && req.ReasonCode == VoidReasonCode.Other && string.IsNullOrWhiteSpace(req.Reason))
                 throw new ApiValidationException("A reason is required to pull back units that are already in preparation or served.");
+            var why = VoidReasonText(req.ReasonCode, req.Reason);
+            // Served units are the only ones whose stock answer isn't already in the data — see
+            // RemoveItem for why. `Unprepared` is the till saying those units were never actually
+            // made, which makes their deduction phantom and puts it back.
+            var servedStockBack = req.Unprepared && removed.FromServed > 0;
 
-            // Only the not-yet-cooked units put ingredients back — see the endpoint's own doc above
-            // for why a served unit deliberately doesn't.
+            // Not-yet-cooked units always put ingredients back; served ones only on that assertion;
+            // Preparing/Ready never (genuinely spent food).
             // Fraction of what the line still has on the shelf, not of the original quantity —
             // an earlier reduction may already have credited part of it back.
-            if (removed.Reversible > 0)
-                await ReverseItemStockAsync(item, (double)removed.Reversible / removed.QtyBefore, "Quantity reduced before prep");
+            var reversibleUnits = removed.Reversible + (servedStockBack ? removed.FromServed : 0);
+            if (reversibleUnits > 0)
+                await ReverseItemStockAsync(item, (double)reversibleUnits / removed.QtyBefore,
+                    servedStockBack ? "Quantity reduced — units recorded served in error, never made" : "Quantity reduced before prep");
             if (removed.FromPrepOrReady > 0)
                 await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
-                    $"Reduced '{item.Name}' (order {order.Id}) from {removed.QtyBefore} to {req.Qty} — {removed.FromPrepOrReady} unit(s) already in prep, no stock reversal (wastage). Reason: {req.Reason}.",
+                    $"Reduced '{item.Name}' (order {order.Id}) from {removed.QtyBefore} to {req.Qty} — {removed.FromPrepOrReady} unit(s) already in prep, no stock reversal (wastage). Reason: {why}.",
                     AuditSeverity.Medium);
             if (removed.FromServed > 0)
-                await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
-                    $"Billing correction: '{item.Name}' (order {order.Id}) cut from {removed.QtyBefore} to {req.Qty} — {removed.FromServed} unit(s) the system had recorded as SERVED were removed from the bill. Stock NOT reversed. Reason: {req.Reason}.",
+                await audit.LogAsync(servedStockBack ? AuditAction.InventoryChange : AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+                    servedStockBack
+                        ? $"STOCK RETURNED on SERVED units: '{item.Name}' (order {order.Id}) cut from {removed.QtyBefore} to {req.Qty} — {removed.FromServed} unit(s) the system had recorded as SERVED came off the bill AND had their ingredients credited back, on the staff assertion that they were never made. Reason: {why}."
+                        : $"Billing correction: '{item.Name}' (order {order.Id}) cut from {removed.QtyBefore} to {req.Qty} — {removed.FromServed} unit(s) the system had recorded as SERVED were removed from the bill. Stock NOT reversed. Reason: {why}.",
                     AuditSeverity.High);
 
             RecomputeItemStatus(item);
@@ -760,6 +796,80 @@ public class OrdersController(
         // Cart changed, so any auto-applied offer has to be re-priced against it (a BOGO can
         // gain or lose its free unit) before totals are recomputed. Tenant comes from the JWT
         // here, so no explicit id — the ambient filter scopes db.Offers to this cafe.
+        await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    });
+
+    /// <summary>Overrides one line's per-unit rate on a not-yet-paid order — the "iss customer ko
+    /// yeh ₹100 me de do" fix, scoped to THIS order and nothing else. The menu is deliberately not
+    /// touched: MenuController owns the catalog rate, and changing it there would re-price every
+    /// future order as well as leave this one alone (lines snapshot their rate when they're added).
+    ///
+    /// <c>req.Price</c> is the line's FINAL effective per-unit rate, not a delta and not a
+    /// percentage. It replaces <see cref="OrderItem.Price"/> outright, which already means "variant
+    /// rate plus every add-on delta" (see OrderBuildingService.ResolveLinePricingAsync) — so the
+    /// number the biller types is exactly what the bill charges per unit, with no add-on arithmetic
+    /// silently reapplied on top of it. Every Subtotal/Tax/Total computation reads that one field,
+    /// so nothing downstream needs to know an override happened. On an MRP line
+    /// (<see cref="OrderItem.PriceIncludesTax"/>) the typed rate stays tax-inclusive, exactly as
+    /// the rate typed at add-time was.
+    ///
+    /// Owner/Manager only, at every prep stage. This is money coming off a bill rather than food
+    /// coming off a ticket, so unlike UpdateItemQty there's no "unfired lines are free" relaxation:
+    /// an unfired line is the easiest possible thing to re-price unnoticed, and the kitchen's
+    /// involvement has nothing to do with what the guest is charged. For the same reason the stage
+    /// counters, batch rollups and inventory are all untouched — the food is unchanged, only its
+    /// price is — and no fired/served line is off limits, since a rate is settled at the till.
+    ///
+    /// A REDUCTION needs a reason and is audited as a Discount (High severity once any unit is
+    /// served — a quiet markdown after the food has gone out is the shape till-side leakage takes).
+    /// An INCREASE is logged at Low without one: it doesn't leak money, and blocking a corrected
+    /// undercharge behind a text box only encourages leaving the bill wrong.</summary>
+    [HttpPatch("{id:int}/items/{itemId:int}/price")]
+    public Task<ActionResult<OrderDto>> UpdateItemPrice(int id, int itemId, UpdateOrderItemPriceRequest req) =>
+        // Same lost-update exposure as UpdateItemQty — totals are recomputed from the line
+        // collection as this request sees it, so a concurrent Add Item would otherwise be
+        // recomputed away. No stock path here, unlike qty.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
+    {
+        if (!IsOwnerOrManager()) return Forbid();
+
+        var order = await LoadOrderForUpdateAsync(id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
+        if (order.Cancelled) throw new ApiConflictException("Cannot modify a cancelled order.");
+        if (req.Price <= 0) throw new ApiValidationException("Enter a rate greater than zero — remove the item instead.");
+
+        var item = order.Items.FirstOrDefault(i => i.Id == itemId && !i.Voided);
+        if (item is null) return NotFound();
+
+        var newPrice = decimal.Round(req.Price, 2);
+        var oldPrice = item.Price;
+        if (newPrice == oldPrice) return OrderDto.From(order);
+        if (newPrice < oldPrice && string.IsNullOrWhiteSpace(req.Reason))
+            throw new ApiValidationException("A reason is required to lower an item's rate.");
+
+        item.Price = newPrice;
+
+        if (newPrice < oldPrice)
+            await audit.LogAsync(AuditAction.Discount, AuditResource.Order, order.Id.ToString(),
+                $"Rate override: '{item.Name}' (order {order.Id}) lowered from {oldPrice:C} to {newPrice:C} per unit on {item.Qty} unit(s)" +
+                (item.ServedQty > 0 ? $" — {item.ServedQty} unit(s) already SERVED." : ".") +
+                $" Menu price unchanged. Reason: {req.Reason}.",
+                item.ServedQty > 0 ? AuditSeverity.High : AuditSeverity.Medium);
+        else
+            await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+                $"Rate override: '{item.Name}' (order {order.Id}) raised from {oldPrice:C} to {newPrice:C} per unit on {item.Qty} unit(s). Menu price unchanged." +
+                (string.IsNullOrWhiteSpace(req.Reason) ? "" : $" Reason: {req.Reason}."),
+                AuditSeverity.Low);
+
+        order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        // A re-rated line can cross an offer's threshold in either direction (a "₹500+ gets 10% off"
+        // cart, a BOGO that hands back the cheapest unit), so offers are re-priced against the new
+        // subtotal before totals — same order as every other cart mutation here.
         await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
         OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
 
@@ -1027,9 +1137,16 @@ public class OrdersController(
     /// <summary>Voids one line. Unfired (FireBatch==0): hard-deletes exactly as before fire-time
     /// deduction existed — nothing was ever deducted. Fired + New/Read (prep hasn't started):
     /// reverses the Sale deduction via new Return-type ledger rows keyed to this OrderItemId.
-    /// Fired + Preparing/Ready: flags Voided with NO reversal (wastage) and audits it. Served
-    /// is expected to already be rejected by the caller before this runs.</summary>
-    private async Task VoidItemAsync(Order order, OrderItem item, string? reason)
+    /// Fired + Preparing/Ready: flags Voided with NO reversal (wastage) and audits it — the
+    /// system can see the food was made, so <paramref name="unprepared"/> is ignored here.
+    /// Fired + Served: the one stage that can't be read off the data (see RemoveItem), so
+    /// <paramref name="unprepared"/> decides. False (the default) means the food really went
+    /// out: no reversal, because crediting stock back would let "served it, didn't bill it"
+    /// balance itself out and leave nothing anywhere looking wrong. True means it never left
+    /// the kitchen, so the fire-time deduction was for food that doesn't exist and is credited
+    /// back in full. Both audit at High.</summary>
+    private async Task VoidItemAsync(Order order, OrderItem item, string? reason,
+        VoidReasonCode reasonCode = VoidReasonCode.Other, bool unprepared = false)
     {
         if (item.FireBatch == 0)
         {
@@ -1041,6 +1158,13 @@ public class OrdersController(
         item.Voided = true;
         item.VoidedAt = DateTime.UtcNow;
         item.VoidReason = reason;
+        item.VoidReasonCode = reasonCode;
+        // Only a served line gets to claim this. At every other stage the unit counts still say
+        // what was made, so an assertion either agrees with them (nothing gained) or contradicts
+        // them (nothing that should be believed).
+        item.VoidedUnprepared = unprepared && item.Status == OrderStatus.Served;
+
+        var why = VoidReasonText(reasonCode, reason);
 
         if (item.Status is OrderStatus.New or OrderStatus.Read)
         {
@@ -1049,12 +1173,45 @@ public class OrdersController(
             // outstanding", the same full credit this used to do inline.
             await ReverseItemStockAsync(item, fraction: 1, reason: "Void before prep");
         }
+        else if (item.Status == OrderStatus.Served)
+        {
+            if (item.VoidedUnprepared)
+            {
+                await ReverseItemStockAsync(item, fraction: 1, reason: "Void — recorded served in error, never made");
+                await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
+                    $"STOCK RETURNED on a SERVED line: '{item.Name}' ×{item.Qty} (order {order.Id}) was voided off the bill and its ingredients credited back, on the staff assertion that the kitchen never made it. Reason: {why}.",
+                    AuditSeverity.High);
+            }
+            else
+            {
+                await audit.LogAsync(AuditAction.Update, AuditResource.Order, order.Id.ToString(),
+                    $"Billing correction: '{item.Name}' ×{item.Qty} (order {order.Id}) was voided off the bill after the system had recorded it as SERVED. Stock NOT reversed. Reason: {why}.",
+                    AuditSeverity.High);
+            }
+        }
         else
         {
             await audit.LogAsync(AuditAction.InventoryChange, AuditResource.Order, order.Id.ToString(),
-                $"Voided '{item.Name}' (order {order.Id}) after prep started — no stock reversal (wastage). Reason: {reason ?? "not specified"}.",
+                $"Voided '{item.Name}' (order {order.Id}) after prep started — no stock reversal (wastage). Reason: {why}.",
                 AuditSeverity.Medium);
         }
+    }
+
+    /// <summary>The reason as the audit trail should read it: the picked code's label, with the
+    /// free-text note appended when there is one. Under Other the note IS the reason, so it
+    /// stands alone.</summary>
+    private static string VoidReasonText(VoidReasonCode code, string? reason)
+    {
+        var note = string.IsNullOrWhiteSpace(reason) ? null : reason.Trim();
+        var label = code switch
+        {
+            VoidReasonCode.MisTappedServed => "marked served by mistake",
+            VoidReasonCode.WrongItemPunched => "wrong item punched",
+            VoidReasonCode.GuestReturned => "guest sent it back",
+            VoidReasonCode.KitchenError => "kitchen error",
+            _ => note ?? "not specified",
+        };
+        return code != VoidReasonCode.Other && note is not null ? $"{label} — {note}" : label;
     }
 
     /// <summary>Credits back <paramref name="fraction"/> of the ingredients this line's fire
