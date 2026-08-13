@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using CafePOS.Api.Contracts;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
@@ -111,31 +113,153 @@ public class PaymentsController(
             throw new ApiValidationException("This payment doesn't belong to your cafe.");
         }
 
-        if (!Enum.TryParse<SubscriptionTier>(notes.GetValueOrDefault(PlanNote), out var plan)
-            || !Enum.TryParse<BillingCycle>(notes.GetValueOrDefault(CycleNote), out var cycle))
-        {
-            logger.LogError("Razorpay order {OrderId} came back without usable plan/cycle notes", order.Id);
+        if (!TryReadPlanNotes(order, out var plan, out var cycle))
             throw new ApiValidationException("We couldn't tell which plan this payment was for — contact support.");
-        }
 
         // "paid" is Razorpay's own word for "the full order amount has been captured". An
         // order sitting at "attempted" means the money was authorised but not captured (an
         // account with auto-capture switched off, or a payment still being processed) — the
-        // signature is genuine either way, so this is a wait, not a fraud case.
+        // signature is genuine either way, so this is a wait, not a fraud case. The webhook
+        // below is the other half of this: when it does clear, payment.captured applies the
+        // plan without the owner having to come back and reopen the screen.
         if (!string.Equals(order.Status, "paid", StringComparison.OrdinalIgnoreCase) || order.AmountPaid < order.Amount)
             throw new ApiValidationException("This payment hasn't been captured yet. Give it a minute, then reopen this screen — your plan updates on its own once it clears.");
 
-        var sub = await db.Subscriptions.FirstAsync();
+        var sub = await ApplyPaidOrderAsync(order, req.RazorpayPaymentId, tenantId, plan, cycle);
+        return await BuildResponseAsync(sub);
+    }
+
+    /// <summary>
+    /// Razorpay's server-to-server notification that a payment was captured. This exists
+    /// because Verify above only runs if the browser is still there to call it: an owner who
+    /// pays and then closes the tab (or loses signal, or is on a UPI app that takes its time)
+    /// has been charged and would otherwise never get the plan they paid for.
+    ///
+    /// AllowAnonymous is required — Razorpay has no login here — so the HMAC over the raw body
+    /// IS the authentication. Everything the endpoint acts on afterwards is re-fetched from
+    /// Razorpay by order id rather than read out of the request: the body only says WHICH
+    /// order to look at, exactly like Verify only trusts the ids in its callback.
+    /// </summary>
+    [HttpPost("webhook")]
+    [AllowAnonymous]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public async Task<IActionResult> Webhook()
+    {
+        // Read before anything can consume the stream — the HMAC has to cover Razorpay's exact
+        // bytes, so this action deliberately takes no [FromBody] parameter.
+        string rawBody;
+        using (var reader = new StreamReader(Request.Body, Encoding.UTF8))
+            rawBody = await reader.ReadToEndAsync();
+
+        if (!razorpay.IsValidWebhookSignature(rawBody, Request.Headers["X-Razorpay-Signature"].FirstOrDefault()))
+        {
+            // Also the "not configured yet" path (blank WebhookSecret can't validate anything),
+            // which is why this says nothing specific back — an unauthenticated caller learns
+            // only that it was rejected.
+            logger.LogWarning("Rejected a Razorpay webhook with a bad or missing signature (webhook configured: {Configured})",
+                razorpay.IsWebhookConfigured);
+            return Unauthorized();
+        }
+
+        string? eventName, orderId, paymentId;
+        try
+        {
+            using var doc = JsonDocument.Parse(rawBody);
+            eventName = doc.RootElement.TryGetProperty("event", out var e) ? e.GetString() : null;
+            var entity = doc.RootElement.GetProperty("payload").GetProperty("payment").GetProperty("entity");
+            paymentId = entity.TryGetProperty("id", out var p) ? p.GetString() : null;
+            orderId = entity.TryGetProperty("order_id", out var o) ? o.GetString() : null;
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            // Signature was valid, so this really is Razorpay — an event shape we don't handle.
+            // 200 on purpose: a retry would deliver the same body and fail the same way.
+            logger.LogWarning(ex, "Razorpay webhook body wasn't in the expected payment shape; ignoring");
+            return Ok();
+        }
+
+        // Only the one event matters. Everything else (payment.failed, order.paid, the dozen
+        // others that may be switched on in the dashboard) is acknowledged and dropped —
+        // answering non-2xx would make Razorpay retry an event we are never going to act on.
+        if (!string.Equals(eventName, "payment.captured", StringComparison.OrdinalIgnoreCase))
+            return Ok();
+
+        if (string.IsNullOrWhiteSpace(orderId) || string.IsNullOrWhiteSpace(paymentId))
+        {
+            logger.LogWarning("Razorpay payment.captured arrived without an order id or payment id; ignoring");
+            return Ok();
+        }
+
+        // 500 rather than 200 if Razorpay's API is unreachable: that IS worth a retry, and
+        // Razorpay redelivers on a non-2xx.
+        RazorpayOrder order;
+        try
+        {
+            order = await razorpay.GetOrderAsync(orderId);
+        }
+        catch (RazorpayApiException ex)
+        {
+            logger.LogError(ex, "Couldn't fetch Razorpay order {OrderId} while handling payment.captured", orderId);
+            return StatusCode(StatusCodes.Status500InternalServerError);
+        }
+
+        // The tenant comes from the order's own notes, never from the request — and with no
+        // authenticated principal there is no ambient tenant to fall back on. See
+        // ApplyPaidOrderAsync for why every query it runs has to name this id explicitly.
+        var notes = order.Notes ?? [];
+        if (!int.TryParse(notes.GetValueOrDefault(TenantNote), out var tenantId)
+            || !TryReadPlanNotes(order, out var plan, out var cycle))
+        {
+            // A payment on this Razorpay account that wasn't started by our checkout — nothing
+            // to apply it to. Acknowledged so it stops being redelivered.
+            logger.LogWarning("Razorpay order {OrderId} has no usable tenant/plan/cycle notes; ignoring payment {PaymentId}",
+                orderId, paymentId);
+            return Ok();
+        }
+
+        if (!string.Equals(order.Status, "paid", StringComparison.OrdinalIgnoreCase) || order.AmountPaid < order.Amount)
+        {
+            // payment.captured fired but the order isn't fully paid — a partial payment, or
+            // Razorpay's order status lagging its payment status by a moment. Worth a retry.
+            logger.LogWarning("Razorpay order {OrderId} is {Status} ({Paid}/{Total} paise) on payment.captured; asking for a redelivery",
+                orderId, order.Status, order.AmountPaid, order.Amount);
+            return StatusCode(StatusCodes.Status500InternalServerError);
+        }
+
+        await ApplyPaidOrderAsync(order, paymentId, tenantId, plan, cycle);
+        return Ok();
+    }
+
+    private static bool TryReadPlanNotes(RazorpayOrder order, out SubscriptionTier plan, out BillingCycle cycle)
+    {
+        var notes = order.Notes ?? [];
+        return Enum.TryParse(notes.GetValueOrDefault(PlanNote), out plan)
+            & Enum.TryParse(notes.GetValueOrDefault(CycleNote), out cycle);
+    }
+
+    /// <summary>
+    /// Moves the tenant onto the plan they paid for. Shared by Verify and Webhook, which race
+    /// each other on every successful payment — whichever arrives first does the work and the
+    /// other one no-ops on the audit-log check below.
+    ///
+    /// Every query here IgnoreQueryFilters()s and matches TenantId by hand. The webhook has no
+    /// authenticated principal, so the global tenant filter would fall back to
+    /// Tenant.DefaultTenantId and upgrade the WRONG CAFE — the same trap
+    /// WhatsAppInternalController documents. Verify passes its own tenant id in, so the
+    /// explicit filter is exactly equivalent to the ambient one there.
+    /// </summary>
+    private async Task<Subscription> ApplyPaidOrderAsync(
+        RazorpayOrder order, string paymentId, int tenantId, SubscriptionTier plan, BillingCycle cycle)
+    {
+        var sub = await db.Subscriptions.IgnoreQueryFilters().FirstAsync(s => s.TenantId == tenantId);
 
         // Idempotency without a payments table: every successful activation writes an audit
-        // entry keyed on the Razorpay payment id, so a retried request (double-click, a
-        // dropped response the app retried, a replayed callback) returns the same answer
-        // instead of stacking another month onto the plan. The audit log is tenant-filtered
-        // by CafePosDbContext, so this can't collide across cafes.
-        var alreadyApplied = await db.AuditLog.AnyAsync(a =>
-            a.Resource == AuditResource.Subscription && a.ResourceId == req.RazorpayPaymentId);
-        if (alreadyApplied)
-            return await BuildResponseAsync(sub);
+        // entry keyed on the Razorpay payment id, so a repeat (double-click, a dropped response
+        // the app retried, a webhook redelivery, or the webhook and the browser both landing)
+        // leaves the plan alone instead of stacking another month onto it.
+        var alreadyApplied = await db.AuditLog.IgnoreQueryFilters().AnyAsync(a =>
+            a.TenantId == tenantId && a.Resource == AuditResource.Subscription && a.ResourceId == paymentId);
+        if (alreadyApplied) return sub;
 
         var oldPlan = sub.Plan;
         // Renewing a plan that hasn't lapsed yet extends from its existing expiry rather than
@@ -151,12 +275,12 @@ public class PaymentsController(
         // the entry or the screens the owner just paid for stay locked for another minute.
         subscriptions.Invalidate(tenantId);
 
-        await audit.LogAsync(AuditAction.SubscriptionChange, AuditResource.Subscription, req.RazorpayPaymentId,
-            $"Razorpay payment {req.RazorpayPaymentId} (order {order.Id}, ₹{order.AmountPaid / 100m:0.00}) " +
+        await audit.LogAsync(AuditAction.SubscriptionChange, AuditResource.Subscription, paymentId,
+            $"Razorpay payment {paymentId} (order {order.Id}, ₹{order.AmountPaid / 100m:0.00}) " +
             $"moved plan from {oldPlan} to {plan} for 1 {(cycle == BillingCycle.Yearly ? "year" : "month")}.",
-            AuditSeverity.High);
+            AuditSeverity.High, tenantId: tenantId);
 
-        return await BuildResponseAsync(sub);
+        return sub;
     }
 
     private async Task<VerifyPaymentResponse> BuildResponseAsync(Subscription sub)

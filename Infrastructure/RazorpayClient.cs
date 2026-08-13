@@ -21,8 +21,16 @@ public class RazorpayOptions
     /// (Render) or `dotnet user-secrets` locally — deliberately not in appsettings.*.json,
     /// which is committed.</summary>
     public string KeySecret { get; set; } = "";
+    /// <summary>A DIFFERENT secret from KeySecret: you choose it yourself when creating the
+    /// webhook in the Razorpay dashboard, and it signs the webhook body (see
+    /// RazorpaySignature.IsValidWebhook). Razorpay never shows it again after you save it, so
+    /// it has to match what was typed there exactly. Set via Razorpay__WebhookSecret. Blank =
+    /// the webhook endpoint rejects everything, which is the safe way to be unconfigured:
+    /// without the secret there is no way to tell a real Razorpay call from anyone else's.</summary>
+    public string WebhookSecret { get; set; } = "";
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(KeyId) && !string.IsNullOrWhiteSpace(KeySecret);
+    public bool IsWebhookConfigured => !string.IsNullOrWhiteSpace(WebhookSecret);
 }
 
 /// <summary>Razorpay answered, but not with a success — carries enough context for the
@@ -50,10 +58,12 @@ public record RazorpayOrder(
 public interface IRazorpayClient
 {
     bool IsConfigured { get; }
+    bool IsWebhookConfigured { get; }
     string KeyId { get; }
     Task<RazorpayOrder> CreateOrderAsync(long amountPaise, string currency, string receipt, Dictionary<string, string> notes);
     Task<RazorpayOrder> GetOrderAsync(string orderId);
     bool IsValidPaymentSignature(string orderId, string paymentId, string signature);
+    bool IsValidWebhookSignature(string rawBody, string? signature);
 }
 
 /// <summary>
@@ -110,6 +120,11 @@ public class RazorpayClient(HttpClient http, IOptions<RazorpayOptions> options, 
     /// </summary>
     public bool IsValidPaymentSignature(string orderId, string paymentId, string signature) =>
         RazorpaySignature.IsValid(orderId, paymentId, signature, _options.KeySecret);
+
+    public bool IsWebhookConfigured => _options.IsWebhookConfigured;
+
+    public bool IsValidWebhookSignature(string rawBody, string? signature) =>
+        RazorpaySignature.IsValidWebhook(rawBody, signature, _options.WebhookSecret);
 
     private async Task<RazorpayOrder> SendAsync(HttpRequestMessage request, string what)
     {
@@ -179,6 +194,30 @@ public static class RazorpaySignature
 
         // Fixed-time compare: a plain string == leaks, through how long it takes to fail,
         // how many leading characters of a guessed signature were right.
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(expected),
+            Encoding.UTF8.GetBytes(signature.Trim().ToLowerInvariant()));
+    }
+
+    /// <summary>
+    /// Webhooks sign differently from the checkout callback above: the HMAC covers the ENTIRE
+    /// raw request body (not "{order_id}|{payment_id}") and uses the webhook secret (not the
+    /// API key secret). It has to be the exact bytes Razorpay sent — re-serialising the parsed
+    /// JSON changes whitespace and key order and the hash stops matching, which is why
+    /// PaymentsController.Webhook reads the body as a string before any model binding.
+    ///
+    /// This is the only thing standing between the endpoint and the open internet: it takes no
+    /// auth token, so anyone who could forge a valid signature could hand themselves a paid
+    /// plan. Blank secret therefore returns false rather than skipping the check.
+    /// </summary>
+    public static bool IsValidWebhook(string? rawBody, string? signature, string? webhookSecret)
+    {
+        if (rawBody is null || string.IsNullOrWhiteSpace(signature) || string.IsNullOrWhiteSpace(webhookSecret))
+            return false;
+
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(webhookSecret));
+        var expected = Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(rawBody))).ToLowerInvariant();
+
         return CryptographicOperations.FixedTimeEquals(
             Encoding.UTF8.GetBytes(expected),
             Encoding.UTF8.GetBytes(signature.Trim().ToLowerInvariant()));
