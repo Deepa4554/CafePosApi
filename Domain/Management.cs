@@ -238,6 +238,24 @@ public class Shift : ITenantScoped
     public DateTime StartsAt { get; set; }
     public DateTime EndsAt { get; set; }
     public string? Notes { get; set; }
+    /// <summary>Set only when this shift came from a one-tap ShiftType quick-assign
+    /// (StaffController.QuickAssignShift) — null for shifts built from the custom
+    /// Add Shift form. Plain scalar, no navigation/FK, matching StaffId's convention.</summary>
+    public int? ShiftTypeId { get; set; }
+}
+
+/// <summary>A reusable, cafe-wide named shift pattern (e.g. "Morning" 9am-1pm) — created
+/// once in Team Portal, then used to one-tap assign staff to a day via
+/// StaffController.QuickAssignShift instead of filling the full Add Shift form each time.</summary>
+public class ShiftType : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Name { get; set; }
+    public TimeSpan StartTime { get; set; }
+    /// <summary>Earlier than or equal to StartTime means the shift crosses midnight
+    /// (e.g. a night shift 22:00-06:00) — QuickAssignShift adds a day in that case.</summary>
+    public TimeSpan EndTime { get; set; }
 }
 
 public enum LeaveType { Sick, Casual, Paid, Unpaid }

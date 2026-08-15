@@ -930,64 +930,120 @@ public static class CustomerOrderPage
     });
   }
 
-  // A plain item (no variant/modifiers) has an unambiguous unit price — state.menu's own
-  // item.price, with no variant/topping surcharge to account for — so unlike a brand-new
-  // combo line (whose price/id genuinely don't exist client-side yet), it's safe to fabricate
-  // a full optimistic order-item line for it, not just bump the display-only state.cart map.
-  // Doing so lets cartCount()/cartSubtotal() (and so the cart bar) update instantly too,
-  // instead of only the tapped item's own stepper. This fabricated line is temporary — it
-  // gets discarded and replaced wholesale by the server's real Order the moment the request
-  // resolves (state.order = s.order in changeLineQty's .then).
+  // Every tap fabricates a full optimistic order-item line, not just a bump of the display-only
+  // state.cart map — that's what lets cartCount()/cartSubtotal(), and so the cart bar, move on
+  // the tap instead of only the tapped item's own stepper. Fabricated lines are temporary: they
+  // are discarded and replaced wholesale by the server's real Order the moment the request
+  // resolves (state.order = s.order in sendCartRequest's .then).
   function applyLocalQty(menuItemId, variantId, modifierOptionIds, nextQty) {
     var isPlain = !variantId && (!modifierOptionIds || modifierOptionIds.length === 0);
 
+    // The server builds the Order itself, on the FIRST cart/items POST — session.OrderId is
+    // null until then (see GuestSessionController.AddCartItem) — so on a fresh table there is
+    // nothing here to hang an optimistic line off. That mattered because cartCount()/
+    // cartSubtotal() read ONLY unfiredLines(), i.e. state.order: left null, the very first Add
+    // updated the tapped card's own stepper instantly but the cart bar at the bottom of the
+    // screen stayed HIDDEN for the whole round trip — and that first request is the slowest of
+    // the session (it creates the order, and the customer, under the session lock). A local
+    // shell gives that first line somewhere to live so the bar appears on the tap. It is
+    // temporary: the server's real Order replaces it wholesale when the response lands, and
+    // the failure path in sendCartRequest restores this null.
+    if (!state.order) state.order = { items: [] };
+    var items = state.order.items || (state.order.items = []);
+
     if (isPlain) {
       state.cart[menuItemId] = nextQty;
-      if (!state.order) return true; // no cart-bar total to keep in sync until a session order exists
-      var plainItems = state.order.items || (state.order.items = []);
-      var plainIdx = plainItems.findIndex(function (i) {
+      var plainIdx = items.findIndex(function (i) {
         return i.menuItemId === menuItemId && !i.variantId && lineOptionIds(i).length === 0 && i.fireBatch === 0 && !i.voided;
       });
       if (nextQty <= 0) {
-        if (plainIdx !== -1) plainItems.splice(plainIdx, 1);
+        if (plainIdx !== -1) items.splice(plainIdx, 1);
       } else if (plainIdx !== -1) {
-        plainItems[plainIdx].qty = nextQty;
+        items[plainIdx].qty = nextQty;
       } else {
-        var menuItem = state.menu.find(function (m) { return m.id === menuItemId; });
-        plainItems.push({ menuItemId: menuItemId, qty: nextQty, price: menuItem ? menuItem.price : 0, fireBatch: 0, voided: false, variantId: null, variantName: null, selectedModifiers: [] });
+        items.push(buildOptimisticLine(menuItemId, null, [], nextQty));
       }
       return true;
     }
 
     // Existing combo line (already has a real price/id from a prior round trip) — safe to
-    // mutate its qty in place. A brand-new combo line has neither yet, so that one case is
-    // left for the server response to fill in — returns false so the caller knows not to
-    // patch the DOM yet (the options modal has already closed by then regardless).
-    if (!state.order) return false;
+    // mutate its qty in place.
     var sortedIds = (modifierOptionIds || []).slice().sort(function (a, b) { return a - b; });
-    var items = state.order.items || [];
     var idx = items.findIndex(function (i) {
       if (i.menuItemId !== menuItemId || i.fireBatch !== 0 || i.voided) return false;
       var lineIds = lineOptionIds(i).sort(function (a, b) { return a - b; });
       return i.variantId === variantId && lineIds.length === sortedIds.length && lineIds.every(function (id, k) { return id === sortedIds[k]; });
     });
-    if (idx === -1) return false;
-    if (nextQty <= 0) items.splice(idx, 1); else items[idx].qty = nextQty;
+    if (idx !== -1) {
+      if (nextQty <= 0) items.splice(idx, 1); else items[idx].qty = nextQty;
+      return true;
+    }
+    if (nextQty <= 0) return true; // nothing local to remove; the server has nothing either
+
+    // Brand-new combo line. This used to bail out (return false) and wait for the server to
+    // supply the line's price — which meant the options sheet closed onto a menu where
+    // nothing had visibly changed until the response landed. The price isn't actually unknown:
+    // it's the same arithmetic the sheet's own Add button just quoted, so build the line here
+    // and let the server's response replace it.
+    items.push(buildOptimisticLine(menuItemId, variantId, sortedIds, nextQty));
     return true;
   }
 
   /**
-   * The delivery cart's only writer. Unlike applyLocalQty, which fabricates a line optimistically
-   * and waits for the server's real Order to replace it, this line IS the record — nothing is
-   * coming to correct it, so a brand-new combo has to be priced here rather than left for a round
-   * trip that never happens. The arithmetic is the same one the options modal already shows on
-   * its Add button (variant price, or base, plus each selected option), so what the customer was
-   * quoted and what lands in the cart cannot drift apart.
+   * One optimistic cart line, priced client-side the way the options sheet already quoted it
+   * (variant price, or the base price, plus every selected add-on). The shape deliberately
+   * mirrors a server OrderItem — fireBatch 0, voided false — because unfiredLines() and so
+   * cartCount/cartSubtotal/fillItemActions read it without caring who built it.
    *
-   * The line shape deliberately mirrors a server OrderItem — fireBatch 0, voided false — because
-   * cartCount/cartSubtotal/renderCartBar read unfiredLines() and must not care which mode built it.
-   * The server prices the order again from menuItemId/variantId/option ids when it's placed, so
-   * these numbers are for display only and a stale menu can't be used to underpay.
+   * Display only, in both callers: dine-in throws it away the moment the cart/items response
+   * brings back the server's real Order, and a delivery order is re-priced server-side from
+   * menuItemId/variantId/option ids when it's placed. A stale menu here can't underpay.
+   */
+  function buildOptimisticLine(menuItemId, variantId, sortedIds, nextQty) {
+    var menuItem = state.menu.find(function (m) { return m.id === menuItemId; }) || {};
+    var variant = (menuItem.variants || []).find(function (v) { return v.id === variantId; });
+
+    // Every option this item offers, flattened across its groups — same walk the options modal
+    // does (optSelectedOptions), and the field is `modifiers`, not `modifierGroups`.
+    var catalogue = [];
+    (menuItem.modifiers || []).forEach(function (g) { catalogue = catalogue.concat(g.options || []); });
+
+    // sortedIds may hold the same option id more than once — that's how "extra cheese ×2" is
+    // expressed (see optOptionQty). Each occurrence is priced, and repeats are folded back into
+    // one {modifierOptionId, qty} entry so lineOptionIds() re-expands to exactly this list.
+    var byOption = [];
+    var optionsTotal = 0;
+    (sortedIds || []).forEach(function (id) {
+      var option = catalogue.find(function (o) { return o.id === id; });
+      if (!option) return;
+      optionsTotal += option.price || 0;
+      var existing = byOption.find(function (e) { return e.modifierOptionId === id; });
+      if (existing) existing.qty += 1;
+      else byOption.push({ modifierOptionId: id, name: option.name, price: option.price, qty: 1 });
+    });
+
+    return {
+      menuItemId: menuItemId,
+      // Carried on the line because a delivery confirmation screen lists items by name and,
+      // with no server Order to read back there, this is the only place that name survives.
+      name: menuItem.name,
+      qty: nextQty,
+      price: (variant ? variant.price : (menuItem.price || 0)) + optionsTotal,
+      fireBatch: 0,
+      voided: false,
+      status: 'NEW',
+      variantId: variantId || null,
+      variantName: variant ? variant.name : null,
+      selectedModifiers: byOption,
+    };
+  }
+
+  /**
+   * The delivery cart's only writer. Unlike applyLocalQty, whose optimistic lines are replaced by
+   * the server's real Order a moment later, these lines ARE the record — nothing is coming to
+   * correct them, since the whole order goes up in one request when the customer places it.
+   * Both build their lines with buildOptimisticLine, so what the options sheet quoted and what
+   * lands in either cart cannot drift apart.
    */
   function applyDeliveryQty(menuItemId, variantId, modifierOptionIds, nextQty) {
     if (!state.order) state.order = { items: [] };
@@ -1010,42 +1066,7 @@ public static class CustomerOrderPage
     }
     if (idx !== -1) { items[idx].qty = nextQty; return; }
 
-    var menuItem = state.menu.find(function (m) { return m.id === menuItemId; }) || {};
-    var variant = (menuItem.variants || []).find(function (v) { return v.id === variantId; });
-
-    // Every option this item offers, flattened across its groups — same walk the options modal
-    // does (optSelectedOptions), and the field is `modifiers`, not `modifierGroups`.
-    var catalogue = [];
-    (menuItem.modifiers || []).forEach(function (g) { catalogue = catalogue.concat(g.options || []); });
-
-    // sortedIds may hold the same option id more than once — that's how "extra cheese ×2" is
-    // expressed (see optOptionQty). Each occurrence is priced, and repeats are folded back into
-    // one {modifierOptionId, qty} entry so lineOptionIds() re-expands to exactly this list.
-    var byOption = [];
-    var optionsTotal = 0;
-    sortedIds.forEach(function (id) {
-      var option = catalogue.find(function (o) { return o.id === id; });
-      if (!option) return;
-      optionsTotal += option.price || 0;
-      var existing = byOption.find(function (e) { return e.modifierOptionId === id; });
-      if (existing) existing.qty += 1;
-      else byOption.push({ modifierOptionId: id, name: option.name, price: option.price, qty: 1 });
-    });
-
-    items.push({
-      menuItemId: menuItemId,
-      // Carried on the line because the confirmation screen lists items by name and, with no
-      // server Order to read back, this is the only place that name survives.
-      name: menuItem.name,
-      qty: nextQty,
-      price: (variant ? variant.price : (menuItem.price || 0)) + optionsTotal,
-      fireBatch: 0,
-      voided: false,
-      status: 'NEW',
-      variantId: variantId || null,
-      variantName: variant ? variant.name : null,
-      selectedModifiers: byOption,
-    });
+    items.push(buildOptimisticLine(menuItemId, variantId, sortedIds, nextQty));
   }
 
   // Every tap updates the tapped item's own card instantly via applyLocalQty/patchItemCard
@@ -1522,9 +1543,45 @@ public static class CustomerOrderPage
     }, 5000);
   }
 
+  // Held while "Place Order" is waiting out an in-flight cart/items request — see placeOrder.
+  var placeWaitTimer = null;
+
+  /**
+   * The cart bar now appears on the tap that fills it, which can be before the first
+   * cart/items POST has resolved (see applyLocalQty's shell order) — and until it does, the
+   * session has no Order at all server-side, so PlaceOrder would answer "Your cart is empty."
+   * Nothing is wrong in that moment except timing, so wait the request out rather than
+   * surfacing an error for it. The cap hands the button back if the network never answers.
+   */
+  function waitForCartThenPlace() {
+    var btn = document.getElementById('place-btn');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    document.getElementById('processing-overlay').classList.add('show');
+
+    var waitedMs = 0;
+    if (placeWaitTimer) clearInterval(placeWaitTimer);
+    placeWaitTimer = setInterval(function () {
+      waitedMs += 100;
+      var settled = Object.keys(pendingLineRequests).length === 0;
+      if (!settled && waitedMs < 10000) return;
+
+      clearInterval(placeWaitTimer);
+      placeWaitTimer = null;
+      document.getElementById('processing-overlay').classList.remove('show');
+      btn.disabled = false;
+      btn.textContent = state.addingMore ? 'Send to Kitchen' : 'Place Order';
+      // Settled but empty means that request FAILED and rolled its line back — sendCartRequest
+      // has already shown why, so just leave the guest on the menu.
+      if (settled) { if (cartCount() > 0) placeOrder(); return; }
+      showError('Still saving your last item — please try again in a moment.');
+    }, 100);
+  }
+
   function placeOrder() {
     if (state.deliveryMode) { placeDeliveryOrder(); return; }
     if (cartCount() === 0) return;
+    if (Object.keys(pendingLineRequests).length > 0) { waitForCartThenPlace(); return; }
     clearError();
 
     var btn = document.getElementById('place-btn');

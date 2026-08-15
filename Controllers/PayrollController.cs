@@ -264,9 +264,13 @@ public class PayrollController(CafePosDbContext db, IAuditService audit) : Contr
         var attendance = await db.AttendanceRecords
             .Where(a => a.StaffId == staff.Id && a.Date >= periodStart && a.Date <= periodEnd)
             .ToListAsync();
-        var presentDays = attendance.Count(a => a.WorkedMinutes.HasValue);
-        var lateDays = attendance.Count(a => a.Status == AttendanceStatus.Late);
-        var halfDays = attendance.Count(a => a.Status == AttendanceStatus.HalfDay);
+        // Distinct by Date, not raw row count — a staff member present for both Morning
+        // and Evening the same day worked 1 day, not 2, even though it's 2
+        // AttendanceRecord rows (see ShiftKind). The hour sums below stay raw: someone
+        // who actually worked two shifts that day legitimately worked/earned more.
+        var presentDays = attendance.Where(a => a.WorkedMinutes.HasValue).Select(a => a.Date).Distinct().Count();
+        var lateDays = attendance.Where(a => a.Status == AttendanceStatus.Late).Select(a => a.Date).Distinct().Count();
+        var halfDays = attendance.Where(a => a.Status == AttendanceStatus.HalfDay).Select(a => a.Date).Distinct().Count();
         var overtimeHours = attendance.Sum(a => a.OvertimeMinutes) / 60.0;
         var totalWorkedHours = attendance.Sum(a => a.WorkedMinutes ?? 0) / 60.0;
         var attendedDates = attendance.Where(a => a.WorkedMinutes.HasValue).Select(a => a.Date).ToHashSet();

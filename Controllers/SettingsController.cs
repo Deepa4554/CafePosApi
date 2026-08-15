@@ -96,6 +96,13 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (!(settings.DineInEnabled || settings.TakeawayEnabled || settings.DeliveryEnabled || settings.QsrEnabled || settings.CashEnabled))
             throw new ApiValidationException("At least one order type must stay enabled.");
 
+        if (req.MorningShiftEnabled is not null) settings.MorningShiftEnabled = req.MorningShiftEnabled.Value;
+        if (req.EveningShiftEnabled is not null) settings.EveningShiftEnabled = req.EveningShiftEnabled.Value;
+        if (req.NightShiftEnabled is not null) settings.NightShiftEnabled = req.NightShiftEnabled.Value;
+        if (req.GeneralShiftEnabled is not null) settings.GeneralShiftEnabled = req.GeneralShiftEnabled.Value;
+        if (!(settings.MorningShiftEnabled || settings.EveningShiftEnabled || settings.NightShiftEnabled || settings.GeneralShiftEnabled))
+            throw new ApiValidationException("At least one shift must stay enabled.");
+
         if (req.ReceiptShowAddress is not null) settings.ReceiptShowAddress = req.ReceiptShowAddress.Value;
         if (req.ReceiptShowWaiterName is not null) settings.ReceiptShowWaiterName = req.ReceiptShowWaiterName.Value;
         if (req.ReceiptShowGuestPhone is not null) settings.ReceiptShowGuestPhone = req.ReceiptShowGuestPhone.Value;

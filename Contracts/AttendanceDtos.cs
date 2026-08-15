@@ -9,11 +9,11 @@ public record AttendanceLogDto(int Id, string Type, DateTime Timestamp, decimal?
 }
 
 public record AttendanceRecordDto(
-    int Id, int StaffId, string StaffName, DateOnly Date, int? ShiftId, DateTime? PunchInAt, DateTime? PunchOutAt,
+    int Id, int StaffId, string StaffName, DateOnly Date, string ShiftKind, int? ShiftId, DateTime? PunchInAt, DateTime? PunchOutAt,
     int BreakMinutes, int? WorkedMinutes, string Status, int LateMinutes, int OvertimeMinutes, bool IsManuallyEdited, string? EditNote)
 {
     public static AttendanceRecordDto From(AttendanceRecord r, string staffName) => new(
-        r.Id, r.StaffId, staffName, r.Date, r.ShiftId, r.PunchInAt, r.PunchOutAt,
+        r.Id, r.StaffId, staffName, r.Date, r.ShiftKind.ToString().ToUpperInvariant(), r.ShiftId, r.PunchInAt, r.PunchOutAt,
         r.BreakMinutes, r.WorkedMinutes, r.Status.ToString().ToUpperInvariant(), r.LateMinutes, r.OvertimeMinutes, r.IsManuallyEdited, r.EditNote);
 }
 
@@ -24,16 +24,22 @@ public record AttendanceRecordDto(
 /// (break-start/break-end don't require them), but AttendanceController.
 /// EnsureWithinGeofenceAsync rejects a null coordinate on punch-in/punch-out — see
 /// there for why.</summary>
-public record PunchRequest(DateOnly LocalDate, DateTime? OccurredAt, decimal? Latitude, decimal? Longitude);
+/// <summary>ShiftKind is nullable and defaults to General server-side — self-service
+/// punch-in/out stays shift-blind unless the client starts sending it, so existing
+/// callers keep working unchanged (see AttendanceController.PunchIn).</summary>
+public record PunchRequest(DateOnly LocalDate, DateTime? OccurredAt, decimal? Latitude, decimal? Longitude, ShiftKind? ShiftKind = null);
 
-public record ManualAttendanceRequest(int StaffId, DateOnly Date, DateTime? PunchInAt, DateTime? PunchOutAt, int BreakMinutes, string EditNote);
+public record ManualAttendanceRequest(int StaffId, DateOnly Date, DateTime? PunchInAt, DateTime? PunchOutAt, int BreakMinutes, string EditNote, ShiftKind? ShiftKind = null);
 
 /// <summary>One tap on the Attendance screen's roll-call row — "this staff member was
 /// Present/Half Day/On Leave/Absent on this day" — with no punch times and no note for
 /// the Owner/Manager to fill in; AttendanceController.Mark derives the times from the
 /// day's Shift (or CafeSettings.StandardShiftHours) and writes the note itself. Batched
-/// so "Mark all present" is one request rather than one per staff member.</summary>
-public record MarkAttendanceRequest(DateOnly Date, IReadOnlyList<MarkAttendanceEntry> Entries);
+/// so "Mark all present" is one request rather than one per staff member. ShiftKind is
+/// request-level, not per-entry — the Attendance screen's shift tab scopes the whole
+/// roster to one shift at a time, same scope as Date; defaults to General so a caller
+/// that hasn't been updated for shifts yet behaves exactly as before.</summary>
+public record MarkAttendanceRequest(DateOnly Date, IReadOnlyList<MarkAttendanceEntry> Entries, ShiftKind ShiftKind = Domain.ShiftKind.General);
 
 public record MarkAttendanceEntry(int StaffId, AttendanceStatus Status);
 

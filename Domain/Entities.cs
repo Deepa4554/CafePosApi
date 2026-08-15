@@ -768,6 +768,14 @@ public class CafeSettings : ITenantScoped
     public bool QsrEnabled { get; set; } = true;
     public bool CashEnabled { get; set; } = true;
 
+    // The 4 fixed attendance shifts (see ShiftKind) an Owner can toggle for roll-call —
+    // same "at least one must stay enabled" rule as the order-type group above, enforced
+    // in SettingsController, not here.
+    public bool MorningShiftEnabled { get; set; } = true;
+    public bool EveningShiftEnabled { get; set; } = true;
+    public bool NightShiftEnabled { get; set; } = true;
+    public bool GeneralShiftEnabled { get; set; } = true;
+
     // Auto Charges — lets an Owner define Service/Packing/Delivery charge once instead of
     // a biller re-entering it on every bill. Each charge has a default value (null = the
     // charge is off entirely, matching how ServiceChargeDefaultPct/PackingChargeDefaultAmount/

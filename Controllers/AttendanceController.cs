@@ -60,7 +60,11 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         // note-required, audited manual/correct endpoints' job.
         if (req.LocalDate != TodayIst())
             throw new ApiValidationException("Punch-in can only be recorded for today.");
-        var existing = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staff.Id && a.Date == req.LocalDate);
+        // Self-service punch-in stays shift-blind by default (General) — a staff member
+        // punching in from their own phone doesn't pick a shift explicitly today; that
+        // only matters once/if the mobile app grows a shift picker of its own.
+        var shiftKind = req.ShiftKind ?? ShiftKind.General;
+        var existing = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == staff.Id && a.Date == req.LocalDate && a.ShiftKind == shiftKind);
         if (existing?.PunchInAt is not null) throw new ApiConflictException("Already punched in for this day.");
 
         var occurredAt = DateTime.UtcNow;
@@ -68,7 +72,7 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         var settings = await CurrentSettingsAsync();
         await EnsureWithinGeofenceAsync(req, settings);
 
-        var record = existing ?? new AttendanceRecord { StaffId = staff.Id, Date = req.LocalDate };
+        var record = existing ?? new AttendanceRecord { StaffId = staff.Id, Date = req.LocalDate, ShiftKind = shiftKind };
         record.ShiftId = shift?.Id;
         record.PunchInAt = occurredAt;
         record.LateMinutes = ComputeLateMinutes(occurredAt, shift, settings.LateGraceMinutes);
@@ -210,13 +214,17 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
     [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpGet]
-    public async Task<IEnumerable<AttendanceRecordDto>> List([FromQuery] int? staffId, [FromQuery] DateOnly? date, [FromQuery] DateOnly? periodStart, [FromQuery] DateOnly? periodEnd)
+    public async Task<IEnumerable<AttendanceRecordDto>> List([FromQuery] int? staffId, [FromQuery] DateOnly? date, [FromQuery] DateOnly? periodStart, [FromQuery] DateOnly? periodEnd, [FromQuery] ShiftKind? shiftKind)
     {
         var query = db.AttendanceRecords.AsQueryable();
         if (staffId is int sid) query = query.Where(a => a.StaffId == sid);
         if (date is DateOnly d) query = query.Where(a => a.Date == d);
         if (periodStart is DateOnly ps) query = query.Where(a => a.Date >= ps);
         if (periodEnd is DateOnly pe) query = query.Where(a => a.Date <= pe);
+        // Scopes the roster to exactly one shift — the Attendance screen's shift tab
+        // relies on this to keep "one record per staffId" true for a given date, since
+        // a staff member can now have up to 4 rows (one per shift) on the same day.
+        if (shiftKind is ShiftKind sk) query = query.Where(a => a.ShiftKind == sk);
         var records = await query.OrderByDescending(a => a.Date).ToListAsync();
 
         var staffIds = records.Select(r => r.StaffId).Distinct().ToList();
@@ -246,8 +254,9 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         if (req.PunchOutAt is not null && req.PunchInAt is not null && req.PunchOutAt <= req.PunchInAt)
             throw new ApiValidationException("Punch-out must be after punch-in.");
 
-        var record = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == req.StaffId && a.Date == req.Date)
-            ?? new AttendanceRecord { StaffId = req.StaffId, Date = req.Date };
+        var shiftKind = req.ShiftKind ?? ShiftKind.General;
+        var record = await db.AttendanceRecords.FirstOrDefaultAsync(a => a.StaffId == req.StaffId && a.Date == req.Date && a.ShiftKind == shiftKind)
+            ?? new AttendanceRecord { StaffId = req.StaffId, Date = req.Date, ShiftKind = shiftKind };
         var isNew = record.Id == 0;
 
         var shift = record.ShiftId is int existingShiftId ? await db.Shifts.FindAsync(existingShiftId) : await FindShiftForDay(req.StaffId, req.Date);
@@ -257,10 +266,13 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         await ApplyTimesAsync(record, req.PunchInAt, req.PunchOutAt, req.BreakMinutes, shift, actor.Id, req.EditNote);
 
         if (isNew) db.AttendanceRecords.Add(record);
+        // Staged before the save below so both commit in one round trip. A brand-new
+        // record's Id isn't assigned until SaveChanges runs, so resourceId stays null
+        // for that case — an existing record being corrected here already has its Id.
+        audit.Stage(AuditAction.Update, AuditResource.Attendance, isNew ? null : record.Id.ToString(),
+            $"{actor.Name} manually recorded attendance for {staff.Name} on {req.Date}.", AuditSeverity.Medium, actor.Id, actor.Name);
         await db.SaveChangesAsync();
 
-        await audit.LogAsync(AuditAction.Update, AuditResource.Attendance, record.Id.ToString(),
-            $"{actor.Name} manually recorded attendance for {staff.Name} on {req.Date}.", AuditSeverity.Medium, actor.Id, actor.Name);
         return AttendanceRecordDto.From(record, staff.Name);
     }
 
@@ -285,9 +297,12 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         await ApplyTimesAsync(record, punchIn, punchOut, req.BreakMinutes ?? record.BreakMinutes, shift, actor.Id, req.EditNote);
         if (req.Status is AttendanceStatus explicitStatus) record.Status = explicitStatus;
 
-        await db.SaveChangesAsync();
-        await audit.LogAsync(AuditAction.Update, AuditResource.Attendance, record.Id.ToString(),
+        // record.Id is already known (this is always an existing row — see FindAsync
+        // above), so staging it before the save carries zero behavior change, purely
+        // one fewer round trip.
+        audit.Stage(AuditAction.Update, AuditResource.Attendance, record.Id.ToString(),
             $"{actor.Name} corrected {staff.Name}'s attendance for {record.Date}: {req.EditNote}", AuditSeverity.Medium, actor.Id, actor.Name);
+        await db.SaveChangesAsync();
         return AttendanceRecordDto.From(record, staff.Name);
     }
 
@@ -322,7 +337,7 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
         var settings = await CurrentSettingsAsync();
         var actor = await CurrentUserAsync();
         var existing = await db.AttendanceRecords
-            .Where(a => a.Date == req.Date && staffIds.Contains(a.StaffId)).ToListAsync();
+            .Where(a => a.Date == req.Date && a.ShiftKind == req.ShiftKind && staffIds.Contains(a.StaffId)).ToListAsync();
 
         var records = new List<AttendanceRecord>();
         foreach (var entry in entries)
@@ -330,7 +345,7 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
             var record = existing.FirstOrDefault(a => a.StaffId == entry.StaffId);
             if (record is null)
             {
-                record = new AttendanceRecord { StaffId = entry.StaffId, Date = req.Date };
+                record = new AttendanceRecord { StaffId = entry.StaffId, Date = req.Date, ShiftKind = req.ShiftKind };
                 db.AttendanceRecords.Add(record);
             }
 
@@ -343,13 +358,17 @@ public class AttendanceController(CafePosDbContext db, IAuditService audit) : Co
             records.Add(record);
         }
 
-        await db.SaveChangesAsync();
-
         var summary = string.Join(", ", records.Select(r => $"{staff[r.StaffId].Name}: {StatusLabel(r.Status)}"));
         if (summary.Length > 400) summary = summary[..400] + "…";
-        await audit.LogAsync(AuditAction.Update, AuditResource.Attendance,
-            records.Count == 1 ? records[0].Id.ToString() : null,
+        // Staged, not logged: a brand-new record's Id isn't assigned until the
+        // SaveChangesAsync below runs, so this always logs against the day as a whole
+        // (null resourceId) — matching what the multi-entry case already did. Staging
+        // it here instead of calling LogAsync after the save is what turns "tap
+        // Present" from two DB round trips into one (see AuditService.Stage).
+        audit.Stage(AuditAction.Update, AuditResource.Attendance, null,
             $"{actor.Name} marked attendance for {req.Date} — {summary}", AuditSeverity.Medium, actor.Id, actor.Name);
+
+        await db.SaveChangesAsync();
 
         return records.Select(r => AttendanceRecordDto.From(r, staff[r.StaffId].Name)).ToList();
     }

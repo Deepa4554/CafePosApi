@@ -189,6 +189,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<ApiFailureLog> ApiFailureLogs => Set<ApiFailureLog>();
     public DbSet<StaffMember> Staff => Set<StaffMember>();
     public DbSet<Shift> Shifts => Set<Shift>();
+    public DbSet<ShiftType> ShiftTypes => Set<ShiftType>();
     public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
     public DbSet<CafeExpense> CafeExpenses => Set<CafeExpense>();
     public DbSet<Branch> Branches => Set<Branch>();
@@ -416,6 +417,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<AttendanceLog>().Property(a => a.Type).HasConversion<string>();
         modelBuilder.Entity<AttendanceLog>().Property(a => a.Source).HasConversion<string>();
         modelBuilder.Entity<AttendanceRecord>().Property(a => a.Status).HasConversion<string>();
+        modelBuilder.Entity<AttendanceRecord>().Property(a => a.ShiftKind).HasConversion<string>();
         modelBuilder.Entity<StaffLoan>().Property(l => l.Type).HasConversion<string>();
         modelBuilder.Entity<StaffLoan>().Property(l => l.Status).HasConversion<string>();
         modelBuilder.Entity<PayrollRun>().Property(r => r.Status).HasConversion<string>();
@@ -573,8 +575,12 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
 
         modelBuilder.Entity<DeviceToken>().HasIndex(t => t.Token).IsUnique();
 
-        // One derived attendance row per staff per day.
-        modelBuilder.Entity<AttendanceRecord>().HasIndex(a => new { a.TenantId, a.StaffId, a.Date }).IsUnique();
+        // One derived attendance row per staff per day PER SHIFT. Postgres treats every
+        // NULL in a unique index as distinct from every other NULL, so ShiftKind must stay
+        // non-nullable for this to actually constrain anything — 'General' is a real one of
+        // the 4 options and matches the pre-ShiftKind "one record per day" behavior for
+        // every row that predates this column.
+        modelBuilder.Entity<AttendanceRecord>().HasIndex(a => new { a.TenantId, a.StaffId, a.Date, a.ShiftKind }).IsUnique();
         modelBuilder.Entity<AttendanceLog>().HasIndex(a => new { a.TenantId, a.StaffId, a.Timestamp });
         modelBuilder.Entity<StaffLoan>().HasIndex(l => new { l.TenantId, l.StaffId, l.Status });
         // One payroll run per exact period per tenant — regenerating for the same

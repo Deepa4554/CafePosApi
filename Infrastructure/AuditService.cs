@@ -11,6 +11,17 @@ public interface IAuditService
     /// requests resolve the tenant from the token automatically and can omit this.</param>
     Task LogAsync(AuditAction action, AuditResource resource, string? resourceId, string details,
         AuditSeverity severity = AuditSeverity.Low, int? userId = null, string userName = "System", int? tenantId = null);
+
+    /// <summary>Same entry as LogAsync, but only added to the tracked context — no
+    /// SaveChangesAsync of its own. For a hot path that's about to call
+    /// SaveChangesAsync anyway (e.g. AttendanceController.Mark), staging lets the audit
+    /// row commit in that same round trip instead of a second one, which is the
+    /// difference between one DB round trip and two on every call. Only usable when
+    /// resourceId doesn't depend on something SaveChanges itself is about to generate
+    /// (a brand-new row's Id isn't assigned until that call returns) — pass null in
+    /// that case, same as LogAsync's own multi-resource callers already do.</summary>
+    void Stage(AuditAction action, AuditResource resource, string? resourceId, string details,
+        AuditSeverity severity = AuditSeverity.Low, int? userId = null, string userName = "System", int? tenantId = null);
 }
 
 /// <summary>
@@ -21,6 +32,13 @@ public interface IAuditService
 public class AuditService(CafePosDbContext db) : IAuditService
 {
     public async Task LogAsync(AuditAction action, AuditResource resource, string? resourceId, string details,
+        AuditSeverity severity = AuditSeverity.Low, int? userId = null, string userName = "System", int? tenantId = null)
+    {
+        Stage(action, resource, resourceId, details, severity, userId, userName, tenantId);
+        await db.SaveChangesAsync();
+    }
+
+    public void Stage(AuditAction action, AuditResource resource, string? resourceId, string details,
         AuditSeverity severity = AuditSeverity.Low, int? userId = null, string userName = "System", int? tenantId = null)
     {
         var entry = new AuditLogEntry
@@ -35,6 +53,5 @@ public class AuditService(CafePosDbContext db) : IAuditService
         };
         if (tenantId is not null) entry.TenantId = tenantId.Value;
         db.AuditLog.Add(entry);
-        await db.SaveChangesAsync();
     }
 }

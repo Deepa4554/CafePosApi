@@ -469,7 +469,7 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             s.Id, s.StaffId,
             staffMap.GetValueOrDefault(s.StaffId)?.Name ?? "Unknown",
             staffMap.GetValueOrDefault(s.StaffId)?.Role ?? "",
-            s.StartsAt, s.EndsAt, s.Notes));
+            s.StartsAt, s.EndsAt, s.Notes, s.ShiftTypeId));
     }
 
     // Mirrors DashboardController's hour buckets — kept as its own copy since the two
@@ -566,15 +566,27 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
     [Authorize(Policy = Policies.RequirePlus)]
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpPost("shifts")]
-    public async Task<ActionResult<ShiftDto>> CreateShift(CreateShiftRequest req)
+    public async Task<ActionResult<List<ShiftDto>>> CreateShift(CreateShiftRequest req)
     {
         if (req.EndsAt <= req.StartsAt) throw new ApiValidationException("Shift end must be after start.");
         if (!await db.Staff.AnyAsync(s => s.Id == req.StaffId)) throw new ApiValidationException("Staff member not found.");
+        if (req.RepeatUntil is DateTime until)
+        {
+            if (until.Date < req.StartsAt.Date) throw new ApiValidationException("Repeat until date must be on or after the shift date.");
+            if ((until.Date - req.StartsAt.Date).TotalDays > 366) throw new ApiValidationException("Shifts can only repeat up to a year out.");
+        }
 
-        var shift = new Shift { StaffId = req.StaffId, StartsAt = req.StartsAt, EndsAt = req.EndsAt, Notes = req.Notes };
-        db.Shifts.Add(shift);
+        var duration = req.EndsAt - req.StartsAt;
+        var stepDays = req.RepeatWeekly ? 7 : 1;
+        var lastDate = (req.RepeatUntil ?? req.StartsAt).Date;
+
+        var shifts = new List<Shift>();
+        for (var occurrenceStart = req.StartsAt; occurrenceStart.Date <= lastDate; occurrenceStart = occurrenceStart.AddDays(stepDays))
+            shifts.Add(new Shift { StaffId = req.StaffId, StartsAt = occurrenceStart, EndsAt = occurrenceStart + duration, Notes = req.Notes });
+
+        db.Shifts.AddRange(shifts);
         await db.SaveChangesAsync();
-        return ShiftDto.From(shift);
+        return shifts.Select(ShiftDto.From).ToList();
     }
 
     [Authorize(Policy = Policies.RequirePlus)]
@@ -587,6 +599,76 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         db.Shifts.Remove(shift);
         await db.SaveChangesAsync();
         return NoContent();
+    }
+
+    // ---------- Shift types (reusable "Morning"/"Evening" patterns) ----------
+
+    [Authorize(Policy = Policies.RequirePlus)]
+    [HttpGet("shift-types")]
+    public async Task<IEnumerable<ShiftTypeDto>> ListShiftTypes()
+    {
+        var types = await db.ShiftTypes.OrderBy(t => t.StartTime).ToListAsync();
+        return types.Select(ShiftTypeDto.From);
+    }
+
+    [Authorize(Policy = Policies.RequirePlus)]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("shift-types")]
+    public async Task<ActionResult<ShiftTypeDto>> CreateShiftType(CreateShiftTypeRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Name)) throw new ApiValidationException("Name is required.");
+        if (req.StartTime == req.EndTime) throw new ApiValidationException("Start and end time can't be the same.");
+
+        var shiftType = new ShiftType { Name = req.Name.Trim(), StartTime = req.StartTime, EndTime = req.EndTime };
+        db.ShiftTypes.Add(shiftType);
+        await db.SaveChangesAsync();
+        return ShiftTypeDto.From(shiftType);
+    }
+
+    [Authorize(Policy = Policies.RequirePlus)]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpDelete("shift-types/{id:int}")]
+    public async Task<IActionResult> DeleteShiftType(int id)
+    {
+        var shiftType = await db.ShiftTypes.FindAsync(id);
+        if (shiftType is null) return NotFound();
+        db.ShiftTypes.Remove(shiftType);
+        await db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>One-tap toggle: if this staff member already has a shift from this
+    /// ShiftType on this date, remove it; otherwise create one spanning the ShiftType's
+    /// time range on that date. Mirrors the Attendance screen's tap-to-mark pattern, but
+    /// for shift scheduling instead of punch records.</summary>
+    [Authorize(Policy = Policies.RequirePlus)]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("shifts/quick-assign")]
+    public async Task<ActionResult<ShiftDto?>> QuickAssignShift(QuickAssignShiftRequest req)
+    {
+        if (!await db.Staff.AnyAsync(s => s.Id == req.StaffId)) throw new ApiValidationException("Staff member not found.");
+        var shiftType = await db.ShiftTypes.FindAsync(req.ShiftTypeId);
+        if (shiftType is null) throw new ApiValidationException("Shift type not found.");
+
+        var dayStart = req.Date.Date;
+        var dayEnd = dayStart.AddDays(1);
+        var existing = await db.Shifts.FirstOrDefaultAsync(s =>
+            s.StaffId == req.StaffId && s.ShiftTypeId == req.ShiftTypeId && s.StartsAt >= dayStart && s.StartsAt < dayEnd);
+        if (existing is not null)
+        {
+            db.Shifts.Remove(existing);
+            await db.SaveChangesAsync();
+            return Ok(null);
+        }
+
+        var startsAt = dayStart + shiftType.StartTime;
+        var endsAt = dayStart + shiftType.EndTime;
+        if (endsAt <= startsAt) endsAt = endsAt.AddDays(1);
+
+        var shift = new Shift { StaffId = req.StaffId, StartsAt = startsAt, EndsAt = endsAt, Notes = shiftType.Name, ShiftTypeId = shiftType.Id };
+        db.Shifts.Add(shift);
+        await db.SaveChangesAsync();
+        return ShiftDto.From(shift);
     }
 
     // ---------- Performance & Payroll ----------

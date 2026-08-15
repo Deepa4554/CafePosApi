@@ -126,16 +126,32 @@ public record StaffKitchenAssignmentDto(int StaffId, int? AssignedStationId)
 }
 public record UpdateStaffKitchenAssignmentRequest(int? AssignedStationId);
 
-public record ShiftDto(int Id, int StaffId, DateTime StartsAt, DateTime EndsAt, string? Notes)
+public record ShiftDto(int Id, int StaffId, DateTime StartsAt, DateTime EndsAt, string? Notes, int? ShiftTypeId)
 {
-    public static ShiftDto From(Shift s) => new(s.Id, s.StaffId, s.StartsAt, s.EndsAt, s.Notes);
+    public static ShiftDto From(Shift s) => new(s.Id, s.StaffId, s.StartsAt, s.EndsAt, s.Notes, s.ShiftTypeId);
 }
-public record CreateShiftRequest(int StaffId, DateTime StartsAt, DateTime EndsAt, string? Notes);
+/// <summary>RepeatUntil (inclusive, matched by date only) creates one Shift per day —
+/// or every 7th day when RepeatWeekly — from StartsAt's date through RepeatUntil's
+/// date, each keeping the same time-of-day and duration as the first occurrence.
+/// Null RepeatUntil creates just the single shift, as before.</summary>
+public record CreateShiftRequest(int StaffId, DateTime StartsAt, DateTime EndsAt, string? Notes, DateTime? RepeatUntil = null, bool RepeatWeekly = false);
 
 /// <summary>Powers the Team Schedule day view — every shift across every staff member
 /// on a given day, with the staff's name/role denormalized in so the screen doesn't
 /// need a second round trip per row.</summary>
-public record ShiftWithStaffDto(int Id, int StaffId, string StaffName, string StaffRole, DateTime StartsAt, DateTime EndsAt, string? Notes);
+public record ShiftWithStaffDto(int Id, int StaffId, string StaffName, string StaffRole, DateTime StartsAt, DateTime EndsAt, string? Notes, int? ShiftTypeId);
+
+// ---------- Shift types (reusable "Morning"/"Evening" patterns for one-tap assignment) ----------
+public record ShiftTypeDto(int Id, string Name, TimeSpan StartTime, TimeSpan EndTime)
+{
+    public static ShiftTypeDto From(ShiftType t) => new(t.Id, t.Name, t.StartTime, t.EndTime);
+}
+public record CreateShiftTypeRequest(string Name, TimeSpan StartTime, TimeSpan EndTime);
+
+/// <summary>Toggles: if StaffId already has a Shift from ShiftTypeId on Date, it's
+/// removed; otherwise one is created spanning ShiftTypeId's StartTime/EndTime on
+/// that date. Mirrors the attendance "tap to mark present" pattern for shifts.</summary>
+public record QuickAssignShiftRequest(int StaffId, DateTime Date, int ShiftTypeId);
 
 /// <summary>Powers the Performance Reports leaderboard — every staff member's reviews
 /// rolled up into one row, ranked by revenue server-side so the screen just renders

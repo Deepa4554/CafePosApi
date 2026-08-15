@@ -501,7 +501,11 @@ public class ReportsController : ControllerBase
     {
         var staffList = await db.Staff.Where(s => s.Status != StaffStatus.Terminated).OrderBy(s => s.Name).ToListAsync();
         var records = await db.AttendanceRecords.Where(a => a.Date == date).ToListAsync();
-        var recordByStaff = records.ToDictionary(r => r.StaffId);
+        // A staff member can now have up to 4 rows for this date (one per shift) — a
+        // Dictionary keyed by StaffId would throw on the second row, so this is a
+        // ToLookup: one report line per shift a person was actually marked for, rather
+        // than an arbitrary single pick that would silently hide a shift's attendance.
+        var recordsByStaff = records.ToLookup(r => r.StaffId);
 
         var dayStart = date.ToDateTime(TimeOnly.MinValue);
         var dayEnd = dayStart.AddDays(1);
@@ -511,12 +515,16 @@ public class ReportsController : ControllerBase
         var lines = new List<DailyAttendanceReportLineDto>();
         foreach (var s in staffList)
         {
-            if (recordByStaff.TryGetValue(s.Id, out var r))
-                lines.Add(new DailyAttendanceReportLineDto(s.Id, s.Name, s.Role, date, r.Status.ToString().ToUpperInvariant(), r.PunchInAt, r.PunchOutAt, r.WorkedMinutes, r.LateMinutes));
+            var mine = recordsByStaff[s.Id].ToList();
+            if (mine.Count > 0)
+            {
+                foreach (var r in mine)
+                    lines.Add(new DailyAttendanceReportLineDto(s.Id, s.Name, s.Role, date, r.ShiftKind.ToString().ToUpperInvariant(), r.Status.ToString().ToUpperInvariant(), r.PunchInAt, r.PunchOutAt, r.WorkedMinutes, r.LateMinutes));
+            }
             else if (leaveStaffIds.Contains(s.Id))
-                lines.Add(new DailyAttendanceReportLineDto(s.Id, s.Name, s.Role, date, "ON_LEAVE", null, null, null, 0));
+                lines.Add(new DailyAttendanceReportLineDto(s.Id, s.Name, s.Role, date, "GENERAL", "ON_LEAVE", null, null, null, 0));
             else if (shiftStaffIds.Contains(s.Id))
-                lines.Add(new DailyAttendanceReportLineDto(s.Id, s.Name, s.Role, date, "ABSENT", null, null, null, 0));
+                lines.Add(new DailyAttendanceReportLineDto(s.Id, s.Name, s.Role, date, "GENERAL", "ABSENT", null, null, null, 0));
         }
         return lines;
     }
@@ -525,8 +533,8 @@ public class ReportsController : ControllerBase
     public async Task<IActionResult> DailyAttendanceExport([FromQuery] DateOnly date)
     {
         var lines = await DailyAttendance(date);
-        var headers = new[] { "Staff", "Role", "Date", "Status", "Punch In", "Punch Out", "Worked Minutes", "Late Minutes" };
-        var rows = lines.Select(l => (IEnumerable<object?>)[l.StaffName, l.Role, l.Date.ToString(), l.Status, l.PunchInAt, l.PunchOutAt, l.WorkedMinutes, l.LateMinutes]);
+        var headers = new[] { "Staff", "Role", "Date", "Shift", "Status", "Punch In", "Punch Out", "Worked Minutes", "Late Minutes" };
+        var rows = lines.Select(l => (IEnumerable<object?>)[l.StaffName, l.Role, l.Date.ToString(), l.ShiftKind, l.Status, l.PunchInAt, l.PunchOutAt, l.WorkedMinutes, l.LateMinutes]);
         return File(CsvBuilder.Build(headers, rows), "text/csv", $"daily-attendance-{date}.csv");
     }
 
@@ -546,9 +554,14 @@ public class ReportsController : ControllerBase
         return staffList.Select(s =>
         {
             var mine = records.Where(r => r.StaffId == s.Id).ToList();
-            var presentDays = mine.Count(r => r.WorkedMinutes.HasValue);
-            var lateDays = mine.Count(r => r.Status == AttendanceStatus.Late);
-            var halfDays = mine.Count(r => r.Status == AttendanceStatus.HalfDay);
+            // Distinct by Date, not raw row count — a staff member present for both
+            // Morning and Evening the same day worked 1 day, not 2, even though it's 2
+            // AttendanceRecord rows (see ShiftKind). totalHours below stays a raw sum:
+            // someone who actually worked two shifts that day legitimately worked more
+            // hours, so summing across shifts is correct to keep.
+            var presentDays = mine.Where(r => r.WorkedMinutes.HasValue).Select(r => r.Date).Distinct().Count();
+            var lateDays = mine.Where(r => r.Status == AttendanceStatus.Late).Select(r => r.Date).Distinct().Count();
+            var halfDays = mine.Where(r => r.Status == AttendanceStatus.HalfDay).Select(r => r.Date).Distinct().Count();
             var totalHours = mine.Sum(r => r.WorkedMinutes ?? 0) / 60.0;
 
             var attendedDates = mine.Where(r => r.WorkedMinutes.HasValue).Select(r => r.Date).ToHashSet();
@@ -628,7 +641,9 @@ public class ReportsController : ControllerBase
             .Select(s =>
             {
                 var mine = records.Where(r => r.StaffId == s.Id).ToList();
-                return new OvertimeReportLineDto(s.Id, s.Name, s.Role, mine.Sum(r => r.OvertimeMinutes) / 60.0, mine.Count);
+                // Distinct by Date — a day with overtime on both a Morning and Evening
+                // shift record is 1 overtime day, not 2. The minutes sum stays raw.
+                return new OvertimeReportLineDto(s.Id, s.Name, s.Role, mine.Sum(r => r.OvertimeMinutes) / 60.0, mine.Select(r => r.Date).Distinct().Count());
             })
             .Where(x => x.OvertimeDays > 0)
             .OrderByDescending(x => x.TotalOvertimeHours)

@@ -82,7 +82,7 @@ public record CrmReportDto(
 
 // ---------- HR Reports ----------
 
-public record DailyAttendanceReportLineDto(int StaffId, string StaffName, string Role, DateOnly Date, string Status, DateTime? PunchInAt, DateTime? PunchOutAt, int? WorkedMinutes, int LateMinutes);
+public record DailyAttendanceReportLineDto(int StaffId, string StaffName, string Role, DateOnly Date, string ShiftKind, string Status, DateTime? PunchInAt, DateTime? PunchOutAt, int? WorkedMinutes, int LateMinutes);
 
 public record MonthlyAttendanceReportLineDto(int StaffId, string StaffName, string Role, int PresentDays, int LateDays, int HalfDays, int AbsentDays, int LeaveDays, double TotalWorkedHours);
 
