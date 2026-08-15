@@ -301,6 +301,44 @@ public class CafeExpense : ITenantScoped
     public int RecordedByUserId { get; set; }
     public string RecordedByName { get; set; } = "";
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Set when this row came from the Daily purchase-list tab instead of the one-off
+    /// Add Expense form. Saving a day replaces that day's list-sourced rows, so this column
+    /// (plus SpentAt's IST date) is what lets staff re-open a day and correct an amount rather
+    /// than entering it twice — see ExpensesController.SaveDailySheet.</summary>
+    public int? PurchaseListItemId { get; set; }
+}
+
+/// <summary>One line of a cafe's own daily purchase list — the fixed set of vendors and
+/// expense heads it buys against every day (Mutton, Gas, Das Kaka, Cook Salary, ...).
+///
+/// Deliberately data and not more ExpenseCategory values: every cafe writes its own list and
+/// edits it over time, while ExpenseCategory is a compiled enum shared by all tenants. The two
+/// do different jobs — this is the detail staff pick from, ExpenseCategory stays a small fixed
+/// roll-up that reports group by (see CafeExpense.Category / DefaultCategory below).
+///
+/// This is only the *template*. A day's actual spend lives in CafeExpense, and only for the
+/// items that had an amount that day — a list of 31 with 10 filled in writes 10 rows, not 31.</summary>
+public class PurchaseListItem : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Name { get; set; }
+
+    /// <summary>Position on the paper sheet this list was copied from. The Daily tab renders in
+    /// this order so the screen reads the same top-to-bottom as the register staff already fill
+    /// in by hand — an alphabetical or insertion order would make them hunt for every row.</summary>
+    public int SortOrder { get; set; }
+
+    /// <summary>Pre-selected on the CafeExpense rows this item generates, which is what keeps
+    /// the daily entry amount-only.</summary>
+    public ExpenseCategory DefaultCategory { get; set; } = ExpenseCategory.Supplies;
+
+    /// <summary>Retired rows drop off the Daily tab but are kept, not deleted, so the
+    /// CafeExpense rows they already produced still resolve back to a name.</summary>
+    public bool IsActive { get; set; } = true;
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
 // ---------- Branches / Tenant / Subscription ----------

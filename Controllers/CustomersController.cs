@@ -206,6 +206,17 @@ public class CustomersController(CafePosDbContext db) : ControllerBase
         return [candidates[0], candidates[secondIndex]];
     }
 
+    /// <summary>Exact-phone existing-vs-new check for POS/billing screens while a guest
+    /// number is being entered. Not gated Plus+ like the CRM directory below — checkout
+    /// must work on every plan tier (see class-level note above).</summary>
+    [HttpGet("by-phone/{phone}")]
+    public async Task<CustomerLookupDto> LookupByPhone(string phone)
+    {
+        var digits = new string(phone.Where(char.IsDigit).ToArray());
+        var customer = await db.Customers.FirstOrDefaultAsync(c => c.Phone == digits);
+        return customer is null ? new CustomerLookupDto(false, null, null) : new CustomerLookupDto(true, customer.Id, customer.Name);
+    }
+
     [Authorize(Policy = Policies.RequirePlus)]
     [HttpGet]
     public async Task<PagedResult<CustomerSummaryDto>> List([FromQuery] string? search, [FromQuery] int page = 1, [FromQuery] int pageSize = 20)

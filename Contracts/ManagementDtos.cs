@@ -184,6 +184,29 @@ public record CafeExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth
 /// whole-tenant total regardless of any branch filter elsewhere in the Reports hub.</summary>
 public record CafeExpenseReportDto(decimal Total, List<CategoryTotalDto> ByCategory, List<CafeExpenseDto> Lines);
 
+// ---------- Daily purchase list ----------
+
+public record PurchaseListItemDto(int Id, string Name, int SortOrder, ExpenseCategory DefaultCategory)
+{
+    public static PurchaseListItemDto From(PurchaseListItem i) => new(i.Id, i.Name, i.SortOrder, i.DefaultCategory);
+}
+
+/// <summary>DefaultCategory is optional — the entity falls back to Supplies, which is what
+/// most of a kitchen's daily list is.</summary>
+public record CreatePurchaseListItemRequest(string Name, ExpenseCategory? DefaultCategory);
+
+/// <summary>Amount is 0 for an item nobody bought that day. Every active list item comes back
+/// regardless, because the sheet is the entry form — staff need to see the row to fill it.</summary>
+public record DailyPurchaseLineDto(int ItemId, string Name, ExpenseCategory DefaultCategory, decimal Amount);
+
+public record DailyPurchaseSheetDto(DateOnly Date, List<DailyPurchaseLineDto> Lines, decimal Total);
+
+public record SaveDailyPurchaseLineDto(int ItemId, decimal Amount);
+
+/// <summary>Date defaults to today in IST. SpentBy defaults to the signed-in user's name —
+/// the daily sheet is amount-only by design, so it isn't asked per row.</summary>
+public record SaveDailyPurchaseRequest(DateOnly? Date, string? SpentBy, List<SaveDailyPurchaseLineDto> Lines);
+
 // ---------- Branches ----------
 public record BranchDto(int Id, string Name, string Address, bool IsActive)
 {

@@ -121,4 +121,149 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
         await db.SaveChangesAsync();
         return NoContent();
     }
+
+    // ---------- Daily purchase list ----------
+    // The cafe's paper "daily purchase list" on screen: a fixed, tenant-owned set of rows
+    // (Mutton, Gas, Das Kaka, Cook Salary, ...) that staff fill amounts into each day. Only
+    // the filled rows become CafeExpense — a list of 31 with 10 used writes 10 rows, not 31.
+
+    /// <summary>The day's sheet: every active list row, in sheet order, carrying whatever was
+    /// already saved for that date (0 when nothing was). Blank rows are returned on purpose —
+    /// the sheet is the entry form, so staff have to see a row to fill it.</summary>
+    [HttpGet("daily")]
+    public async Task<DailyPurchaseSheetDto> DailySheet([FromQuery] DateOnly? date = null)
+    {
+        var day = date ?? DateOnly.FromDateTime(IstClock.NowIst);
+
+        var items = await db.PurchaseListItems
+            .Where(i => i.IsActive)
+            .OrderBy(i => i.SortOrder).ThenBy(i => i.Id)
+            .ToListAsync();
+
+        var start = IstClock.IstDateStartUtc(day);
+        var end = IstClock.IstDateStartUtc(day.AddDays(1));
+        var amountByItem = await db.CafeExpenses
+            .Where(e => e.PurchaseListItemId != null && e.SpentAt >= start && e.SpentAt < end)
+            .GroupBy(e => e.PurchaseListItemId!.Value)
+            .Select(g => new { ItemId = g.Key, Amount = g.Sum(e => e.Amount) })
+            .ToDictionaryAsync(x => x.ItemId, x => x.Amount);
+
+        var lines = items
+            .Select(i => new DailyPurchaseLineDto(
+                i.Id, i.Name, i.DefaultCategory,
+                amountByItem.TryGetValue(i.Id, out var amt) ? amt : 0m))
+            .ToList();
+
+        return new DailyPurchaseSheetDto(day, lines, lines.Sum(l => l.Amount));
+    }
+
+    /// <summary>Saves a day's sheet. Rows at 0 are skipped, and the day's existing
+    /// list-sourced rows are replaced rather than added to — re-saving is how staff correct
+    /// an amount they mistyped, so an append would silently double the day's spend.</summary>
+    [HttpPost("daily")]
+    public async Task<ActionResult<DailyPurchaseSheetDto>> SaveDailySheet(SaveDailyPurchaseRequest req)
+    {
+        var day = req.Date ?? DateOnly.FromDateTime(IstClock.NowIst);
+        var filled = (req.Lines ?? []).Where(l => l.Amount > 0).ToList();
+
+        var items = await db.PurchaseListItems.Where(i => i.IsActive).ToListAsync();
+        var byId = items.ToDictionary(i => i.Id);
+        if (filled.Any(l => !byId.ContainsKey(l.ItemId)))
+            throw new ApiValidationException("Some rows are no longer on the purchase list — reload the sheet and try again.");
+
+        // This endpoint writes CafeExpense directly, so it would otherwise walk straight past
+        // the Owner sign-off that Create() enforces. Rather than silently booking a large line
+        // (or minting approvals that a re-save would duplicate), the save is refused and the
+        // offending rows are named — the Manager puts those through Add Expense, where they
+        // become ApprovalRequests properly, and saves the rest here.
+        if (!User.IsInRole(nameof(AppRole.Owner)))
+        {
+            var overLimit = filled
+                .Where(l => l.Amount > ApprovalThresholds.ExpenseAmount)
+                .Select(l => byId[l.ItemId].Name)
+                .ToList();
+            if (overLimit.Count > 0)
+                throw new ApiValidationException(
+                    $"{string.Join(", ", overLimit)} — above the {ApprovalThresholds.ExpenseAmount:C} auto-approve limit. Add those through Add Expense so an Owner can approve them; the other rows will save here.");
+        }
+
+        var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
+            ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        var recordedBy = await db.Users.FindAsync(int.Parse(idClaim!));
+        var spentBy = string.IsNullOrWhiteSpace(req.SpentBy) ? (recordedBy?.Name ?? "Counter") : req.SpentBy.Trim();
+
+        var start = IstClock.IstDateStartUtc(day);
+        var end = IstClock.IstDateStartUtc(day.AddDays(1));
+        var existing = await db.CafeExpenses
+            .Where(e => e.PurchaseListItemId != null && e.SpentAt >= start && e.SpentAt < end)
+            .ToListAsync();
+        db.CafeExpenses.RemoveRange(existing);
+
+        // Midday IST, not "now": the row then sits unambiguously inside the day it belongs to
+        // even for a backdated sheet, and re-saving doesn't shuffle timestamps around.
+        var spentAt = start.AddHours(12);
+        foreach (var line in filled)
+        {
+            var item = byId[line.ItemId];
+            db.CafeExpenses.Add(new CafeExpense
+            {
+                Amount = line.Amount,
+                Category = item.DefaultCategory,
+                Purpose = item.Name,
+                SpentBy = spentBy,
+                SpentAt = spentAt,
+                PurchaseListItemId = item.Id,
+                RecordedByUserId = recordedBy?.Id ?? 0,
+                RecordedByName = recordedBy?.Name ?? "",
+            });
+        }
+
+        await db.SaveChangesAsync();
+        return await DailySheet(day);
+    }
+
+    /// <summary>Adds a row to the tenant's list. Re-adding a name that was retired revives that
+    /// row instead of creating a second one with the same name, which is what would otherwise
+    /// happen every time someone re-added a row they'd removed.</summary>
+    [HttpPost("daily/items")]
+    public async Task<ActionResult<PurchaseListItemDto>> AddListItem(CreatePurchaseListItemRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Name))
+            throw new ApiValidationException("Enter a name for the purchase list row.");
+        var name = req.Name.Trim();
+
+        var existing = await db.PurchaseListItems.FirstOrDefaultAsync(i => i.Name.ToLower() == name.ToLower());
+        if (existing is not null)
+        {
+            if (existing.IsActive)
+                throw new ApiValidationException($"\"{existing.Name}\" is already on the list.");
+            existing.IsActive = true;
+            if (req.DefaultCategory is ExpenseCategory revived) existing.DefaultCategory = revived;
+            await db.SaveChangesAsync();
+            return PurchaseListItemDto.From(existing);
+        }
+
+        var maxOrder = await db.PurchaseListItems.MaxAsync(i => (int?)i.SortOrder) ?? 0;
+        var item = new PurchaseListItem
+        {
+            Name = name,
+            SortOrder = maxOrder + 1,
+            DefaultCategory = req.DefaultCategory ?? ExpenseCategory.Supplies,
+        };
+        db.PurchaseListItems.Add(item);
+        await db.SaveChangesAsync();
+        return PurchaseListItemDto.From(item);
+    }
+
+    /// <summary>Retires a row. Deactivates rather than deletes — past CafeExpense rows point
+    /// back at this id, and already-saved days must keep resolving to a name.</summary>
+    [HttpDelete("daily/items/{id:int}")]
+    public async Task<IActionResult> RemoveListItem(int id)
+    {
+        var item = await db.PurchaseListItems.FindAsync(id);
+        if (item is null) return NotFound();
+        item.IsActive = false;
+        await db.SaveChangesAsync();
+        return NoContent();
+    }
 }

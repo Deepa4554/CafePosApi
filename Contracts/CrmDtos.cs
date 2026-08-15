@@ -33,6 +33,8 @@ public record CustomerDetailDto(
     List<GiftCardDto> GiftCards,
     List<FavoriteItemDto> FavoriteItems);
 
+public record CustomerLookupDto(bool Exists, int? Id, string? Name);
+
 public record CreateCustomerRequest(string Name, string? Email, string? Phone, string? DateOfBirth);
 public record UpdateCustomerRequest(string? Name, string? Email, string? Phone, string? AddressLine1, string? AddressCity, string? AddressPincode, string? Notes);
 public record AdjustPointsRequest(int Points, string? Reason);
