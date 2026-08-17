@@ -43,7 +43,24 @@ public class OrdersController(
         // confirm order?" the moment a guest submits one — see OrdersController.ConfirmGuestOrder.
         [FromQuery] bool? pendingConfirmation = null)
     {
-        var query = db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).AsQueryable();
+        // AsSplitQuery, and only here. Items/SelectedModifiers, FireBatches and Payments are
+        // three sibling collections, and EF's default SingleQuery resolves them as one LEFT
+        // JOIN — a cartesian product, so a single order with 10 items, 3 KOTs and 2 payments
+        // comes back as ~60 rows, each repeating every Order column again. At this endpoint's
+        // page sizes (BillingScreen asks for 500, clamped to MaxPageSize) that is megabytes
+        // off the database per request, and this is the endpoint the whole app polls — which
+        // is what made Supabase egress, not query time, the binding cost.
+        //
+        // Deliberately NOT applied to the single-order loads below, and not set globally on
+        // the DbContext: splitting trades one round trip for four, and the database answers
+        // from Tokyo. That trade is obviously right for a paged list (megabytes saved) and
+        // obviously wrong for a Get/mutation path a user is sitting and waiting on.
+        //
+        // The cost of splitting: the four queries aren't one atomic read, so a write landing
+        // between them can surface a momentarily mixed picture (a payment row present while
+        // the order's own Paid flag is still the pre-write value). Self-corrects on the next
+        // fetch, and every caller of this endpoint is a polling/invalidated list.
+        var query = db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).AsSplitQuery().AsQueryable();
         // "Active" means still needs attention — matches the table-occupancy rule:
         // an order stays active (visible on KDS, counted as in-progress) until it's
         // BOTH paid AND served. Paying early must not make it vanish from the
@@ -66,7 +83,14 @@ public class OrdersController(
         if (from is not null) query = query.Where(o => o.CreatedAt >= IstClock.IstDateStartUtc(from.Value));
         if (to is not null) query = query.Where(o => o.CreatedAt < IstClock.IstDateStartUtc(to.Value).AddDays(1));
 
-        var paged = await query.OrderByDescending(o => o.CreatedAt).ToPagedResultAsync(page, pageSize);
+        // ThenByDescending(Id) is REQUIRED now that this is a split query, not cosmetic. A split
+        // query runs the root query once per collection, and each run re-applies this ORDER BY +
+        // Skip/Take independently — so if the ordering isn't fully unique, two runs can pick
+        // different rows for the same page and items end up attached to the wrong order (or
+        // vanish). CreatedAt alone is not unique: two orders punched in the same instant, or any
+        // seeded/imported batch sharing a timestamp, tie — and Postgres gives no stable order for
+        // ties. The Id tiebreaker makes the ordering total, which is what makes paging here safe.
+        var paged = await query.OrderByDescending(o => o.CreatedAt).ThenByDescending(o => o.Id).ToPagedResultAsync(page, pageSize);
         return new PagedResult<OrderDto>(paged.Items.Select(OrderDto.From).ToList(), paged.Page, paged.PageSize, paged.TotalCount);
     }
 

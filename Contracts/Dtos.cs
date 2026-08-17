@@ -184,7 +184,7 @@ public record SelectedModifierDto(int ModifierOptionId, string Name, decimal Pri
 public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
     int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty, bool Voided, DateTime? VoidedAt,
     int? VariantId, string? VariantName, List<SelectedModifierDto> SelectedModifiers, string StationName,
-    decimal? TaxRatePct, decimal TaxableAmount, decimal TaxAmount, string? VegNonVegType = null);
+    decimal? TaxRatePct, decimal TaxableAmount, decimal TaxAmount, string? VegNonVegType = null, string? Subtitle = null);
 
 /// <summary>One row of the bill's tax summary — the taxable value and tax charged at a single
 /// rate. A GST invoice has to break tax down per slab rather than print one combined figure,
@@ -298,7 +298,7 @@ public record OrderDto(
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
             i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt,
             i.VariantId, i.VariantName, i.SelectedModifiers.Select(SelectedModifierDto.From).ToList(), i.StationName,
-            i.TaxRatePct, i.TaxableAmount, i.TaxAmount, i.VegNonVegType?.ToString())).ToList(),
+            i.TaxRatePct, i.TaxableAmount, i.TaxAmount, i.VegNonVegType?.ToString(), i.Subtitle)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,

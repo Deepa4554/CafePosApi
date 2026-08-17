@@ -12,11 +12,23 @@ namespace CafePOS.Api.Controllers;
 [Route("api/menu-items")]
 public class MenuController(CafePosDbContext db, IImageStorageService imageStorage, IMenuPhotoAiService menuPhotoAi) : ControllerBase
 {
-    /// <summary>Public — powers the customer-facing QR Menu as well as the internal POS grid.
-    /// Eager-loads Variants/Modifiers (with Options) — this is the one endpoint the POS grid
-    /// and customer QR menu both use to render every item's ordering options in a single
-    /// round trip, instead of an extra fetch per item once tapped.</summary>
-    [AllowAnonymous]
+    /// <summary>The internal POS grid's menu. Eager-loads Variants/Modifiers (with Options) so
+    /// every item's ordering options render in a single round trip, instead of an extra fetch
+    /// per item once tapped.
+    ///
+    /// Deliberately NOT [AllowAnonymous], even though it used to be: this endpoint reads through
+    /// the global tenant query filter, which falls back to Tenant.DefaultTenantId when there's no
+    /// JWT (see ITenantContext.TenantIdOrDefault). An anonymous call therefore didn't fail — it
+    /// returned tenant 1's menu with a 200, so the client cached and rendered it instead of
+    /// retrying. Tenant 1 is not a harmless placeholder in a real deployment: it's whichever
+    /// cafe happens to hold that id, so this served one live cafe's actual menu to every other
+    /// cafe. Any request whose access token had lapsed (30 min, see Jwt:AccessTokenMinutes) hit
+    /// exactly that. Requiring auth turns those into a 401, which the app's interceptor already
+    /// handles by refreshing and retrying.
+    ///
+    /// The customer-facing QR menu is served by PublicController.GetMenu instead, which resolves
+    /// the tenant from the signed QR token and filters on it explicitly — so nothing public
+    /// depends on this being anonymous.</summary>
     [HttpGet]
     public async Task<IEnumerable<MenuItem>> List() =>
         await db.MenuItems
@@ -61,8 +73,11 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
     /// period=today: cafe-local midnight (IST) through now, top 3 — "today's best-selling items so far".
     /// No Popular backfill here: a short or empty list before the day's sales pick up is the
     /// correct answer, not a gap to paper over.
+    ///
+    /// Auth required for the same reason as List above — anonymous reads silently resolved to
+    /// Tenant.DefaultTenantId and leaked tenant 1's real best-sellers to every other cafe. The
+    /// QR menu's own best-sellers strip is PublicController.GetBestSellers, tenant-scoped by token.
     /// </summary>
-    [AllowAnonymous]
     [HttpGet("best-sellers")]
     public async Task<IEnumerable<BestSellerDto>> BestSellers([FromQuery] string period = "month")
     {

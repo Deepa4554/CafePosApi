@@ -127,9 +127,18 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
     // (Mutton, Gas, Das Kaka, Cook Salary, ...) that staff fill amounts into each day. Only
     // the filled rows become CafeExpense — a list of 31 with 10 used writes 10 rows, not 31.
 
+    /// <summary>The tenders a daily-sheet line can actually be paid as. Kept separate from
+    /// KhatabookController/TiffinController's own copies rather than shared, so adding a tender
+    /// to one is a deliberate decision for the others too — same reasoning as theirs.</summary>
+    private static readonly HashSet<string> ValidPaymentModes =
+        new(StringComparer.OrdinalIgnoreCase) { "Cash", "UPI", "Card" };
+
     /// <summary>The day's sheet: every active list row, in sheet order, carrying whatever was
     /// already saved for that date (0 when nothing was). Blank rows are returned on purpose —
-    /// the sheet is the entry form, so staff have to see a row to fill it.</summary>
+    /// the sheet is the entry form, so staff have to see a row to fill it. A row split across
+    /// more than one payment mode in the same day (rare, but SaveDailySheet doesn't forbid it)
+    /// reports back whichever mode covers the largest share of its total, rather than one
+    /// arbitrarily "winning" — good enough for the entry popup to pre-select something sane.</summary>
     [HttpGet("daily")]
     public async Task<DailyPurchaseSheetDto> DailySheet([FromQuery] DateOnly? date = null)
     {
@@ -142,16 +151,22 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
 
         var start = IstClock.IstDateStartUtc(day);
         var end = IstClock.IstDateStartUtc(day.AddDays(1));
-        var amountByItem = await db.CafeExpenses
+        var expensesByItem = await db.CafeExpenses
             .Where(e => e.PurchaseListItemId != null && e.SpentAt >= start && e.SpentAt < end)
-            .GroupBy(e => e.PurchaseListItemId!.Value)
-            .Select(g => new { ItemId = g.Key, Amount = g.Sum(e => e.Amount) })
-            .ToDictionaryAsync(x => x.ItemId, x => x.Amount);
+            .ToListAsync();
+        var byItem = expensesByItem.ToLookup(e => e.PurchaseListItemId!.Value);
 
         var lines = items
-            .Select(i => new DailyPurchaseLineDto(
-                i.Id, i.Name, i.DefaultCategory,
-                amountByItem.TryGetValue(i.Id, out var amt) ? amt : 0m))
+            .Select(i =>
+            {
+                var rows = byItem[i.Id].ToList();
+                var amount = rows.Sum(e => e.Amount);
+                var mode = rows
+                    .GroupBy(e => e.PaymentMode ?? "Cash")
+                    .OrderByDescending(g => g.Sum(e => e.Amount))
+                    .FirstOrDefault()?.Key;
+                return new DailyPurchaseLineDto(i.Id, i.Name, i.DefaultCategory, amount, rows.Count > 0 ? mode : null);
+            })
             .ToList();
 
         return new DailyPurchaseSheetDto(day, lines, lines.Sum(l => l.Amount));
@@ -170,6 +185,10 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
         var byId = items.ToDictionary(i => i.Id);
         if (filled.Any(l => !byId.ContainsKey(l.ItemId)))
             throw new ApiValidationException("Some rows are no longer on the purchase list — reload the sheet and try again.");
+
+        var badMode = filled.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l.PaymentMode) && !ValidPaymentModes.Contains(l.PaymentMode));
+        if (badMode is not null)
+            throw new ApiValidationException($"\"{badMode.PaymentMode}\" isn't a payment mode this screen knows — use Cash, UPI, or Card.");
 
         // This endpoint writes CafeExpense directly, so it would otherwise walk straight past
         // the Owner sign-off that Create() enforces. Rather than silently booking a large line
@@ -213,6 +232,7 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
                 SpentBy = spentBy,
                 SpentAt = spentAt,
                 PurchaseListItemId = item.Id,
+                PaymentMode = string.IsNullOrWhiteSpace(line.PaymentMode) ? "Cash" : line.PaymentMode.Trim(),
                 RecordedByUserId = recordedBy?.Id ?? 0,
                 RecordedByName = recordedBy?.Name ?? "",
             });

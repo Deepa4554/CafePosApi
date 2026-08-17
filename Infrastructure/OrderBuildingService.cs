@@ -182,6 +182,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 SelectedModifiers = selections,
                 StationName = stationName,
                 VegNonVegType = menuItem.VegNonVegType,
+                Subtitle = string.IsNullOrWhiteSpace(menuItem.Subtitle) ? null : menuItem.Subtitle,
                 TaxRatePct = lineTaxRatePct,
                 PriceIncludesTax = linePriceIncludesTax,
             };
@@ -429,6 +430,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 SelectedModifiers = selections,
                 StationName = stationName,
                 VegNonVegType = menuItem.VegNonVegType,
+                Subtitle = string.IsNullOrWhiteSpace(menuItem.Subtitle) ? null : menuItem.Subtitle,
                 TaxRatePct = taxRatePct,
                 PriceIncludesTax = priceIncludesTax,
                 FireBatch = 0,

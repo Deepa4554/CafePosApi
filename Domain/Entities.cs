@@ -518,6 +518,14 @@ public class OrderItem : ITenantScoped
     /// renamed/deleted later), same convention as Name snapshotting MenuItem.Name.</summary>
     public int? VariantId { get; set; }
     public string? VariantName { get; set; }
+    /// <summary>MenuItem.Subtitle at the moment this line was created — same snapshot
+    /// convention as Name/VariantName. Mainly useful on Combo items, where it's the only
+    /// place the combo's contents are written down (e.g. "Aloo Tikki Burger + Fries + Cold
+    /// Drink"); printed on the KOT under the item name (see receiptFormat.ts's
+    /// buildKotLines) so the kitchen knows what a bare "Combo 1" line actually means. Null
+    /// when the source MenuItem had no subtitle, and on every line placed before this
+    /// column existed.</summary>
+    public string? Subtitle { get; set; }
     /// <summary>Which kitchen station this line was prepped at, snapshotted from
     /// MenuItem.Station.Name at the moment the line was created — same snapshot convention
     /// as Name/VariantName, so a later station rename doesn't retroactively change an

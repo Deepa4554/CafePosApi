@@ -196,12 +196,17 @@ public record PurchaseListItemDto(int Id, string Name, int SortOrder, ExpenseCat
 public record CreatePurchaseListItemRequest(string Name, ExpenseCategory? DefaultCategory);
 
 /// <summary>Amount is 0 for an item nobody bought that day. Every active list item comes back
-/// regardless, because the sheet is the entry form — staff need to see the row to fill it.</summary>
-public record DailyPurchaseLineDto(int ItemId, string Name, ExpenseCategory DefaultCategory, decimal Amount);
+/// regardless, because the sheet is the entry form — staff need to see the row to fill it.
+/// PaymentMode is null until the row is actually entered — Cash is a UI default on the new
+/// entry, not a stored assumption about a blank row.</summary>
+public record DailyPurchaseLineDto(int ItemId, string Name, ExpenseCategory DefaultCategory, decimal Amount, string? PaymentMode);
 
 public record DailyPurchaseSheetDto(DateOnly Date, List<DailyPurchaseLineDto> Lines, decimal Total);
 
-public record SaveDailyPurchaseLineDto(int ItemId, decimal Amount);
+/// <summary>PaymentMode is validated against ExpensesController.ValidPaymentModes; a null/blank
+/// value defaults to Cash server-side (see SaveDailySheet) rather than being rejected, so an
+/// older client that doesn't send one yet still saves.</summary>
+public record SaveDailyPurchaseLineDto(int ItemId, decimal Amount, string? PaymentMode);
 
 /// <summary>Date defaults to today in IST. SpentBy defaults to the signed-in user's name —
 /// the daily sheet is amount-only by design, so it isn't asked per row.</summary>

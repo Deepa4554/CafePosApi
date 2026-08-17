@@ -307,6 +307,12 @@ public class CafeExpense : ITenantScoped
     /// (plus SpentAt's IST date) is what lets staff re-open a day and correct an amount rather
     /// than entering it twice — see ExpensesController.SaveDailySheet.</summary>
     public int? PurchaseListItemId { get; set; }
+
+    /// <summary>Cash / UPI / Card — free text validated against ExpensesController's
+    /// ValidPaymentModes, the same "HashSet, not enum" convention KhatabookController and
+    /// TiffinController already use for a settle method. Null on rows from before this column
+    /// existed and on Add Expense entries, which don't ask for it.</summary>
+    public string? PaymentMode { get; set; }
 }
 
 /// <summary>One line of a cafe's own daily purchase list — the fixed set of vendors and
