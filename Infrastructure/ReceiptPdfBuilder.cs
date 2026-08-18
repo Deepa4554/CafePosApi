@@ -38,7 +38,7 @@ public static class ReceiptPdfBuilder
 
                     col.Item().PaddingTop(8).LineHorizontal(0.5f);
 
-                    col.Item().Text($"Order #{1000 + order.Id}").Bold();
+                    col.Item().Text($"Order {OrderNumberFormat.Bill(order)}").Bold();
                     col.Item().Text(order.Title).FontSize(9);
                     col.Item().Text($"{order.CreatedAt:dd MMM yyyy, hh:mm tt}").FontSize(8);
                     if (!string.IsNullOrWhiteSpace(order.GuestName))
@@ -167,7 +167,7 @@ public static class ReceiptPdfBuilder
                     var outstanding = order.Total - alreadyPaid;
                     var upiUri = order.Paid || order.Refunded
                         ? null
-                        : UpiPaymentLink.Build(settings.UpiVpa, businessName, outstanding, $"Bill {1000 + order.Id}");
+                        : UpiPaymentLink.Build(settings.UpiVpa, businessName, outstanding, $"Bill {OrderNumberFormat.Bill(order)}");
 
                     if (upiUri is not null)
                     {

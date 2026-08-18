@@ -1,4 +1,5 @@
 using CafePOS.Api.Data;
+using CafePOS.Api.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -64,11 +65,15 @@ public class SearchController : ControllerBase
         var inventory = await db.InventoryItems.Where(i => i.Name.ToLower().Contains(term)).Take(PerCategoryLimit).ToListAsync();
         results.AddRange(inventory.Select(i => new SearchResultDto("Inventory", i.Id.ToString(), i.Name, $"{i.Current}{i.Unit} / {i.Max}{i.Unit}")));
 
-        if (int.TryParse(term.TrimStart('#'), out var orderId))
+        // Matched on BillNumber, because that — not the id — is the number printed on the bill
+        // the person searching is holding. The id fallback covers bills issued before per-tenant
+        // numbering existed, whose printed "#1455" still decodes to id 455 via OrderNumberFormat.
+        if (int.TryParse(term.TrimStart('#'), out var typedNumber))
         {
-            var order = await db.Orders.FirstOrDefaultAsync(o => o.Id == orderId);
+            var order = await db.Orders.FirstOrDefaultAsync(o => o.BillNumber == typedNumber)
+                ?? await db.Orders.FirstOrDefaultAsync(o => o.Id == typedNumber - 1000);
             if (order is not null)
-                results.Add(new SearchResultDto("Orders", order.Id.ToString(), $"#{1000 + order.Id}", $"{order.Title} · ₹{order.Total:F2}"));
+                results.Add(new SearchResultDto("Orders", order.Id.ToString(), OrderNumberFormat.Bill(order), $"{order.Title} · ₹{order.Total:F2}"));
         }
 
         return results;

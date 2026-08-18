@@ -59,7 +59,7 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
             .ToDictionary(g => g.Key, g => g.ToList());
         var openOrders = await db.Orders
             .Where(o => !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served) && o.TableCode != null)
-            .Select(o => new { o.Id, o.TableCode, o.Status, o.Total, o.GuestName, o.GuestPhone })
+            .Select(o => new { o.Id, o.BillNumber, o.TableCode, o.Status, o.Total, o.GuestName, o.GuestPhone })
             .ToListAsync();
         // Informational only — deliberately does NOT change Status (empty/occupied) above,
         // which stays order-based exactly as before. A guest can have a live QR session on
@@ -82,6 +82,10 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
                 t.Seats,
                 Status = order is null ? "empty" : "occupied",
                 OrderId = order?.Id,
+                // Sent formatted rather than as a bare int so the tile can't go back to deriving
+                // "#{1000 + orderId}" client-side — that derivation is exactly what printed a new
+                // cafe's first table as "Order #1455". See OrderNumberFormat.
+                OrderNumber = order is null ? null : OrderNumberFormat.Bill(order.BillNumber, order.Id),
                 OrderStatus = order?.Status.ToString().ToUpperInvariant(),
                 Bill = order?.Total,
                 GuestName = order?.GuestName,

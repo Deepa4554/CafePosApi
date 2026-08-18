@@ -300,7 +300,19 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // No inventory deduction here — orders are created "Open"/unfired (see doc Section
         // 4.1). Stock is only consumed once FireUnfiredItemsAsync actually sends items to
         // the kitchen, so a held or abandoned order never leaves a phantom deduction.
+
+        // The cafe's own running bill number — what actually prints on the receipt, instead of
+        // the shared Orders identity sequence that made a new cafe's first bill read "#1455".
         //
+        // Taken here, as late as the build allows, and deliberately NOT up beside the QSR token:
+        // the UPSERT row-locks this cafe's single counter row until the surrounding transaction
+        // commits, so every concurrent order for that cafe queues behind whoever holds it.
+        // Allocating at the top would stretch that queue across the offer engine, the customer
+        // lookup and the staff lookups as well; here it spans only the save. (Unlike the
+        // dine-in table claim above, this lock is per-CAFE, not per-table — nothing else in the
+        // build serialises orders this broadly, which is why the window is worth keeping short.)
+        order.BillNumber = await NextBillNumberAsync(db, effectiveTenantId);
+
         // Two saves because the audit entry needs the order's generated id; the surrounding
         // transaction (DbConcurrency.InTransactionAsync at the top of this method) is what
         // keeps them atomic, exactly as the hand-rolled one here used to.
@@ -360,6 +372,42 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                VALUES ({tenantId}, {date}, 1)
                ON CONFLICT (""TenantId"", ""Date"")
                DO UPDATE SET ""LastNumber"" = ""TokenCounters"".""LastNumber"" + 1
+               RETURNING ""LastNumber""").ToListAsync();
+        return result[0];
+    }
+
+    /// <summary>Atomically hands out the next bill number for a tenant, by exactly the same
+    /// UPSERT trick as <see cref="NextTokenNumberAsync"/> — see that method for why a
+    /// SELECT-then-UPDATE won't do and why the non-relational branch can skip it. The only
+    /// difference is the key: one counter per tenant with no date, because bill numbers run
+    /// continuously for the life of the cafe instead of restarting each morning.</summary>
+    private static async Task<int> NextBillNumberAsync(CafePosDbContext db, int tenantId)
+    {
+        if (!db.Database.IsRelational())
+        {
+            // IgnoreQueryFilters: guest QR orders build under an explicit tenant that is not the
+            // ambient one, and the tenant filter would otherwise hide that cafe's existing counter
+            // row — every guest order would then try to insert a second row starting back at 1.
+            var counter = await db.BillCounters.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(c => c.TenantId == tenantId);
+            if (counter is null)
+            {
+                counter = new BillCounter { TenantId = tenantId, LastNumber = 1 };
+                db.BillCounters.Add(counter);
+            }
+            else
+            {
+                counter.LastNumber += 1;
+            }
+            await db.SaveChangesAsync();
+            return counter.LastNumber;
+        }
+
+        var result = await db.Database.SqlQuery<int>(
+            $@"INSERT INTO ""BillCounters"" (""TenantId"", ""LastNumber"")
+               VALUES ({tenantId}, 1)
+               ON CONFLICT (""TenantId"")
+               DO UPDATE SET ""LastNumber"" = ""BillCounters"".""LastNumber"" + 1
                RETURNING ""LastNumber""").ToListAsync();
         return result[0];
     }

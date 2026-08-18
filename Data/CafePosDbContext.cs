@@ -146,6 +146,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<GuestSession> GuestSessions => Set<GuestSession>();
     public DbSet<SessionDevice> SessionDevices => Set<SessionDevice>();
     public DbSet<TokenCounter> TokenCounters => Set<TokenCounter>();
+    public DbSet<BillCounter> BillCounters => Set<BillCounter>();
     public DbSet<OrderNoteSuggestion> OrderNoteSuggestions => Set<OrderNoteSuggestion>();
 
     // Auth
@@ -560,6 +561,17 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // One counter row per (tenant, day) — NextTokenNumberAsync UPSERTs into this via
         // ON CONFLICT, so the constraint must match exactly what the UPSERT targets.
         modelBuilder.Entity<TokenCounter>().HasIndex(c => new { c.TenantId, c.Date }).IsUnique();
+
+        // One counter row per tenant — NextBillNumberAsync UPSERTs into this via ON CONFLICT,
+        // so the constraint must match exactly what the UPSERT targets. No Date component:
+        // unlike tokens, bill numbers run for the life of the cafe (see BillCounter).
+        modelBuilder.Entity<BillCounter>().HasIndex(c => c.TenantId).IsUnique();
+
+        // Backs "pull up bill #57" lookups from search and the khata. Deliberately NOT unique:
+        // the atomic UPSERT above is what guarantees no two bills share a number, and a unique
+        // constraint here would turn any counter bug into a failed order at the till — the one
+        // thing a POS must never do. Mirrors how Order.TokenNumber is handled.
+        modelBuilder.Entity<Order>().HasIndex(o => new { o.TenantId, o.BillNumber });
 
         // One row per distinct note text per tenant — repeating an already-known note just
         // bumps its UsageCount/LastUsedAt instead of creating a duplicate suggestion.

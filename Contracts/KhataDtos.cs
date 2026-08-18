@@ -22,7 +22,7 @@ public record KhataCustomerDto(
     DateTime? LastDueAt);
 
 /// <summary>One row of a customer's ledger. OrderNumber is filled for Due rows (the bill the
-/// credit came from, in the same "#1000+id" form the rest of the app shows) and null for
+/// credit came from, in the same per-cafe "#N" form the rest of the app shows) and null for
 /// repayments, which settle the balance as a whole rather than one specific old bill.</summary>
 public record KhataEntryDto(
     int Id,
@@ -44,12 +44,16 @@ public record KhataEntryDto(
     // only part of the ledger could work out for itself.
     decimal RunningOutstanding)
 {
-    public static KhataEntryDto From(KhataEntry e, decimal runningOutstanding) => new(
+    /// <param name="orderNumbersById">Bill numbers for the orders this ledger references,
+    /// looked up by the caller in one query — a KhataEntry only stores the order id, and the
+    /// number now lives on the Order row (Order.BillNumber) rather than being derivable from
+    /// that id. A Due row whose order is missing from the map simply shows no bill number.</param>
+    public static KhataEntryDto From(KhataEntry e, decimal runningOutstanding, IReadOnlyDictionary<int, string> orderNumbersById) => new(
         e.Id,
         e.Type.ToString(),
         e.Amount,
         e.OrderId,
-        e.OrderId is int id ? $"#{1000 + id}" : null,
+        e.OrderId is int oid && orderNumbersById.TryGetValue(oid, out var num) ? num : null,
         e.Method,
         e.Note,
         e.RecordedByName,

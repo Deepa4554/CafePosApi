@@ -129,11 +129,19 @@ public class KhatabookController(CafePosDbContext db) : ControllerBase
             .OrderBy(e => e.CreatedAt).ThenBy(e => e.Id)
             .ToListAsync();
 
+        // One lookup for every bill this ledger cites: the number lives on the Order row now
+        // (Order.BillNumber, per-cafe) instead of being computable from the order id.
+        var orderIds = entries.Where(e => e.OrderId is not null).Select(e => e.OrderId!.Value).Distinct().ToList();
+        var orderNumbersById = await db.Orders
+            .Where(o => orderIds.Contains(o.Id))
+            .Select(o => new { o.Id, o.BillNumber })
+            .ToDictionaryAsync(o => o.Id, o => OrderNumberFormat.Bill(o.BillNumber, o.Id));
+
         var running = 0m;
         var rows = entries.Select(e =>
         {
             running += e.Type == KhataEntryType.Due ? e.Amount : -e.Amount;
-            return KhataEntryDto.From(e, running);
+            return KhataEntryDto.From(e, running, orderNumbersById);
         }).ToList();
         rows.Reverse();
 

@@ -247,10 +247,29 @@ public class TokenCounter : ITenantScoped
     public int LastNumber { get; set; }
 }
 
+/// <summary>One row per tenant — LastNumber is incremented atomically via the same UPSERT
+/// pattern as TokenCounter (see OrderBuildingService.NextBillNumberAsync) to hand out the next
+/// bill number for that cafe. Unlike tokens this never resets: a bill number is what the guest,
+/// the khata and a GST invoice refer back to, so it has to stay unique for the life of the cafe
+/// rather than repeat every morning.</summary>
+public class BillCounter : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int LastNumber { get; set; }
+}
+
 public class Order : ITenantScoped
 {
     public int Id { get; set; }
     public int TenantId { get; set; }
+    /// <summary>The cafe's own running bill number, starting at 1 for each tenant and never
+    /// resetting (see OrderBuildingService.NextBillNumberAsync / BillCounter). This — not Id —
+    /// is what every receipt, PDF, khata row and search result shows: Id is a single identity
+    /// sequence shared by every tenant in the database, so a cafe that onboarded late used to
+    /// see its very first bill printed as "#1455". Formatted for display in one place,
+    /// OrderNumberFormat.Bill.</summary>
+    public int BillNumber { get; set; }
     /// <summary>Which branch this order was placed at — null for cafes that haven't
     /// set up branches, or orders placed before branch-scoping existed. Filtered by
     /// whichever branch is active in the POS/Orders UI (see BranchesController).</summary>

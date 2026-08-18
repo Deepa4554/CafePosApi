@@ -10,8 +10,11 @@ public record WhatsAppResolveTenantDto(int TenantId, int OrderId, string Trackin
 /// automatic push — StatusLabel is already mapped to the customer-facing word
 /// (Pending/Preparing/Prepared/Served), never the raw OrderStatus name. TokenNumber is
 /// non-null only for a QSR order (its counter-slip number); every other order type labels
-/// itself by OrderId instead — see whatsapp-service's messageTemplates.ts.</summary>
-public record WhatsAppOrderStatusDto(int TenantId, int OrderId, int? TokenNumber, string StatusLabel, bool Paid, string RestaurantName, string TrackingId)
+/// itself by OrderNumber instead — see whatsapp-service's messageTemplates.ts. OrderNumber is
+/// sent pre-formatted (OrderNumberFormat.Bill) precisely so the WhatsApp service cannot go on
+/// deriving it from OrderId: that derivation used the platform-wide id sequence, so the message
+/// quoted a different number than the bill in the customer's hand.</summary>
+public record WhatsAppOrderStatusDto(int TenantId, int OrderId, string OrderNumber, int? TokenNumber, string StatusLabel, bool Paid, string RestaurantName, string TrackingId)
 {
     public static string ToStatusLabel(OrderStatus status) => status switch
     {

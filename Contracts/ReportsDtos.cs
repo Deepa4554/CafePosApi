@@ -27,7 +27,7 @@ public record SalesReportDto(decimal GrossSales, decimal TotalDiscounts, decimal
 public record TaxRateLineDto(decimal RatePct, decimal TaxableAmount, decimal TaxAmount, int LineCount);
 /// <summary>Bill-level tax detail for filing — one row per order, so the rate-wise totals
 /// above can be traced back to individual invoices.</summary>
-public record TaxBillLineDto(int OrderId, string Title, DateTime CreatedAt, decimal TaxableAmount, decimal TaxAmount);
+public record TaxBillLineDto(int OrderId, string OrderNumber, string Title, DateTime CreatedAt, decimal TaxableAmount, decimal TaxAmount);
 public record TaxGstReportDto(decimal TotalTaxableAmount, decimal TotalTaxCollected, List<TaxRateLineDto> ByRate, List<TaxBillLineDto> Bills);
 
 // ---------- Bill-wise Order Detail ----------
@@ -40,7 +40,9 @@ public record OrderDetailItemDto(string Name, string? VariantName, int Qty, deci
 /// (order-time, bill-time, coupon, gift card, loyalty) — the bill register wants one
 /// "what came off this bill" number, not five columns of mostly zeroes.</summary>
 public record OrderDetailLineDto(
-    int OrderId, string Title, DateTime CreatedAt, string OrderType, string? TableCode, int? TokenNumber,
+    // OrderNumber, not OrderId, is what the guest's copy of this bill says — the register is
+    // only auditable against physical bills if the two agree. See OrderNumberFormat.
+    int OrderId, string OrderNumber, string Title, DateTime CreatedAt, string OrderType, string? TableCode, int? TokenNumber,
     string? CustomerName, string? CustomerPhone,
     decimal Subtotal, decimal DiscountTotal, decimal Tax, decimal Total,
     string? PaymentMethod, bool Paid, bool Refunded, decimal? RefundedAmount,

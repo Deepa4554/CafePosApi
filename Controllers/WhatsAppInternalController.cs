@@ -65,7 +65,8 @@ public class WhatsAppInternalController(CafePosDbContext db, ReceiptTokenService
             .FirstOrDefaultAsync() ?? "PrabandhOS";
 
         return new WhatsAppOrderStatusDto(
-            row.TenantId, order.Id, order.TokenNumber, WhatsAppOrderStatusDto.ToStatusLabel(order.Status), order.Paid, businessName, row.TrackingId);
+            row.TenantId, order.Id, OrderNumberFormat.Bill(order), order.TokenNumber,
+            WhatsAppOrderStatusDto.ToStatusLabel(order.Status), order.Paid, businessName, row.TrackingId);
     }
 
     /// <summary>Idempotent upsert of the phone <-> tracking mapping (the TRACK command

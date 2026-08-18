@@ -366,7 +366,7 @@ public class ReportsController : ControllerBase
 
         var bills = orders
             .Select(o => new TaxBillLineDto(
-                o.Id, o.Title, o.CreatedAt,
+                o.Id, OrderNumberFormat.Bill(o), o.Title, o.CreatedAt,
                 o.Items.Where(i => !i.Voided).Sum(i => i.TaxableAmount),
                 o.Items.Where(i => !i.Voided).Sum(i => i.TaxAmount)))
             .Where(b => b.TaxAmount > 0)
@@ -404,7 +404,7 @@ public class ReportsController : ControllerBase
             var discountTotal = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount
                               + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount;
             return new OrderDetailLineDto(
-                o.Id, o.Title, o.CreatedAt, o.OrderType, o.TableCode, o.TokenNumber,
+                o.Id, OrderNumberFormat.Bill(o), o.Title, o.CreatedAt, o.OrderType, o.TableCode, o.TokenNumber,
                 o.Customer?.Name ?? o.GuestName, o.Customer?.Phone ?? o.GuestPhone,
                 o.Subtotal, discountTotal, o.Tax, o.Total,
                 o.PaymentMethod, o.Paid, o.Refunded, o.RefundedAmount,

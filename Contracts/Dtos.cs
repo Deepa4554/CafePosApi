@@ -1,4 +1,5 @@
 using CafePOS.Api.Domain;
+using CafePOS.Api.Infrastructure;
 
 namespace CafePOS.Api.Contracts;
 
@@ -206,9 +207,11 @@ public record OrderTaxLineDto(decimal RatePct, decimal TaxableAmount, decimal Ta
 
 /// <summary>One fire round's own kitchen status — see Order.FireBatches. KDS flattens an
 /// order's non-Served batches into separate ticket cards from this list, instead of relying
-/// on the single rollup Status below. KotNumber is a tenant-wide sequential ticket id (same
-/// "#1000+id" convention as Order.Number) — the KOT-wise KDS view sorts/labels by this
-/// instead of by table, matching how a KOT chit works in a physical kitchen.</summary>
+/// on the single rollup Status below. KotNumber is derived from the OrderFireBatch id, which
+/// is a single identity sequence shared by every tenant — so unlike Order.Number (per-cafe
+/// since BillCounter) it is NOT the cafe's own count of kitchen tickets. It only has to be
+/// stable and ordered for the KOT-wise KDS view to sort/label by, which it is; give it its own
+/// per-tenant counter if a kitchen ever needs to read "KOT #7" off the chit and mean it.</summary>
 public record FireBatchDto(int BatchNumber, string Status, DateTime FiredAt, string KotNumber);
 
 /// <summary>One settled tender — see Order.Payments.</summary>
@@ -287,7 +290,7 @@ public record OrderDto(
         var amountPaid = o.Payments.Sum(p => p.Amount);
         return new(
         o.Id,
-        $"#{1000 + o.Id}",
+        OrderNumberFormat.Bill(o),
         o.Title,
         o.OrderType,
         o.TableCode,
