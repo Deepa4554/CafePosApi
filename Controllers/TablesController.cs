@@ -198,6 +198,73 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
         return CreatedAtAction(nameof(List), new { id = table.Id }, table);
     }
 
+    /// <summary>Renames a table and/or changes its zone and seat count. Owner/Manager only —
+    /// same gate as Create/Delete, since this restructures the floor plan.
+    ///
+    /// Renaming is refused while the table has an open order. Order.TableCode is a plain
+    /// string, not a foreign key, so a rename does not cascade: every "is this table busy"
+    /// query in the app (List above, Delete below, Merge, OrdersController.ShiftTable,
+    /// GuestSessionController, PublicController) matches orders to tables BY CODE, and
+    /// renaming out from under a live order would orphan it — the order would keep serving
+    /// food under a table code the floor plan no longer has, the table would show as empty,
+    /// and a second party could be seated on top of it.
+    ///
+    /// Settled orders deliberately keep the old code. Their bill was printed "Table #T5" and
+    /// handed to a guest; rewriting history to match the new name would falsify a receipt
+    /// that already exists on paper. Zone and Seats carry no such link and can change at any
+    /// time, open order or not.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPut("{id:int}")]
+    public async Task<ActionResult<UpdateTableResponse>> Update(int id, UpdateTableRequest req)
+    {
+        // FirstOrDefaultAsync, not FindAsync: Find looks up by primary key without applying
+        // global query filters, so it would happily hand back another cafe's table row and let
+        // this endpoint rename it. The filter is the only thing scoping this to the caller's
+        // tenant — the route carries a bare id and nothing else checks ownership.
+        var table = await db.Tables.FirstOrDefaultAsync(t => t.Id == id);
+        if (table is null) return NotFound();
+
+        var oldCode = table.Code;
+        var newCode = req.Code?.Trim();
+        var renaming = !string.IsNullOrWhiteSpace(newCode)
+            && !string.Equals(newCode, oldCode, StringComparison.Ordinal);
+
+        if (renaming)
+        {
+            if (newCode!.Length > 20)
+                throw new ApiValidationException("Table name can be at most 20 characters.");
+
+            // Same uniqueness rule as Create — the (TenantId, Code) unique index would reject a
+            // clash anyway; this just turns it into a readable message. Case-insensitive, so
+            // "t5" can't shadow "T5" on the floor plan.
+            var clash = await db.Tables
+                .AnyAsync(t => t.Id != id && t.Code.ToLower() == newCode.ToLower());
+            if (clash)
+                throw new ApiConflictException($"A table named \"{newCode}\" already exists.");
+
+            var busy = await db.Orders.AnyAsync(o => o.TableCode == oldCode && !o.Cancelled && (!o.Paid || o.Status != OrderStatus.Served));
+            if (busy)
+                throw new ApiConflictException($"Table {oldCode} has an open order — settle or move it before renaming.");
+
+            table.Code = newCode;
+        }
+
+        if (!string.IsNullOrWhiteSpace(req.Zone)) table.Zone = req.Zone.Trim();
+        if (req.Seats is int seats)
+        {
+            if (seats <= 0) throw new ApiValidationException("Seats must be at least 1.");
+            table.Seats = seats;
+        }
+
+        await db.SaveChangesAsync();
+
+        if (renaming)
+            await audit.LogAsync(AuditAction.Update, AuditResource.Table, table.Id.ToString(),
+                $"Table {oldCode} renamed to {table.Code}. Printed QR codes for {oldCode} no longer resolve.", AuditSeverity.Medium);
+
+        return new UpdateTableResponse(table, renaming);
+    }
+
     [Authorize(Policy = Policies.OwnerOrManager)]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)

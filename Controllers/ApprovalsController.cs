@@ -169,6 +169,7 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
                     Purpose = payload.Purpose,
                     SpentBy = payload.SpentBy,
                     SpentAt = payload.SpentAt ?? DateTime.UtcNow,
+                    PaymentMode = payload.PaymentMode,
                     RecordedByUserId = recordedBy?.Id ?? request.RequestedById,
                     RecordedByName = recordedBy?.Name ?? "",
                 });

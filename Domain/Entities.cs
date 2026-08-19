@@ -725,6 +725,11 @@ public class CafeSettings : ITenantScoped
     // Owner / Cafe Profile
     public string? Phone { get; set; }
     public string? Address { get; set; }
+    /// <summary>The cafe's food/trade licence number (FSSAI, shop licence — whatever the
+    /// local rule is), printed on every bill. Free text on purpose: the format differs by
+    /// state and by licence type, and validating it here would only block a cafe from
+    /// entering the number it was actually issued.</summary>
+    public string? LicenceNumber { get; set; }
     /// <summary>Serialized JSON array of {day, open, from, to} — kept as one JSON blob
     /// rather than a separate table since it's always read/written as a whole week at
     /// once from the Cafe Profile screen, never queried per-day.</summary>

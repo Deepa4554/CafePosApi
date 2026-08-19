@@ -83,6 +83,9 @@ builder.Services.AddDataProtection()
     .PersistKeysToDbContext<CafePosDbContext>();
 builder.Services.AddSingleton<QrTokenService>();
 builder.Services.AddSingleton<ReceiptTokenService>();
+// Scoped, not singleton: it takes ILogger<T> and an IHttpClientFactory, and has no state of
+// its own worth sharing across requests.
+builder.Services.AddScoped<CafeLogoLoader>();
 
 // ---------- PDF generation (bill receipts) ----------
 // QuestPDF's free Community license — this project qualifies (small business, non-SaaS-
@@ -204,16 +207,28 @@ builder.Services.AddHttpClient<IImageStorageService, SupabaseImageStorageService
 // aren't set. See appsettings.json's Fcm:CredentialsPath comment for how to obtain the key.
 builder.Services.Configure<FcmOptions>(builder.Configuration.GetSection("Fcm"));
 var fcmCredentialsPath = builder.Configuration["Fcm:CredentialsPath"];
+// TEMP DIAGNOSTIC — this whole block used to fail (or skip) completely silently, which made a
+// broken push setup undebuggable from the logs. Remove once delivery is confirmed working.
+Console.WriteLine($"[FCM DIAGNOSTIC] CredentialsPath='{fcmCredentialsPath}' " +
+    $"FileExists={(!string.IsNullOrWhiteSpace(fcmCredentialsPath) && File.Exists(fcmCredentialsPath))}");
 if (!string.IsNullOrWhiteSpace(fcmCredentialsPath) && File.Exists(fcmCredentialsPath) && FirebaseApp.DefaultInstance is null)
 {
-    // GoogleCredential.FromStream is flagged obsolete in favor of the newer CredentialFactory
-    // API, which (as of Google.Apis.Auth 1.73) has no stable documented equivalent yet for
-    // "load a service-account key from a local file" — this is still the Firebase Admin SDK's
-    // own documented approach, so the warning is suppressed rather than chasing a moving target.
+    try
+    {
+        // GoogleCredential.FromStream is flagged obsolete in favor of the newer CredentialFactory
+        // API, which (as of Google.Apis.Auth 1.73) has no stable documented equivalent yet for
+        // "load a service-account key from a local file" — this is still the Firebase Admin SDK's
+        // own documented approach, so the warning is suppressed rather than chasing a moving target.
 #pragma warning disable CS0618
-    using var fcmCredentialsStream = File.OpenRead(fcmCredentialsPath);
-    FirebaseApp.Create(new AppOptions { Credential = GoogleCredential.FromStream(fcmCredentialsStream) });
+        using var fcmCredentialsStream = File.OpenRead(fcmCredentialsPath);
+        FirebaseApp.Create(new AppOptions { Credential = GoogleCredential.FromStream(fcmCredentialsStream) });
 #pragma warning restore CS0618
+        Console.WriteLine("[FCM DIAGNOSTIC] FirebaseApp.Create succeeded.");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[FCM DIAGNOSTIC] FirebaseApp.Create FAILED: {ex}");
+    }
 }
 builder.Services.AddSingleton<IPushNotificationSender, FcmPushNotificationSender>();
 

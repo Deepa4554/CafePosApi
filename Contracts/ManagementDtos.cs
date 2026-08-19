@@ -173,16 +173,27 @@ public record CreateLeaveRequest(int StaffId, DateOnly StartDate, DateOnly EndDa
 public record CreateMyLeaveRequest(DateOnly StartDate, DateOnly EndDate, LeaveType Type, string? Reason);
 public record ReviewLeaveRequest(string? Note);
 
-public record CafeExpenseDto(int Id, decimal Amount, string Category, string Purpose, string SpentBy, DateTime SpentAt, string RecordedByName, DateTime CreatedAt)
+/// <summary>PaymentMode is null on rows saved before the column existed — the Expenses screen
+/// buckets those under "Not set" rather than reading them as Cash, since a guess there would
+/// quietly shift money between the mode-wise totals staff are trying to reconcile.</summary>
+public record CafeExpenseDto(int Id, decimal Amount, string Category, string Purpose, string SpentBy, DateTime SpentAt, string RecordedByName, DateTime CreatedAt, string? PaymentMode)
 {
-    public static CafeExpenseDto From(CafeExpense e) => new(e.Id, e.Amount, e.Category.ToString(), e.Purpose, e.SpentBy, e.SpentAt, e.RecordedByName, e.CreatedAt);
+    public static CafeExpenseDto From(CafeExpense e) => new(e.Id, e.Amount, e.Category.ToString(), e.Purpose, e.SpentBy, e.SpentAt, e.RecordedByName, e.CreatedAt, e.PaymentMode);
 }
-public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt);
+/// <summary>PaymentMode is validated against ExpensesController.ValidPaymentModes. Unlike the
+/// daily sheet it is deliberately NOT defaulted to Cash when omitted — an older client that
+/// does not send one leaves the row unset rather than padding the Cash total with entries
+/// nobody actually classified.</summary>
+public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt, string? PaymentMode = null);
 public record CategoryTotalDto(string Category, decimal Total);
-public record CafeExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth, List<CategoryTotalDto> ByCategoryThisMonth, List<CafeExpenseDto> Recent);
+/// <summary>Mode is one of ExpensesController.ValidPaymentModes, or "Not set" for the rows that
+/// carry none. Kept separate from CategoryTotalDto despite the identical shape — the two lists
+/// sit side by side on the Expenses screen, where a shared "Category" field name would misread.</summary>
+public record PaymentModeTotalDto(string Mode, decimal Total);
+public record CafeExpenseSummaryDto(decimal TotalAllTime, decimal TotalThisMonth, List<CategoryTotalDto> ByCategoryThisMonth, List<PaymentModeTotalDto> ByPaymentModeThisMonth, List<CafeExpenseDto> Recent);
 /// <summary>Not branch-scoped — CafeExpense has no BranchId column, so this is always a
 /// whole-tenant total regardless of any branch filter elsewhere in the Reports hub.</summary>
-public record CafeExpenseReportDto(decimal Total, List<CategoryTotalDto> ByCategory, List<CafeExpenseDto> Lines);
+public record CafeExpenseReportDto(decimal Total, List<CategoryTotalDto> ByCategory, List<PaymentModeTotalDto> ByPaymentMode, List<CafeExpenseDto> Lines);
 
 // ---------- Daily purchase list ----------
 

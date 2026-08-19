@@ -89,6 +89,8 @@ public static class CustomerOrderPage
     color: var(--muted);
     text-transform: uppercase;
     margin: 18px 0 10px;
+    /* Keeps a jumped-to heading clear of the pinned strip instead of underneath it. */
+    scroll-margin-top: 52px;
   }
   .bs-title {
     font-size: 12px;
@@ -123,28 +125,68 @@ public static class CustomerOrderPage
   .bs-card .stepper button.add { width: 100%; padding: 8px 0; text-align: center; }
   .bs-card .stepper > .qty { flex: 1; }
   .bs-card.unavailable { opacity: 0.5; }
+  /* Two dishes to a row, photo on top. Food is chosen by eye and the old 56px thumbnail was
+     too small to choose anything by. Cards stretch to the tallest in their row and the footer
+     is pushed down, so prices stay on one line across the grid however long the names run. */
+  .item-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: stretch; }
   .item-card {
     background: var(--card);
     border-radius: 14px;
-    padding: 10px;
-    margin-bottom: 10px;
+    overflow: hidden;
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
   }
+  /* aspect-ratio rather than a fixed height: the tile's width depends on the phone, and a
+     hardcoded height would letterbox the photo on a wide screen and crop it on a narrow one. */
   .item-thumb {
-    width: 56px; height: 56px; border-radius: 10px; flex: 0 0 56px;
+    width: 100%; aspect-ratio: 4 / 3; height: auto; flex: 0 0 auto;
     object-fit: cover; background: var(--input-tint);
   }
   .item-thumb.placeholder {
     display: flex; align-items: center; justify-content: center;
-    font-size: 22px;
+    font-size: 26px;
   }
-  .item-info { flex: 1; min-width: 0; }
+  .item-info { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 9px 10px 0; }
   .item-name-row { display: flex; align-items: center; gap: 5px; }
-  .item-name { font-weight: 700; font-size: 14px; }
-  .item-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .item-price { color: var(--heading); font-weight: 700; font-size: 13px; margin-top: 2px; }
+  .item-name { font-weight: 700; font-size: 13px; line-height: 1.25; }
+  /* Two lines then ellipsis. One is enough for most dishes; a Combo needs the second to say
+     what is actually inside it, which is the only place that information exists. */
+  .item-sub {
+    color: var(--muted); font-size: 11px; line-height: 1.3; margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .item-price { color: var(--heading); font-weight: 700; font-size: 13px; }
+  /* Wraps rather than overflows: "from ₹240" beside a Customize button doesn't fit a half-width
+     tile on a small phone, and a button pushed off the card edge is unreachable. */
+  .item-foot {
+    margin-top: auto; padding: 8px 10px 10px;
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 8px;
+  }
+  .item-foot .item-actions-slot { margin-left: auto; }
+  .item-grid .stepper { gap: 6px; }
+  .item-grid .stepper button { width: 26px; height: 26px; border-radius: 13px; font-size: 16px; }
+  .item-grid .stepper button.add { width: auto; padding: 6px 12px; font-size: 11px; }
+  .item-grid .customize-btn { padding: 6px 11px; font-size: 11px; }
+  .item-grid .item-lines { font-size: 11px; }
+
+  /* Pinned category strip. Without it the only way to reach the drinks is to scroll past
+     everything else. Bleeds past .wrap's padding so items scroll under it, not beside it. */
+  .cat-strip {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; gap: 6px; overflow-x: auto;
+    margin: 0 -16px 4px; padding: 8px 16px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--divider);
+    scrollbar-width: none;
+  }
+  .cat-strip::-webkit-scrollbar { display: none; }
+  .cat-chip {
+    flex: 0 0 auto; white-space: nowrap; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 700;
+    padding: 6px 12px; border-radius: 999px;
+    background: var(--card); border: 1px solid var(--divider); color: var(--muted);
+  }
+  .cat-chip.active { background: var(--heading); border-color: var(--heading); color: #fff; }
   .vnv { width: 12px; height: 12px; border: 1.5px solid; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; }
   .vnv.veg, .vnv.jain { border-color: #0B8043; }
   .vnv.eggetarian { border-color: #B26A00; }
@@ -174,6 +216,12 @@ public static class CustomerOrderPage
     width: 100%; max-width: 480px; max-height: 82vh; overflow-y: auto;
   }
   .opt-sheet h3 { margin: 0 0 14px; font-size: 17px; }
+  /* What a plate actually includes. The grid card clamps its subtitle to two lines, so this
+     sheet is the only place the full list is readable — which matters most for a per-head
+     buffet, where "what do I get for ₹299" is the whole decision the customer is making. */
+  .opt-desc { margin: -8px 0 2px; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+  .opt-desc ul { margin: 0; padding-left: 17px; }
+  .opt-desc li { margin: 3px 0; }
   .opt-group-title { font-size: 11px; font-weight: 800; letter-spacing: 0.4px; color: var(--muted); text-transform: uppercase; margin: 14px 0 6px; }
   .opt-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; cursor: pointer; }
   .opt-row .opt-label { flex: 1; font-size: 14px; font-weight: 600; }
@@ -222,9 +270,29 @@ public static class CustomerOrderPage
     padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
     display: flex; align-items: center; gap: 12px;
   }
-  .cart-summary { flex: 1; min-width: 0; }
+  /* The summary half of the bar is a button now — it opens the item list. Styled as plain
+     text so the bar looks unchanged, with the chevron as the only hint that it does anything. */
+  .cart-summary {
+    flex: 1; min-width: 0; text-align: left;
+    background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer;
+  }
   .cart-summary .count { font-size: 12px; color: var(--muted); }
-  .cart-summary .total { font-size: 18px; font-weight: 800; }
+  .cart-summary .total { font-size: 18px; font-weight: 800; display: flex; align-items: center; gap: 5px; }
+  .cart-summary .chev { font-size: 12px; color: var(--muted); font-weight: 700; }
+
+  .cart-sheet-btn { width: 100%; margin-top: 10px; }
+  .cart-line {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 0; border-bottom: 1px solid var(--divider);
+  }
+  .cart-line:last-child { border-bottom: none; }
+  .cart-line .cl-info { flex: 1; min-width: 0; }
+  .cart-line .cl-name { font-weight: 700; font-size: 14px; }
+  .cart-line .cl-desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .cart-line .cl-amount { font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; min-width: 62px; text-align: right; }
+  .cart-tot { display: flex; justify-content: space-between; font-size: 13px; padding: 5px 0; }
+  .cart-tot.grand { font-weight: 800; font-size: 16px; border-top: 1px solid var(--divider); margin-top: 6px; padding-top: 10px; }
+  .cart-tot span:last-child { font-variant-numeric: tabular-nums; }
   .place-btn {
     background: var(--button); color: #fff; border: none;
     padding: 14px 22px; border-radius: 14px; font-size: 14px; font-weight: 700;
@@ -350,6 +418,7 @@ public static class CustomerOrderPage
         Veg Only
       </button>
     </div>
+    <div id="cat-strip" class="cat-strip" style="display:none"></div>
     <div id="menu-root"></div>
   </div>
 
@@ -437,11 +506,24 @@ public static class CustomerOrderPage
     </div>
   </div>
 
-  <div id="cart-bar" class="cart-bar" style="display:none">
-    <div class="cart-summary">
-      <div class="count" id="cart-count">0 items</div>
-      <div class="total" id="cart-total">₹0.00</div>
+  <!-- The cart bar counts what's been added but can't say WHAT — a guest four taps in has no
+       way to check whether they picked the right variant, or added something twice. This is
+       that list, reachable by tapping the bar's own summary. -->
+  <div id="cart-overlay" class="opt-overlay">
+    <div class="opt-sheet">
+      <h3 id="cart-sheet-title">Your order</h3>
+      <div id="cart-sheet-lines"></div>
+      <div id="cart-sheet-totals"></div>
+      <button class="place-btn cart-sheet-btn" id="cart-sheet-place">Place Order</button>
+      <button class="secondary-btn cart-sheet-btn" id="cart-sheet-close">Add more items</button>
     </div>
+  </div>
+
+  <div id="cart-bar" class="cart-bar" style="display:none">
+    <button type="button" class="cart-summary" id="cart-summary-btn">
+      <div class="count" id="cart-count">0 items</div>
+      <div class="total"><span id="cart-total">₹0.00</span><span class="chev" id="cart-chev">▲</span></div>
+    </button>
     <button class="place-btn" id="place-btn">Place Order</button>
   </div>
 
@@ -969,6 +1051,18 @@ public static class CustomerOrderPage
     fillItemActions(item, card.querySelector('.item-lines-slot'), card.querySelector('.item-actions-slot'));
   }
 
+  /**
+   * What an item costs at its cheapest — its own price, or the lowest of its variants when it
+   * has any. The same number the card prints as "from ₹X", so sorting by it matches what the
+   * guest is reading rather than some hidden base price.
+   */
+  function entryPrice(item) {
+    var hasVariants = item.variants && item.variants.length > 0;
+    return hasVariants
+      ? Math.min.apply(null, [item.price].concat(item.variants.map(function (v) { return v.price; })))
+      : item.price;
+  }
+
   function renderMenu() {
     var root = document.getElementById('menu-root');
     root.innerHTML = '';
@@ -978,9 +1072,26 @@ public static class CustomerOrderPage
       if (categories.indexOf(item.category) === -1) categories.push(item.category);
     });
 
+    renderCategoryStrip(categories);
+
     categories.forEach(function (cat) {
-      root.appendChild(el('div', 'cat-title', cat));
-      menu.filter(function (m) { return m.category === cat; }).forEach(function (item) {
+      var heading = el('div', 'cat-title', cat);
+      heading.dataset.cat = cat;
+      root.appendChild(heading);
+
+      var grid = el('div', 'item-grid');
+      root.appendChild(grid);
+
+      menu.filter(function (m) { return m.category === cat; })
+        // Cheapest first within each category. Sorted on a copy — filter() already returns one,
+        // but sorting state.menu itself would reorder every other view that reads it.
+        // Unavailable items sink to the bottom of their category whatever they cost: a card
+        // nobody can order shouldn't lead the section just because it's the cheapest thing in it.
+        .sort(function (a, b) {
+          if (a.available !== b.available) return a.available ? -1 : 1;
+          return entryPrice(a) - entryPrice(b);
+        })
+        .forEach(function (item) {
         var card = el('div', 'item-card' + (item.available ? '' : ' unavailable'));
         card.dataset.itemId = String(item.id);
 
@@ -1002,15 +1113,19 @@ public static class CustomerOrderPage
         nameRow.appendChild(el('div', 'item-name', item.name));
         info.appendChild(nameRow);
         if (item.subtitle) info.appendChild(el('div', 'item-sub', item.subtitle));
-        info.appendChild(el('div', 'item-price', (hasOptions ? 'from ' : '') + money(hasOptions ? Math.min.apply(null, [item.price].concat(item.variants.map(function (v) { return v.price; }))) : item.price)));
         if (!item.available) info.appendChild(el('div', 'unavailable-tag', 'CURRENTLY UNAVAILABLE'));
 
         var linesSlot = el('div', 'item-lines-slot');
         info.appendChild(linesSlot);
         card.appendChild(info);
 
+        // Price and control share the card's bottom edge, so they line up across the grid
+        // regardless of how tall the name and subtitle above them ended up.
+        var foot = el('div', 'item-foot');
+        foot.appendChild(el('div', 'item-price', (hasOptions ? 'from ' : '') + money(entryPrice(item))));
         var actionsSlot = el('div', 'item-actions-slot');
-        card.appendChild(actionsSlot);
+        foot.appendChild(actionsSlot);
+        card.appendChild(foot);
 
         fillItemActions(item, linesSlot, actionsSlot);
 
@@ -1041,8 +1156,57 @@ public static class CustomerOrderPage
           };
         }
 
-        root.appendChild(card);
+        grid.appendChild(card);
       });
+    });
+
+    syncActiveChip();
+  }
+
+  /**
+   * The pinned category jump strip. Rebuilt with the menu because the Veg Only filter can
+   * empty a category entirely, and a chip that scrolls to nothing is worse than no chip.
+   */
+  function renderCategoryStrip(categories) {
+    var strip = document.getElementById('cat-strip');
+    strip.innerHTML = '';
+    // One category is every category — the strip would just be a label taking up the top of
+    // the screen on a short menu.
+    strip.style.display = categories.length > 1 ? 'flex' : 'none';
+    if (categories.length <= 1) return;
+
+    categories.forEach(function (cat) {
+      var chip = el('button', 'cat-chip', cat);
+      chip.type = 'button';
+      chip.dataset.cat = cat;
+      chip.onclick = function () {
+        var heading = document.querySelector('.cat-title[data-cat="' + cssEscape(cat) + '"]');
+        if (heading) heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+      strip.appendChild(chip);
+    });
+  }
+
+  /** Category names are cafe-entered free text, so they can contain quotes and anything else
+   * a selector would choke on. */
+  function cssEscape(value) {
+    return window.CSS && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, '\\$&');
+  }
+
+  /**
+   * Marks the chip for whichever category is currently under the strip, so the strip keeps
+   * telling the truth when the guest scrolls by hand instead of tapping.
+   */
+  function syncActiveChip() {
+    var headings = Array.prototype.slice.call(document.querySelectorAll('.cat-title'));
+    if (headings.length === 0) return;
+    var line = 60; // just below the pinned strip
+    var current = headings[0];
+    headings.forEach(function (h) {
+      if (h.getBoundingClientRect().top <= line) current = h;
+    });
+    Array.prototype.slice.call(document.querySelectorAll('.cat-chip')).forEach(function (chip) {
+      chip.classList.toggle('active', chip.dataset.cat === current.dataset.cat);
     });
   }
 
@@ -1383,6 +1547,29 @@ public static class CustomerOrderPage
     var body = document.getElementById('opt-body');
     body.innerHTML = '';
 
+    // The inclusion list, e.g. "1 type of soup • 8 hot starters • Dessert (single serve)".
+    // Bullet-separated text becomes a real list so each line is scannable; anything else
+    // renders as one paragraph. textContent rather than el()'s innerHTML because this is
+    // free text the cafe typed, and it has no business carrying markup into the page.
+    if (item.description) {
+      var desc = el('div', 'opt-desc');
+      var parts = item.description.split('•')
+        .map(function (s) { return s.trim(); })
+        .filter(function (s) { return s.length > 0; });
+      if (parts.length > 1) {
+        var ul = document.createElement('ul');
+        parts.forEach(function (p) {
+          var li = document.createElement('li');
+          li.textContent = p;
+          ul.appendChild(li);
+        });
+        desc.appendChild(ul);
+      } else {
+        desc.textContent = item.description;
+      }
+      body.appendChild(desc);
+    }
+
     if (item.variants.length > 0) {
       body.appendChild(el('div', 'opt-group-title', 'Size'));
       item.variants.forEach(function (v) {
@@ -1508,12 +1695,91 @@ public static class CustomerOrderPage
     return unfiredLines().reduce(function (sum, i) { return sum + i.price * i.qty; }, 0);
   }
 
+  /**
+   * The cart's contents, which the bar alone could never show. Built from unfiredLines() — the
+   * same list Place Order actually sends — rather than from state.cart, because that flat
+   * id→qty map cannot represent WHICH variant or add-ons were picked, and that is exactly what
+   * a guest opens this to check.
+   *
+   * Each row edits in place through changeLineQty, the same call the per-item steppers use, so
+   * removing a wrongly-picked line never means hunting back through the menu for it.
+   */
+  function renderCartSheet() {
+    var linesEl = document.getElementById('cart-sheet-lines');
+    var totalsEl = document.getElementById('cart-sheet-totals');
+    var lines = unfiredLines();
+    linesEl.innerHTML = '';
+    totalsEl.innerHTML = '';
+
+    document.getElementById('cart-sheet-title').textContent =
+      lines.length === 0 ? 'Your order' : 'Your order · ' + cartCount() + (cartCount() === 1 ? ' item' : ' items');
+
+    if (lines.length === 0) {
+      linesEl.appendChild(el('div', 'past-note', 'Nothing added yet.'));
+      document.getElementById('cart-sheet-place').style.display = 'none';
+      return;
+    }
+    document.getElementById('cart-sheet-place').style.display = '';
+
+    lines.forEach(function (line) {
+      var row = el('div', 'cart-line');
+      var info = el('div', 'cl-info');
+      info.appendChild(el('div', 'cl-name', line.name));
+      var desc = lineDescriptor(line);
+      if (desc) info.appendChild(el('div', 'cl-desc', desc));
+      row.appendChild(info);
+
+      var stepper = el('div', 'stepper');
+      var minus = el('button', null, '−');
+      minus.onclick = function () { changeLineQty(line.menuItemId, line.variantId, lineOptionIds(line), line.qty - 1); };
+      var plus = el('button', null, '+');
+      plus.onclick = function () { changeLineQty(line.menuItemId, line.variantId, lineOptionIds(line), line.qty + 1); };
+      stepper.appendChild(minus);
+      stepper.appendChild(el('span', 'qty', String(line.qty)));
+      stepper.appendChild(plus);
+      row.appendChild(stepper);
+
+      row.appendChild(el('div', 'cl-amount', money(line.price * line.qty)));
+      linesEl.appendChild(row);
+    });
+
+    var subtotal = cartSubtotal();
+    var tax = subtotal * (state.taxRatePct / 100);
+    var add = function (cls, label, value) {
+      var r = el('div', cls);
+      r.appendChild(el('span', null, label));
+      r.appendChild(el('span', null, money(value)));
+      totalsEl.appendChild(r);
+    };
+    add('cart-tot', 'Subtotal', subtotal);
+    add('cart-tot', 'Tax', tax);
+    add('cart-tot grand', 'Total', subtotal + tax);
+  }
+
+  function cartSheetOpen() {
+    return document.getElementById('cart-overlay').classList.contains('show');
+  }
+
+  function openCartSheet() {
+    renderCartSheet();
+    document.getElementById('cart-overlay').classList.add('show');
+    document.getElementById('cart-chev').textContent = '▼';
+  }
+
+  function closeCartSheet() {
+    document.getElementById('cart-overlay').classList.remove('show');
+    document.getElementById('cart-chev').textContent = '▲';
+  }
+
   function renderCartBar() {
     var bar = document.getElementById('cart-bar');
     var placeBtn = document.getElementById('place-btn');
     var count = cartCount();
 
     if (count === 0) {
+      // Emptying the cart from inside the sheet leaves nothing for it to list, so it closes
+      // itself rather than sitting there over a menu the guest now needs to get back to.
+      if (cartSheetOpen()) closeCartSheet();
       // Mid-round with nothing picked yet: the poll no longer drags the guest back to the
       // placed screen (that's the whole point of state.addingMore), so without this there'd be
       // no way off the menu for someone who changed their mind. Same bar, different job.
@@ -1543,6 +1809,10 @@ public static class CustomerOrderPage
     placeBtn.textContent = state.addingMore ? 'Send to Kitchen' : 'Place Order';
     placeBtn.disabled = false;
     placeBtn.onclick = placeOrder;
+    // Every cart change lands here, so this is the one place that keeps an open sheet honest
+    // — including changes made from the sheet's own steppers.
+    if (cartSheetOpen()) renderCartSheet();
+    document.getElementById('cart-sheet-place').textContent = placeBtn.textContent;
   }
 
   /**
@@ -1895,6 +2165,19 @@ public static class CustomerOrderPage
       };
       document.getElementById('request-bill-btn').onclick = requestBill;
       document.getElementById('past-lookup-btn').onclick = lookupPastBills;
+      // Passive: this only reads positions and toggles a class, so it must never be allowed to
+      // hold up the scroll it's watching.
+      window.addEventListener('scroll', syncActiveChip, { passive: true });
+      document.getElementById('cart-summary-btn').onclick = function () {
+        if (cartSheetOpen()) closeCartSheet(); else openCartSheet();
+      };
+      document.getElementById('cart-sheet-close').onclick = closeCartSheet;
+      document.getElementById('cart-sheet-place').onclick = function () { closeCartSheet(); placeOrder(); };
+      // Tapping the dimmed area behind the sheet closes it, the same gesture the options
+      // sheet already teaches — but only that area, never a tap inside the sheet itself.
+      document.getElementById('cart-overlay').onclick = function (e) {
+        if (e.target === this) closeCartSheet();
+      };
       document.getElementById('veg-only-toggle').onclick = function () {
         state.vegOnly = !state.vegOnly;
         document.getElementById('veg-only-toggle').classList.toggle('active', state.vegOnly);

@@ -19,6 +19,45 @@ namespace CafePOS.Api.Controllers;
 [RequireScreen("Expenses", "ExpenseReport")]
 public class ExpensesController(CafePosDbContext db) : ControllerBase
 {
+    /// <summary>The tenders an expense can be paid as — shared by both entry paths now (the
+    /// daily sheet and the one-off Add Expense form). Kept separate from KhatabookController/
+    /// TiffinController's own copies rather than shared, so adding a tender to one is a
+    /// deliberate decision for the others too — same reasoning as theirs.
+    ///
+    /// "Due" means the cafe took the goods on udhaar and hasn't paid the vendor yet. It's a
+    /// label on the expense and nothing more: the row still lands on the books at full amount on
+    /// the day it was incurred, and no Khatabook entry is opened — that book tracks what
+    /// CUSTOMERS owe the cafe, not what the cafe owes its vendors, which would need its own
+    /// ledger before "Due" here could mean anything settle-able.</summary>
+    private static readonly HashSet<string> ValidPaymentModes =
+        new(StringComparer.OrdinalIgnoreCase) { "Cash", "UPI", "Card", "Due" };
+
+    /// <summary>What a row carrying no mode at all is bucketed under. Rows written before the
+    /// column existed (and any an older client still saves without one) get their own bucket
+    /// rather than being folded into Cash, which would overstate the till by exactly the
+    /// amount nobody has actually classified yet.</summary>
+    private const string UnsetPaymentMode = "Not set";
+
+    /// <summary>Validates a submitted mode and returns it in ValidPaymentModes' canonical
+    /// casing, so "upi" and "UPI" can't become two separate buckets in the mode-wise totals.
+    /// Null/blank passes straight through as null — each caller decides for itself whether that
+    /// means "default to Cash" (the daily sheet, where every filled row was paid somehow) or
+    /// "leave unset" (Add Expense, which is free to not ask).</summary>
+    private static string? NormalizePaymentMode(string? mode)
+    {
+        if (string.IsNullOrWhiteSpace(mode)) return null;
+        var match = ValidPaymentModes.FirstOrDefault(m => m.Equals(mode.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+            throw new ApiValidationException($"\"{mode}\" isn't a payment mode this screen knows — use {string.Join(", ", ValidPaymentModes)}.");
+        return match;
+    }
+
+    private static List<PaymentModeTotalDto> ByPaymentMode(IEnumerable<CafeExpense> rows) => rows
+        .GroupBy(e => string.IsNullOrWhiteSpace(e.PaymentMode) ? UnsetPaymentMode : e.PaymentMode)
+        .Select(g => new PaymentModeTotalDto(g.Key, g.Sum(e => e.Amount)))
+        .OrderByDescending(m => m.Total)
+        .ToList();
+
     [HttpGet]
     public async Task<CafeExpenseSummaryDto> List()
     {
@@ -36,6 +75,7 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
             all.Sum(e => e.Amount),
             thisMonth.Sum(e => e.Amount),
             byCategory,
+            ByPaymentMode(thisMonth),
             all.Select(CafeExpenseDto.From).ToList());
     }
 
@@ -61,7 +101,7 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
             .OrderByDescending(c => c.Total)
             .ToList();
 
-        return new CafeExpenseReportDto(rows.Sum(e => e.Amount), byCategory, rows.Select(CafeExpenseDto.From).ToList());
+        return new CafeExpenseReportDto(rows.Sum(e => e.Amount), byCategory, ByPaymentMode(rows), rows.Select(CafeExpenseDto.From).ToList());
     }
 
     [HttpPost]
@@ -73,6 +113,10 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
             throw new ApiValidationException("Enter what this expense was for.");
         if (string.IsNullOrWhiteSpace(req.SpentBy))
             throw new ApiValidationException("Enter who this was spent by.");
+        // Checked before the approval branch below on purpose: a bad mode frozen into an
+        // ApprovalRequest's PayloadJson would only blow up days later at approve time, in
+        // front of an Owner who can't fix it and didn't type it.
+        var paymentMode = NormalizePaymentMode(req.PaymentMode);
 
         var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
             ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
@@ -104,6 +148,7 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
             Purpose = req.Purpose.Trim(),
             SpentBy = req.SpentBy.Trim(),
             SpentAt = req.SpentAt ?? DateTime.UtcNow,
+            PaymentMode = paymentMode,
             RecordedByUserId = recordedBy?.Id ?? 0,
             RecordedByName = recordedBy?.Name ?? "",
         };
@@ -126,12 +171,6 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
     // The cafe's paper "daily purchase list" on screen: a fixed, tenant-owned set of rows
     // (Mutton, Gas, Das Kaka, Cook Salary, ...) that staff fill amounts into each day. Only
     // the filled rows become CafeExpense — a list of 31 with 10 used writes 10 rows, not 31.
-
-    /// <summary>The tenders a daily-sheet line can actually be paid as. Kept separate from
-    /// KhatabookController/TiffinController's own copies rather than shared, so adding a tender
-    /// to one is a deliberate decision for the others too — same reasoning as theirs.</summary>
-    private static readonly HashSet<string> ValidPaymentModes =
-        new(StringComparer.OrdinalIgnoreCase) { "Cash", "UPI", "Card" };
 
     /// <summary>The day's sheet: every active list row, in sheet order, carrying whatever was
     /// already saved for that date (0 when nothing was). Blank rows are returned on purpose —
@@ -186,9 +225,9 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
         if (filled.Any(l => !byId.ContainsKey(l.ItemId)))
             throw new ApiValidationException("Some rows are no longer on the purchase list — reload the sheet and try again.");
 
-        var badMode = filled.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l.PaymentMode) && !ValidPaymentModes.Contains(l.PaymentMode));
-        if (badMode is not null)
-            throw new ApiValidationException($"\"{badMode.PaymentMode}\" isn't a payment mode this screen knows — use Cash, UPI, or Card.");
+        // Validated up front rather than per row inside the write loop below, so a typo on the
+        // last row doesn't leave the earlier ones already added to the change tracker.
+        foreach (var line in filled) NormalizePaymentMode(line.PaymentMode);
 
         // This endpoint writes CafeExpense directly, so it would otherwise walk straight past
         // the Owner sign-off that Create() enforces. Rather than silently booking a large line
@@ -232,7 +271,9 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
                 SpentBy = spentBy,
                 SpentAt = spentAt,
                 PurchaseListItemId = item.Id,
-                PaymentMode = string.IsNullOrWhiteSpace(line.PaymentMode) ? "Cash" : line.PaymentMode.Trim(),
+                // Cash, not null, when the client sent nothing: a filled sheet row was paid
+                // somehow, so leaving it unset would strand real spend in the "Not set" bucket.
+                PaymentMode = NormalizePaymentMode(line.PaymentMode) ?? "Cash",
                 RecordedByUserId = recordedBy?.Id ?? 0,
                 RecordedByName = recordedBy?.Name ?? "",
             });

@@ -10,8 +10,39 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/settings")]
-public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage) : ControllerBase
+public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage, CafeLogoLoader logoLoader) : ControllerBase
 {
+    /// <summary>
+    /// The cafe's logo, pre-rendered into ESC/POS raster print bytes — ready to drop straight
+    /// into a receipt's byte stream (see escpos.ts's 'image' line kind). Any authenticated
+    /// staff member can print a bill, so this only requires being logged in, not a role.
+    ///
+    /// The rasterizing (decode -> resize -> dither) happens here, not on the device printing
+    /// the receipt, because it needs real image processing that the React Native app has no
+    /// library for — see ThermalLogoRasterizer's own note. Every ESC/POS transport (WiFi, Web
+    /// Bluetooth) therefore gets identical bytes from one small fetch instead of each having
+    /// to decode the image itself.
+    ///
+    /// `columns` picks the physical dot width to render at: this app's two supported paper
+    /// widths are 32 characters (58mm) or 48 (80mm), and Font A is a fixed 12 dots per
+    /// character on both — see escpos.ts's own note on why that font is never swapped out —
+    /// so columns*12 is the printer's actual dot width, not a guess.
+    ///
+    /// 204 (not 404/200-with-null) when there's no usable logo: absence isn't an error here,
+    /// it's the ordinary state for a cafe that hasn't set one, or whose logo host is down —
+    /// same "never take the receipt down with it" contract as CafeLogoLoader.
+    /// </summary>
+    [Authorize]
+    [HttpGet("logo/thermal")]
+    public async Task<IActionResult> GetThermalLogo([FromQuery] int columns = 32)
+    {
+        var settings = await db.Settings.FirstAsync();
+        var logoBytes = await logoLoader.LoadAsync(settings.LogoUrl);
+        var raster = ThermalLogoRasterizer.Rasterize(logoBytes, Math.Clamp(columns, 16, 64) * 12);
+        return raster is null ? NoContent() : File(raster, "application/octet-stream");
+    }
+
+
     /// <summary>"name@handle", NPCI's shape for a UPI address. Deliberately loose on the
     /// name half (banks allow letters, digits, dot, hyphen, underscore) and on the handle,
     /// which is just a bank/PSP suffix that new providers keep adding to — the point is to
@@ -81,6 +112,7 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.RequireStaffOrderConfirmation is not null) settings.RequireStaffOrderConfirmation = req.RequireStaffOrderConfirmation.Value;
         if (req.Phone is not null) settings.Phone = req.Phone.Trim();
         if (req.Address is not null) settings.Address = req.Address.Trim();
+        if (req.LicenceNumber is not null) settings.LicenceNumber = req.LicenceNumber.Trim();
         if (req.StoreHoursJson is not null) settings.StoreHoursJson = req.StoreHoursJson;
         if (req.KdsStageMode is not null)
         {

@@ -14,7 +14,9 @@ namespace CafePOS.Api.Infrastructure;
 /// </summary>
 public static class ReceiptPdfBuilder
 {
-    public static byte[] Build(CafeSettings settings, Order order)
+    /// <param name="logo">The cafe's logo image bytes, or null. Optional so a bill still
+    /// renders when the logo is missing or its host is unreachable — see CafeLogoLoader.</param>
+    public static byte[] Build(CafeSettings settings, Order order, byte[]? logo = null)
     {
         var businessName = string.IsNullOrWhiteSpace(settings.BusinessName) ? "CafePOS" : settings.BusinessName;
 
@@ -30,11 +32,21 @@ public static class ReceiptPdfBuilder
                 {
                     col.Spacing(4);
 
+                    // Height-capped rather than width-fitted: logos are all shapes, and a wide
+                    // banner scaled to the page width would push the whole bill down a page
+                    // on A6. FitArea keeps the aspect ratio inside that box either way.
+                    if (logo is not null)
+                        col.Item().AlignCenter().Height(45).Image(logo).FitArea();
+
                     col.Item().AlignCenter().Text(businessName).FontSize(16).Bold();
                     if (!string.IsNullOrWhiteSpace(settings.Address))
                         col.Item().AlignCenter().Text(settings.Address).FontSize(8);
                     if (!string.IsNullOrWhiteSpace(settings.Phone))
                         col.Item().AlignCenter().Text(settings.Phone).FontSize(8);
+                    // Last of the header block: a licence number is something an inspector or
+                    // a customer looks up, not something anyone reads first.
+                    if (!string.IsNullOrWhiteSpace(settings.LicenceNumber))
+                        col.Item().AlignCenter().Text($"Licence No: {settings.LicenceNumber}").FontSize(8);
 
                     col.Item().PaddingTop(8).LineHorizontal(0.5f);
 

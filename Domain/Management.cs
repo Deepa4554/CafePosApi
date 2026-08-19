@@ -308,10 +308,15 @@ public class CafeExpense : ITenantScoped
     /// than entering it twice — see ExpensesController.SaveDailySheet.</summary>
     public int? PurchaseListItemId { get; set; }
 
-    /// <summary>Cash / UPI / Card — free text validated against ExpensesController's
+    /// <summary>Cash / UPI / Card / Due — free text validated against ExpensesController's
     /// ValidPaymentModes, the same "HashSet, not enum" convention KhatabookController and
-    /// TiffinController already use for a settle method. Null on rows from before this column
-    /// existed and on Add Expense entries, which don't ask for it.</summary>
+    /// TiffinController already use for a settle method. "Due" records that the cafe bought on
+    /// udhaar and still owes the vendor; it changes nothing about the expense itself, which is
+    /// booked at full amount on the day it was incurred either way.
+    ///
+    /// Null only on rows from before this column existed, and on Add Expense entries saved by a
+    /// client too old to send one — both entry paths ask for it now. Those rows report under
+    /// "Not set" rather than being counted as Cash.</summary>
     public string? PaymentMode { get; set; }
 }
 

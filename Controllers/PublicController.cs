@@ -28,6 +28,7 @@ public class PublicController(
     ReceiptTokenService receiptTokens,
     IOrderBuildingService orderBuilder,
     IWhatsAppEventPublisher whatsApp,
+    CafeLogoLoader logoLoader,
     IRealtimeNotifier realtime) : ControllerBase
 {
     /// <summary>
@@ -53,7 +54,8 @@ public class PublicController(
         var settings = await db.Settings.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.TenantId == order.TenantId);
         if (settings is null) return NotFound();
 
-        var pdfBytes = ReceiptPdfBuilder.Build(settings, order);
+        var logo = await logoLoader.LoadAsync(settings.LogoUrl);
+        var pdfBytes = ReceiptPdfBuilder.Build(settings, order, logo);
         return File(pdfBytes, "application/pdf");
     }
 

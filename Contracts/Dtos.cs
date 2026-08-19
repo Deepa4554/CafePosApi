@@ -516,6 +516,19 @@ public record BestSellerDto(int Id, string Name, string Category, decimal Price,
 /// offered, so older builds keep working unchanged.</summary>
 public record CreateTableRequest(string Zone, int Seats, string? Code = null);
 
+/// <summary>Edits an existing table. Every field is optional — null means "leave alone", so
+/// the floor-plan screen can send just the one thing the user changed. See
+/// TablesController.Update for why renaming is refused while an order is open on the table.</summary>
+public record UpdateTableRequest(string? Code = null, string? Zone = null, int? Seats = null);
+
+/// <summary>The edited table, plus whether its printed QR codes just became useless.
+/// QrCodeInvalidated is true exactly when Code changed: a table QR encodes the table's CODE,
+/// not its id (QrTokenService.Encode), so every sticker already taped to that table now
+/// decodes to a name no table has. Nothing server-side can repair a sticker already stuck to
+/// a table, so the client is told to say "reprint the QR" rather than leaving staff to
+/// discover it when a guest's scan fails.</summary>
+public record UpdateTableResponse(CafeTable Table, bool QrCodeInvalidated);
+
 public record MergeTableRequest(int TargetHostTableId);
 
 // ---------- Inventory ----------
@@ -684,6 +697,7 @@ public record UpdateSettingsRequest(
     bool? ShiftReportsEnabled,
     string? Phone = null,
     string? Address = null,
+    string? LicenceNumber = null,
     string? StoreHoursJson = null,
     bool? RequireStaffOrderConfirmation = null,
     string? KdsStageMode = null,
