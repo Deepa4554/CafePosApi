@@ -390,6 +390,9 @@ const string GuestSessionLimiterPolicy = "GuestSessionLimiter";
 // request capacity for every tenant, not just the tenant asking for AI. Kept well below the
 // global cap on purpose: nothing about the AI features is latency-critical to service.
 const string AiLimiterPolicy = "AiLimiter";
+// Matches PublicController.MyBills' [EnableRateLimiting(...)] literal, same constraint as
+// GuestSessionLimiterPolicy above.
+const string BillLookupLimiterPolicy = "BillLookupLimiter";
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -456,6 +459,21 @@ builder.Services.AddRateLimiter(options =>
             {
                 PermitLimit = 60,
                 Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+
+    // Past-bill lookup (PublicController.MyBills) is the one anonymous endpoint whose whole
+    // job is to answer a question about a specific phone number, so it is the one worth
+    // grinding: try enough numbers against a name and you learn who eats where. Far tighter
+    // than the guest-ordering limit above because the traffic shape is the opposite — a real
+    // customer looks their bills up once or twice a visit, never sixty times a minute.
+    options.AddPolicy(BillLookupLimiterPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(5),
                 QueueLimit = 0,
             }));
 

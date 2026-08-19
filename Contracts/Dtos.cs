@@ -372,6 +372,19 @@ public record AddCartItemRequest(int MenuItemId, int Qty, string? Modifier, stri
 /// cart (unfired items — FireBatch == 0 on the underlying order, see OrderBuildingService)
 /// and, once the first item has been fired, the live order/KOT status. Order is null until
 /// the very first cart-add creates the underlying (still-unfired) Order row.</summary>
+/// <summary>What a returning guest types to look their own past bills up — see
+/// PublicController.MyBills for why both fields are required and neither is enough alone.</summary>
+public record PastBillsRequest(string? Name, string? Phone);
+
+/// <summary>One past visit, as much of it as the QR page is allowed to show: when, and how
+/// much. Deliberately carries no items and no receipt token — the bill itself goes to the
+/// customer's WhatsApp, not to whoever typed the number in.</summary>
+public record PastBillDto(string Number, DateTime CreatedAt, decimal Total);
+
+/// <summary>Which of the customer's own past bills to send to their WhatsApp. Name and phone
+/// are re-checked against the customer record, not trusted — see PublicController.SendMyBill.</summary>
+public record SendMyBillRequest(string? Name, string? Phone, string? Number);
+
 public record GuestSessionStateDto(string Status, string TableCode, OrderDto? Order)
 {
     public static GuestSessionStateDto From(GuestSession session, string tableCode, Order? order) =>

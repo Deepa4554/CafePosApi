@@ -266,7 +266,22 @@ public static class CustomerOrderPage
   .action-row { display: flex; gap: 10px; margin-top: 18px; }
   .action-row button { flex: 1; }
   .locked-note { background: var(--locked-bg); color: var(--locked); border-radius: 12px; padding: 12px 14px; font-size: 13px; font-weight: 600; margin-top: 14px; }
-  #app, #placed-screen, #bill-screen, #join-screen, #staff-assist-screen, #ended-screen, #waiting-screen { display: none; }
+  .settled-sub { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
+  /* An <a>, not a <button>, so the PDF opens in its own tab and the browser's own viewer
+     handles saving it — a fetch-and-blob download is what phone browsers block silently. */
+  .pdf-btn { display: block; margin-top: 18px; text-align: center; text-decoration: none; }
+  .past-card { margin-top: 14px; }
+  /* The shared input rule above is written for the flex rows it was built for (flex:1), which
+     collapses these to nothing in a plain block card — hence the explicit width. */
+  .past-card input { display: block; width: 100%; box-sizing: border-box; margin-bottom: 10px; flex: none; }
+  .past-card .place-btn { width: 100%; }
+  .past-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--divider); text-align: left; }
+  .past-row:last-child { border-bottom: none; }
+  .past-when { font-size: 13px; color: var(--muted); }
+  .past-amount { font-weight: 700; }
+  .past-send { background: none; border: 1px solid var(--divider); color: var(--heading); border-radius: 10px; padding: 7px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .past-note { font-size: 13px; color: var(--muted); padding-top: 10px; text-align: left; }
+  #app, #placed-screen, #bill-screen, #join-screen, #staff-assist-screen, #ended-screen, #waiting-screen, #settled-screen { display: none; }
   .waiting-spinner {
     width: 40px; height: 40px; border-radius: 50%; margin: 4px auto 4px;
     border: 4px solid var(--divider); border-top-color: var(--accent);
@@ -387,6 +402,31 @@ public static class CustomerOrderPage
     </div>
   </div>
 
+  <!-- Shown when the session ended because the bill was SETTLED — the one ending that isn't a
+       failure. Everything else still falls through to #ended-screen's plain message. -->
+  <div id="settled-screen" class="wrap">
+    <header><h1 id="settled-business-name">CafePOS</h1><div class="table-line" id="settled-table-line"></div></header>
+    <div class="confirm-card">
+      <div class="badge">✓</div>
+      <h2>Thanks for visiting!</h2>
+      <p class="settled-sub">Your bill is settled. Here's what you had.</p>
+      <div id="settled-lines" style="text-align:left"></div>
+      <a class="place-btn pdf-btn" id="settled-pdf-btn" target="_blank" rel="noopener">Download Bill (PDF)</a>
+    </div>
+
+    <!-- Past visits. Only the date and the amount are ever shown here — the bill itself is
+         sent to the number, which is what keeps a typed-in number from reading someone
+         else's history (see PublicController.MyBills). -->
+    <div class="confirm-card past-card">
+      <h2>Your previous bills</h2>
+      <p class="settled-sub">Enter the name and number you order with.</p>
+      <input type="text" id="past-name" placeholder="Name" autocomplete="name" />
+      <input type="tel" id="past-phone" placeholder="10-digit mobile number" maxlength="10" inputmode="numeric" autocomplete="tel" />
+      <button class="place-btn" id="past-lookup-btn">Show my bills</button>
+      <div id="past-result"></div>
+    </div>
+  </div>
+
   <div id="processing-overlay" class="processing-overlay"><div class="spinner"></div></div>
 
   <div id="opt-overlay" class="opt-overlay">
@@ -503,6 +543,10 @@ public static class CustomerOrderPage
           var message = (body && (body.title || body.detail)) || ('Request failed (' + res.status + ')');
           var err = new Error(message);
           err.status = res.status;
+          // The body carries more than its title on some errors — a settled session's 410
+          // returns the bill token with it (see ValidateGuestSessionAttribute). Dropping the
+          // body here is what would leave the guest with "session ended" and no bill.
+          err.body = body;
           throw err;
         }
         return body;
@@ -522,7 +566,11 @@ public static class CustomerOrderPage
     stopPolling();
     pollTimer = setInterval(function () {
       fetchJson(sessionBase + '/state').then(handleStateUpdate).catch(function (err) {
-        if (err.status === 410) showEnded(err.message || 'This session has ended.');
+        if (err.status !== 410) return;
+        // A settled bill is the happy ending, and it's the only 410 that carries a token.
+        var token = err.body && err.body.receiptToken;
+        if (token) { showSettledScreen(token); return; }
+        showEnded(err.message || 'This session has ended.');
       });
     }, 5000);
   }
@@ -565,7 +613,7 @@ public static class CustomerOrderPage
   }
 
   function hideAllScreens() {
-    ['app', 'join-screen', 'staff-assist-screen', 'ended-screen', 'waiting-screen', 'placed-screen', 'bill-screen'].forEach(function (id) {
+    ['app', 'join-screen', 'staff-assist-screen', 'ended-screen', 'waiting-screen', 'placed-screen', 'bill-screen', 'settled-screen'].forEach(function (id) {
       document.getElementById(id).style.display = 'none';
     });
     document.getElementById('cart-bar').style.display = 'none';
@@ -577,6 +625,125 @@ public static class CustomerOrderPage
     hideAllScreens();
     document.getElementById('ended-message').textContent = message;
     document.getElementById('ended-screen').style.display = 'flex';
+  }
+
+  /**
+   * The end of a normal visit: staff took the money, the session closed, and this is where the
+   * guest gets their bill instead of the dead "session ended" they used to land on.
+   *
+   * Lines come from the last polled state — by the time the 410 arrives the session is gone and
+   * there is nothing left to fetch them from. That copy is accurate for what was ordered, but
+   * it predates settlement, so it deliberately shows no total: bill-time discounts, coupons,
+   * charges and rounding all land after this snapshot was taken (see OrdersController.Pay), and
+   * a stale total on screen is worse than none. The PDF behind the button is the real bill,
+   * rendered server-side from the settled order.
+   */
+  function showSettledScreen(receiptToken) {
+    stopPolling();
+    hideAllScreens();
+    document.getElementById('settled-business-name').textContent = document.getElementById('business-name').textContent;
+    document.getElementById('settled-table-line').textContent = document.getElementById('table-line').textContent;
+
+    var linesEl = document.getElementById('settled-lines');
+    linesEl.innerHTML = '';
+    var items = (state.order && state.order.items || []).filter(function (i) { return !i.voided; });
+    items.forEach(function (item) {
+      var row = el('div', 'bill-line');
+      var desc = lineDescriptor(item);
+      row.appendChild(el('span', null, item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : '')));
+      row.appendChild(el('span', null, money(item.price * item.qty)));
+      linesEl.appendChild(row);
+    });
+
+    document.getElementById('settled-pdf-btn').href = '/api/public/receipt/' + encodeURIComponent(receiptToken);
+
+    // Pre-fill from what they already typed while ordering, so the common case is one tap.
+    var typedName = (document.getElementById('guest-name') || {}).value;
+    var typedPhone = (document.getElementById('guest-phone') || {}).value;
+    if (typedName) document.getElementById('past-name').value = typedName;
+    if (typedPhone) document.getElementById('past-phone').value = typedPhone;
+    document.getElementById('past-result').innerHTML = '';
+
+    document.getElementById('settled-screen').style.display = 'block';
+  }
+
+  function pastBillDate(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  /**
+   * Looks up this customer's past visits at THIS cafe. The list intentionally carries only a
+   * date and an amount — the bill itself is sent to their WhatsApp instead, so a number typed
+   * in by someone who isn't them never turns into a readable bill (see PublicController).
+   *
+   * An unmatched name/number comes back as an empty list, not an error, and is reported here
+   * as "no bills found" — the page must not tell a guesser which half they got wrong.
+   */
+  function lookupPastBills() {
+    var btn = document.getElementById('past-lookup-btn');
+    var resultEl = document.getElementById('past-result');
+    var name = (document.getElementById('past-name').value || '').trim();
+    var phone = (document.getElementById('past-phone').value || '').replace(/\D/g, '');
+    if (name.length < 2 || phone.length !== 10) {
+      resultEl.innerHTML = '';
+      resultEl.appendChild(el('div', 'past-note', 'Enter your name and your 10-digit mobile number.'));
+      return;
+    }
+
+    btn.disabled = true;
+    resultEl.innerHTML = '';
+    resultEl.appendChild(el('div', 'past-note', 'Looking…'));
+    fetchJson(apiBase + '/my-bills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, phone: phone }),
+    }).then(function (bills) {
+      resultEl.innerHTML = '';
+      if (!bills || bills.length === 0) {
+        resultEl.appendChild(el('div', 'past-note', 'No previous bills found for that name and number.'));
+        return;
+      }
+      bills.forEach(function (bill) {
+        var row = el('div', 'past-row');
+        var left = el('div', null);
+        left.appendChild(el('div', 'past-amount', money(bill.total)));
+        left.appendChild(el('div', 'past-when', pastBillDate(bill.createdAt) + ' · ' + bill.number));
+        var send = el('button', 'past-send', 'Send to WhatsApp');
+        send.addEventListener('click', function () { sendPastBill(bill.number, name, phone, send); });
+        row.appendChild(left);
+        row.appendChild(send);
+        resultEl.appendChild(row);
+      });
+    }).catch(function (err) {
+      resultEl.innerHTML = '';
+      // 429 is its own message: "no bills found" would be a lie, and the guest would just
+      // keep retrying into the same wall.
+      resultEl.appendChild(el('div', 'past-note', err.status === 429
+        ? 'Too many tries — please wait a few minutes.'
+        : 'Could not load your bills just now.'));
+    }).then(function () { btn.disabled = false; });
+  }
+
+  /**
+   * Queues the chosen bill to the number that was just verified against it. The server always
+   * answers 202 whether or not anything matched (so this can't be used to probe), which is
+   * also why the button can only ever promise it was sent to their WhatsApp, not that it
+   * arrived — delivery depends on the cafe's own WhatsApp being connected.
+   */
+  function sendPastBill(number, name, phone, btn) {
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    fetchJson(apiBase + '/my-bills/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, phone: phone, number: number }),
+    }).then(function () {
+      btn.textContent = 'Sent ✓';
+    }).catch(function () {
+      btn.textContent = 'Try again';
+      btn.disabled = false;
+    });
   }
 
   function showMenuScreen() {
@@ -662,9 +829,11 @@ public static class CustomerOrderPage
       linesEl.appendChild((function () { var r = el('div', 'bill-line total'); r.appendChild(el('span', null, 'Total')); r.appendChild(el('span', null, money(s.order.total))); return r; })());
     }
     document.getElementById('bill-screen').style.display = 'block';
-    // Ordering is closed once LOCKED — no further polling needed; staff settling the
-    // bill (OrdersController.Pay) is what ends the session from here.
-    stopPolling();
+    // Ordering is closed once LOCKED, but polling has to keep running: settling is what ends
+    // the session from here, and that 410 is now what hands over the bill PDF (see
+    // showSettledScreen). Stopping here left a guest who had asked for their bill staring at
+    // this screen forever — the one screen where they are most obviously waiting for it.
+    startPolling();
   }
 
   function syncCartFromOrder() {
@@ -1725,6 +1894,7 @@ public static class CustomerOrderPage
         showMenuScreen();
       };
       document.getElementById('request-bill-btn').onclick = requestBill;
+      document.getElementById('past-lookup-btn').onclick = lookupPastBills;
       document.getElementById('veg-only-toggle').onclick = function () {
         state.vegOnly = !state.vegOnly;
         document.getElementById('veg-only-toggle').classList.toggle('active', state.vegOnly);

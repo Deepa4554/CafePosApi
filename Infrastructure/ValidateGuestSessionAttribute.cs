@@ -63,7 +63,7 @@ public class ValidateGuestSessionAttribute(bool isWrite = false) : Attribute, IA
                 && await db.Orders.IgnoreQueryFilters().AnyAsync(o => o.Id == closedOrderId && o.Cancelled);
             context.Result = Problem(StatusCodes.Status410Gone, declined
                 ? "The cafe couldn't accept your order. Please speak to a staff member."
-                : "This session has ended.");
+                : "This session has ended.", SettledReceiptToken(context.HttpContext, session, declined));
             return;
         }
 
@@ -99,7 +99,8 @@ public class ValidateGuestSessionAttribute(bool isWrite = false) : Attribute, IA
                 session.ClosedAt = now;
                 await db.SaveChangesAsync();
                 sessionService.ClearCookie(context.HttpContext.Response);
-                context.Result = Problem(StatusCodes.Status410Gone, "This session has ended.");
+                context.Result = Problem(StatusCodes.Status410Gone, "This session has ended.",
+                    SettledReceiptToken(context.HttpContext, session, declined: false));
                 return;
             }
         }
@@ -112,6 +113,31 @@ public class ValidateGuestSessionAttribute(bool isWrite = false) : Attribute, IA
         await next();
     }
 
-    private static ObjectResult Problem(int status, string message) =>
-        new(new ProblemDetails { Status = status, Title = message }) { StatusCode = status };
+    /// <summary>
+    /// The public bill-PDF token for a session that ended because its bill was SETTLED, and
+    /// null for every other ending.
+    ///
+    /// A settled session is the one ending that isn't a failure: the guest ate, staff took the
+    /// money, and the only thing left to hand over is the bill. Until this, all they got was a
+    /// dead "This session has ended." — so the 410 carries the token and the page turns it into
+    /// a bill they can read and download (see PublicController.GetReceipt, which renders the
+    /// same ReceiptPdfBuilder output the WhatsApp bill link uses).
+    ///
+    /// Safe to hand out here: reaching this line at all required presenting the session cookie
+    /// for THIS session, so the caller is the device that placed the order. The token is
+    /// signed and scoped to that one order (see ReceiptTokenService) — it grants nothing else.
+    /// </summary>
+    private static string? SettledReceiptToken(HttpContext http, GuestSession session, bool declined)
+    {
+        if (declined || session.ClosedReason != SessionCloseReason.Settled) return null;
+        if (session.OrderId is not int orderId) return null;
+        return http.RequestServices.GetRequiredService<ReceiptTokenService>().Encode(orderId);
+    }
+
+    private static ObjectResult Problem(int status, string message, string? receiptToken = null)
+    {
+        var details = new ProblemDetails { Status = status, Title = message };
+        if (receiptToken is not null) details.Extensions["receiptToken"] = receiptToken;
+        return new ObjectResult(details) { StatusCode = status };
+    }
 }

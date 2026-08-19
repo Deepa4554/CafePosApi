@@ -27,6 +27,7 @@ public class PublicController(
     QrTokenService qrTokens,
     ReceiptTokenService receiptTokens,
     IOrderBuildingService orderBuilder,
+    IWhatsAppEventPublisher whatsApp,
     IRealtimeNotifier realtime) : ControllerBase
 {
     /// <summary>
@@ -253,6 +254,123 @@ public class PublicController(
             .Where(m => m.TenantId == decoded.Value.TenantId)
             .OrderBy(m => m.Category).ThenBy(m => m.Name)
             .ToListAsync());
+    }
+
+    /// <summary>How many past bills a lookup ever returns — a customer wants their recent
+    /// visits, and a longer list is only useful to someone who shouldn't have it.</summary>
+    private const int PastBillCount = 6;
+
+    /// <summary>
+    /// A returning customer's own past bills at THIS cafe, looked up by the name and mobile
+    /// number they already give while ordering.
+    ///
+    /// There is no OTP behind this, so the design assumes the lookup itself can be attempted
+    /// by someone who isn't the customer, and makes that not worth doing:
+    ///
+    ///  - It sits behind the table's QrToken, like every route here. Someone has to hold a
+    ///    real QR from this cafe to ask at all — this is not open to the internet.
+    ///  - Name AND number must both match. A number alone gets nothing.
+    ///  - Only the date and the amount come back. No items, no address, and deliberately no
+    ///    receipt token: the actual bill goes to the number over WhatsApp (see SendMyBills),
+    ///    where only the person actually holding that number can read it. That split is what
+    ///    stands in for verification.
+    ///  - BillLookupLimiter caps attempts per IP far below anything that could grind through
+    ///    a number range (see Program.cs).
+    ///
+    /// Unpaid/cancelled orders are excluded — a bill that was never settled isn't history yet,
+    /// it's a live order someone could be sitting with.
+    /// </summary>
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("BillLookupLimiter")]
+    [HttpPost("{token}/my-bills")]
+    public async Task<ActionResult<IEnumerable<PastBillDto>>> MyBills(string token, PastBillsRequest req)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) return NotFound();
+        var tenantId = decoded.Value.TenantId;
+
+        var customer = await ResolveBillCustomerAsync(tenantId, req);
+        if (customer is null) return Ok(Array.Empty<PastBillDto>());
+
+        var bills = await db.Orders.IgnoreQueryFilters()
+            .Where(o => o.TenantId == tenantId && o.CustomerId == customer.Id && o.Paid && !o.Cancelled)
+            .OrderByDescending(o => o.CreatedAt).ThenByDescending(o => o.Id)
+            .Take(PastBillCount)
+            .Select(o => new { o.BillNumber, o.Id, o.CreatedAt, o.Total })
+            .ToListAsync();
+
+        // Formatted after materialising, not in the projection: OrderNumberFormat.Bill is
+        // plain C# and EF has no SQL translation for it.
+        return Ok(bills.Select(b => new PastBillDto(OrderNumberFormat.Bill(b.BillNumber, b.Id), b.CreatedAt, b.Total)));
+    }
+
+    /// <summary>
+    /// Sends ONE of the customer's own past bills to the WhatsApp number they just typed.
+    ///
+    /// This is where the real bill lives — MyBills above deliberately shows only a date and an
+    /// amount, because a screen can be read by whoever is holding the phone. The PDF goes to
+    /// the number instead, so only someone who actually has that number receives it. That is
+    /// what stands in for the OTP this flow doesn't have.
+    ///
+    /// Re-validates name+phone from scratch rather than trusting anything the page sends back:
+    /// this endpoint is reachable directly, so the bill number alone must never be enough.
+    /// Always answers 202 — "queued if there was anything to queue" — so it can't be used to
+    /// probe which numbers or bill numbers exist.
+    /// </summary>
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("BillLookupLimiter")]
+    [HttpPost("{token}/my-bills/send")]
+    public async Task<IActionResult> SendMyBill(string token, SendMyBillRequest req)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) return NotFound();
+        var tenantId = decoded.Value.TenantId;
+
+        var customer = await ResolveBillCustomerAsync(tenantId, new PastBillsRequest(req.Name, req.Phone));
+        if (customer is null) return Accepted();
+
+        // Scoped to this customer's own orders, so a guessed bill number off someone else's
+        // visit resolves to nothing rather than to their bill.
+        var order = await db.Orders.IgnoreQueryFilters()
+            .Where(o => o.TenantId == tenantId && o.CustomerId == customer.Id && o.Paid && !o.Cancelled)
+            .OrderByDescending(o => o.CreatedAt).ThenByDescending(o => o.Id)
+            .Take(PastBillCount)
+            .Select(o => new { o.Id, o.BillNumber })
+            .ToListAsync();
+
+        var match = order.FirstOrDefault(o => OrderNumberFormat.Bill(o.BillNumber, o.Id) == req.Number);
+        if (match is not null) await whatsApp.NotifyBillGeneratedAsync(tenantId, match.Id);
+
+        return Accepted();
+    }
+
+    /// <summary>
+    /// The customer a name+phone pair identifies at this cafe, or null when the pair doesn't
+    /// identify anyone. Shared by both bill routes so they can never drift apart — the send
+    /// route being even slightly laxer than the list route is exactly how the PDF would leak.
+    ///
+    /// Both fields are required, and the name has to be long enough to narrow anything: a
+    /// single letter would match much of a cafe's customer list and make the check decorative.
+    /// </summary>
+    private async Task<Customer?> ResolveBillCustomerAsync(int tenantId, PastBillsRequest req)
+    {
+        var phone = new string((req.Phone ?? "").Where(char.IsDigit).ToArray());
+        var name = (req.Name ?? "").Trim();
+        if (phone.Length != 10 || name.Length < 2) return null;
+
+        var customer = await db.Customers.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.Phone == phone);
+        return customer is not null && NameMatches(customer.Name, name) ? customer : null;
+    }
+
+    /// <summary>
+    /// True when the typed name plausibly belongs to the stored one. Compared on the first
+    /// word only, case-insensitively: a customer who was saved as "Raj Kumar" types "Raj" the
+    /// next time (or the other way round), and demanding an exact match would just teach them
+    /// the feature is broken. Still requires knowing the name — which is the point.
+    /// </summary>
+    private static bool NameMatches(string stored, string typed)
+    {
+        static string FirstWord(string s) => s.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries) is [var w, ..] ? w : "";
+        return string.Equals(FirstWord(stored), FirstWord(typed), StringComparison.OrdinalIgnoreCase);
     }
 
     [HttpGet("{token}/settings")]
