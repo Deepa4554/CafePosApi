@@ -254,6 +254,8 @@ public class PublicController(
 
         return Ok(await db.MenuItems.IgnoreQueryFilters()
             .Where(m => m.TenantId == decoded.Value.TenantId)
+            .Include(m => m.Variants.Where(v => v.IsAvailable).OrderBy(v => v.SortOrder))
+            .Include(m => m.Modifiers.OrderBy(mo => mo.SortOrder)).ThenInclude(mo => mo.Options.OrderBy(o => o.SortOrder))
             .OrderBy(m => m.Category).ThenBy(m => m.Name)
             .ToListAsync());
     }
@@ -415,6 +417,8 @@ public class PublicController(
         var salesIds = sales.Select(s => s.MenuItemId).ToList();
         var menuById = await db.MenuItems.IgnoreQueryFilters()
             .Where(m => m.TenantId == tenantId && salesIds.Contains(m.Id))
+            .Include(m => m.Variants.Where(v => v.IsAvailable).OrderBy(v => v.SortOrder))
+            .Include(m => m.Modifiers.OrderBy(mo => mo.SortOrder)).ThenInclude(mo => mo.Options.OrderBy(o => o.SortOrder))
             .ToDictionaryAsync(m => m.Id);
 
         var results = sales
@@ -427,6 +431,8 @@ public class PublicController(
             var usedIds = results.Select(m => m.Id).ToHashSet();
             var fallback = await db.MenuItems.IgnoreQueryFilters()
                 .Where(m => m.TenantId == tenantId && m.Available && !usedIds.Contains(m.Id))
+                .Include(m => m.Variants.Where(v => v.IsAvailable).OrderBy(v => v.SortOrder))
+                .Include(m => m.Modifiers.OrderBy(mo => mo.SortOrder)).ThenInclude(mo => mo.Options.OrderBy(o => o.SortOrder))
                 .OrderByDescending(m => m.Popular).ThenBy(m => m.Category).ThenBy(m => m.Name)
                 .Take(PublicBestSellerCount - results.Count)
                 .ToListAsync();

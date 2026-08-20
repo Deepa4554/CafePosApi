@@ -155,6 +155,13 @@ public static class CustomerOrderPage
     color: var(--muted); font-size: 11px; line-height: 1.3; margin-top: 3px;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
+  /* Same treatment as .item-sub, one line taller — this is the only place a no-options item's
+     description (e.g. what's included in a combo) ever reaches the customer, since it never
+     opens the Customize modal that shows the full text for items with variants/modifiers. */
+  .item-desc {
+    color: var(--muted); font-size: 11px; line-height: 1.3; margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
   .item-price { color: var(--heading); font-weight: 700; font-size: 13px; }
   /* Wraps rather than overflows: "from ₹240" beside a Customize button doesn't fit a half-width
      tile on a small phone, and a button pushed off the card edge is unreachable. */
@@ -1113,6 +1120,9 @@ public static class CustomerOrderPage
         nameRow.appendChild(el('div', 'item-name', item.name));
         info.appendChild(nameRow);
         if (item.subtitle) info.appendChild(el('div', 'item-sub', item.subtitle));
+        // Items with variants/modifiers get their description in the Customize modal
+        // (renderItemOptions) instead — showing it here too would just repeat it.
+        if (!hasOptions && item.description) info.appendChild(el('div', 'item-desc', item.description));
         if (!item.available) info.appendChild(el('div', 'unavailable-tag', 'CURRENTLY UNAVAILABLE'));
 
         var linesSlot = el('div', 'item-lines-slot');
@@ -1210,12 +1220,20 @@ public static class CustomerOrderPage
     });
   }
 
-  // Same stepper markup as fillItemActions' plain-item branch, into a caller-supplied slot —
-  // best sellers are always plain add/qty (no Customize), so this doesn't need the
-  // lines-box/hasOptions handling that function carries.
+  // Same stepper markup as fillItemActions' plain-item branch, into a caller-supplied slot.
+  // A best seller can have variants/modifiers just like any other item, so this mirrors
+  // fillItemActions' hasOptions branch too — skipping that check used to let a Best Sellers
+  // tap add a variant-less line straight to the cart instead of asking which size/modifier.
   function fillBestSellerStepper(item, actionsSlot) {
     actionsSlot.innerHTML = '';
     if (state.browseOnly) return;
+    var hasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
+    if (hasOptions) {
+      var customize = el('button', 'customize-btn', 'Customize');
+      customize.onclick = function () { openItemOptions(item); };
+      actionsSlot.appendChild(customize);
+      return;
+    }
     var qty = state.cart[item.id] || 0;
     var stepper = el('div', 'stepper');
     if (qty > 0) {
@@ -1252,8 +1270,9 @@ public static class CustomerOrderPage
     state.bestSellers.forEach(function (item) {
       var card = el('div', 'bs-card' + (item.available ? '' : ' unavailable'));
       card.dataset.itemId = String(item.id);
+      var bsHasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
       card.appendChild(el('div', 'item-name', item.name));
-      card.appendChild(el('div', 'item-price', money(item.price)));
+      card.appendChild(el('div', 'item-price', (bsHasOptions ? 'from ' : '') + money(entryPrice(item))));
 
       var actionsSlot = el('div', 'item-actions-slot');
       card.appendChild(actionsSlot);
