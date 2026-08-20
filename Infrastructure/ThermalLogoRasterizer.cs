@@ -23,6 +23,33 @@ public static class ThermalLogoRasterizer
     /// (alternating black/white dots) that the eye blends into gauzy grey from normal reading
     /// distance, not an actual lighter shade of ink. Floyd–Steinberg is what produces that
     /// pattern instead of a blocky, aliased silhouette a hard threshold would give.</summary>
+    /// <summary>Capped height keeps a very tall/narrow source image (a phone photo of a
+    /// signboard, not a cropped logo) from turning into a receipt-length wall of dots — the
+    /// logo is a header ornament, not the point of the printout.</summary>
+    private const int MaxHeightDots = 160;
+
+    /// <summary>
+    /// Ceiling on the packed bitmap, and through it on how long the logo takes to reach the
+    /// printer — which is the whole reason this bound exists rather than width/height alone.
+    ///
+    /// Web Bluetooth is the binding constraint: it writes in 20-byte chunks paced 20ms apart
+    /// (see BluetoothPrinter.web.ts, where that pacing is matched to a 9600-baud printer's
+    /// buffer), so the link runs at almost exactly 1,000 bytes per second and the raster's
+    /// SIZE IS ITS PRINT TIME — 2,400 bytes is about 2.4 seconds of a cashier standing there.
+    /// A full-width 384x160 logo is 7,680 bytes, and that alone put ~7.7s in front of every
+    /// bill on a 58mm till (11.5s at 80mm) with the receipt's own text costing barely one.
+    ///
+    /// Bounding bytes rather than dimensions is what keeps that promise for every logo shape:
+    /// a wide wordmark and a square badge both get as many dots as the budget buys, just
+    /// distributed differently, so no upload can be the one that makes printing slow again.
+    /// </summary>
+    private const int MaxRasterBytes = 2400;
+
+    /// <summary>Above this the pixel is background, not ink — used to find the mark's own
+    /// bounding box. Deliberately near-white rather than mid-grey: this is trimming blank
+    /// margin, not thresholding the image (FloydSteinbergDither does that later, at 128).</summary>
+    private const int BlankLuminance = 240;
+
     public static byte[]? Rasterize(byte[]? logoBytes, int targetWidthDots)
     {
         if (logoBytes is null || logoBytes.Length == 0) return null;
@@ -32,22 +59,6 @@ public static class ThermalLogoRasterizer
         {
             using var image = Image.Load<L8>(logoBytes); // decode straight to 8-bit greyscale
 
-            // Capped height keeps a very tall/narrow source image (a phone photo of a signboard,
-            // not a cropped logo) from turning into a receipt-length wall of dots — the logo
-            // is a header ornament, not the point of the printout.
-            const int maxHeightDots = 160;
-            var scale = (double)targetWidthDots / image.Width;
-            var targetHeight = Math.Min(maxHeightDots, (int)Math.Round(image.Height * scale));
-            if (targetHeight < 1) targetHeight = 1;
-
-            image.Mutate(ctx => ctx
-                .Resize(targetWidthDots, targetHeight)
-                // A thermal head has no real greyscale, so pushing contrast up before dithering
-                // is what keeps a logo that is mostly light grey (a thin outline mark, a pastel
-                // background) from washing out to a nearly blank rectangle — dithering alone
-                // reproduces the source's own contrast, it doesn't add any.
-                .Contrast(1.3f));
-
             // Many uploaded logos are cut for a dark app icon or a social-media tile: a solid
             // black (or near-black) square behind a white/light mark. Thermal paper is white
             // and can only deposit BLACK ink — there's no "white ink" a printer can lay down —
@@ -56,10 +67,37 @@ public static class ThermalLogoRasterizer
             // opposite of the light, legible mark every other thermal-printed logo on a bill
             // is going for. Auto-inverting whenever the source is majority-dark fixes exactly
             // that, and does nothing to a normal light-background logo (average stays > 128).
+            //
+            // Decided BEFORE the trim below, because it decides what "blank" even means: on a
+            // dark-tile logo the margin to be trimmed is the black background, and trimming
+            // against light pixels first would crop the mark itself away instead.
             if (AverageLuminance(image) < 128) image.Mutate(ctx => ctx.Invert());
 
+            // The mark's own bounding box. Blank margin costs exactly as many bytes as ink
+            // does — it is packed and transmitted dot for dot — so a logo exported with
+            // generous padding was paying its whole print-time budget for empty paper. Cropped
+            // here, before the resize, so the dots the budget does buy all go to the mark.
+            var ink = InkBounds(image);
+            if (ink is { } box && (box.Width < image.Width || box.Height < image.Height))
+                image.Mutate(ctx => ctx.Crop(box));
+
+            var (targetWidth, targetHeight) = FitWithinBudget(image.Width, image.Height, targetWidthDots);
+
+            image.Mutate(ctx => ctx
+                // Aspect ratio preserved, unlike the full-paper-width stretch this used to do:
+                // that squashed anything taller than the height cap (a square logo went out at
+                // 384x160) and charged full-width bytes for every row of it. Narrower than the
+                // paper is fine — escpos.ts wraps the raster in ALIGN_CENTER, so it lands in
+                // the middle of the slip rather than against the left edge.
+                .Resize(targetWidth, targetHeight)
+                // A thermal head has no real greyscale, so pushing contrast up before dithering
+                // is what keeps a logo that is mostly light grey (a thin outline mark, a pastel
+                // background) from washing out to a nearly blank rectangle — dithering alone
+                // reproduces the source's own contrast, it doesn't add any.
+                .Contrast(1.3f));
+
             var bitmap = FloydSteinbergDither(image);
-            return BuildRasterCommand(bitmap, targetWidthDots, targetHeight);
+            return BuildRasterCommand(bitmap, targetWidth, targetHeight);
         }
         catch
         {
@@ -82,6 +120,58 @@ public static class ThermalLogoRasterizer
             }
         });
         return count == 0 ? 255 : (double)sum / count;
+    }
+
+    /// <summary>The smallest rectangle containing every non-background pixel, or null when the
+    /// image is blank all the way through (in which case there is nothing to crop TO, and the
+    /// caller leaves it alone rather than cropping to an empty rect).</summary>
+    private static Rectangle? InkBounds(Image<L8> image)
+    {
+        int minX = image.Width, minY = image.Height, maxX = -1, maxY = -1;
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height; y++)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < row.Length; x++)
+                {
+                    if (row[x].PackedValue > BlankLuminance) continue;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        });
+
+        return maxX < 0 ? null : new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1);
+    }
+
+    /// <summary>
+    /// The largest size the logo may be printed at: as many dots as fit the paper width and
+    /// the height cap, then held down to MaxRasterBytes — all at the source's own aspect ratio.
+    ///
+    /// The byte bound is solved rather than searched. Scaling by s scales both axes, so the
+    /// packed size grows as s²: bytes ≈ s² · (w · h) / 8, which inverts to the largest legal
+    /// s directly. The loop afterwards only mops up what rounding and the pack-to-whole-bytes
+    /// ceiling add on top of that — at most a row or two, not a search.
+    /// </summary>
+    private static (int Width, int Height) FitWithinBudget(int sourceWidth, int sourceHeight, int maxWidthDots)
+    {
+        var boxScale = Math.Min((double)maxWidthDots / sourceWidth, (double)MaxHeightDots / sourceHeight);
+        var budgetScale = Math.Sqrt(8.0 * MaxRasterBytes / ((double)sourceWidth * sourceHeight));
+        var scale = Math.Min(boxScale, budgetScale);
+
+        var width = Math.Clamp((int)Math.Round(sourceWidth * scale), 1, maxWidthDots);
+        var height = Math.Clamp((int)Math.Round(sourceHeight * scale), 1, MaxHeightDots);
+
+        while (height > 1 && (width + 7) / 8 * height > MaxRasterBytes)
+        {
+            height--;
+            width = Math.Clamp((int)Math.Round(sourceWidth * (double)height / sourceHeight), 1, maxWidthDots);
+        }
+
+        return (width, height);
     }
 
     /// <summary>Floyd–Steinberg error-diffusion dithering to 1-bit. Standard algorithm: each
