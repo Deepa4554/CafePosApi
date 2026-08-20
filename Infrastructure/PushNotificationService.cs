@@ -55,7 +55,15 @@ public class FcmPushNotificationSender(IServiceScopeFactory scopeFactory, ILogge
 
     public async Task NotifyTenantAsync(int tenantId, NotificationCategory category, string title, string body, string? actionUrl, int? targetUserId = null, string? targetRolesCsv = null, CancellationToken ct = default)
     {
-        if (FirebaseApp.DefaultInstance is null) return;
+        // TEMP DIAGNOSTIC — remove once push delivery is confirmed working end-to-end.
+        // Console.WriteLine, not just logger, so this can never be lost to a log-level filter.
+        Console.WriteLine($"[FCM DIAGNOSTIC] NotifyTenantAsync called: tenant={tenantId} category={category} targetUserId={targetUserId} defaultInstanceNull={FirebaseApp.DefaultInstance is null}");
+
+        if (FirebaseApp.DefaultInstance is null)
+        {
+            Console.WriteLine("[FCM DIAGNOSTIC] Bailing out: FirebaseApp.DefaultInstance is null.");
+            return;
+        }
 
         try
         {
@@ -109,7 +117,15 @@ public class FcmPushNotificationSender(IServiceScopeFactory scopeFactory, ILogge
                     .ToListAsync(ct);
             }
 
-            if (tokens.Count == 0) return;
+            // TEMP DIAGNOSTIC — remove once push delivery is confirmed working end-to-end.
+            Console.WriteLine($"[FCM DIAGNOSTIC] Resolved {tokens.Count} device token(s) for tenant={tenantId} category={category}. " +
+                $"Tokens: [{string.Join(", ", tokens.Select(t => t[..Math.Min(12, t.Length)] + "..."))}]");
+
+            if (tokens.Count == 0)
+            {
+                Console.WriteLine("[FCM DIAGNOSTIC] Bailing out: zero device tokens resolved for this tenant/category.");
+                return;
+            }
 
             // MulticastMessage.Tokens is flagged obsolete in favor of .Fids, but Fids addresses
             // Firebase Installation IDs — a different SDK/targeting scheme entirely, not what
@@ -128,7 +144,18 @@ public class FcmPushNotificationSender(IServiceScopeFactory scopeFactory, ILogge
             };
 #pragma warning restore CS0618
 
+            // TEMP DIAGNOSTIC — remove once push delivery is confirmed working end-to-end.
+            Console.WriteLine($"[FCM DIAGNOSTIC] About to call SendEachForMulticastAsync. FirebaseMessaging.DefaultInstance null={FirebaseMessaging.DefaultInstance is null}");
+
             var response = await FirebaseMessaging.DefaultInstance.SendEachForMulticastAsync(message, ct);
+            // TEMP DIAGNOSTIC — remove once push delivery is confirmed working end-to-end.
+            Console.WriteLine($"[FCM DIAGNOSTIC] SendEachForMulticastAsync result: success={response.SuccessCount} failure={response.FailureCount}");
+            foreach (var (r, i) in response.Responses.Select((r, i) => (r, i)))
+            {
+                Console.WriteLine(r.IsSuccess
+                    ? $"[FCM DIAGNOSTIC] Token #{i} SUCCESS: messageId={r.MessageId}"
+                    : $"[FCM DIAGNOSTIC] Token #{i} FAILED: {r.Exception?.MessagingErrorCode} — {r.Exception?.Message}");
+            }
             if (response.FailureCount == 0) return;
 
             // A token FCM reports as unregistered/invalid is permanently dead (app uninstalled,
@@ -150,6 +177,10 @@ public class FcmPushNotificationSender(IServiceScopeFactory scopeFactory, ILogge
         }
         catch (Exception ex)
         {
+            // TEMP DIAGNOSTIC — Console.WriteLine alongside the structured log, so the full
+            // exception (including any inner exception, e.g. an auth/network failure talking to
+            // Google's servers) can never be lost to a log-level filter.
+            Console.WriteLine($"[FCM DIAGNOSTIC] EXCEPTION in NotifyTenantAsync (tenant={tenantId}, category={category}): {ex}");
             logger.LogError(ex, "FCM push failed for tenant {TenantId}, category {Category}", tenantId, category);
         }
     }

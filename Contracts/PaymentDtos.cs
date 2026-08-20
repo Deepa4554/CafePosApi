@@ -2,8 +2,6 @@ using CafePOS.Api.Domain;
 
 namespace CafePOS.Api.Contracts;
 
-public enum BillingCycle { Monthly, Yearly }
-
 /// <summary>
 /// What the browser asks to buy — a plan and a cycle, never an amount. The price is looked
 /// up server-side (SubscriptionPricing) on purpose: an amount taken from the client would

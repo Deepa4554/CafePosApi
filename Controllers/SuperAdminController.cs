@@ -38,10 +38,11 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
     }
 
     /// <summary>
-    /// The real fix for the manual-DB workflow: pick a tenant, pick a plan, done —
-    /// same 14-day-trial/1-month-paid cycle rule as the tenant's own (locked-down)
-    /// /subscription/change-plan. Still no payment gateway, so this stays a manual
-    /// "I confirmed they paid" action by you, just via API instead of raw SQL.
+    /// The real fix for the manual-DB workflow: pick a tenant, pick a plan, pick monthly or
+    /// yearly, done — the same term rule as the tenant's own (locked-down)
+    /// /subscription/change-plan, shared through SubscriptionPricing.StartTerm so the two
+    /// can't disagree about how long a year is. This stays a manual "I confirmed they paid"
+    /// action by you for payments taken outside Razorpay, just via API instead of raw SQL.
     /// </summary>
     [HttpPost("tenants/{tenantId:int}/change-plan")]
     public async Task<ActionResult<TenantSummaryDto>> ChangeTenantPlan(int tenantId, AdminChangePlanRequest req)
@@ -53,11 +54,7 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
         if (sub is null) return NotFound("No subscription found for this tenant.");
 
         var oldPlan = sub.Plan;
-        sub.Plan = req.Plan;
-        sub.UpdatedAt = DateTime.UtcNow;
-        sub.PlanExpiresAt = req.Plan == SubscriptionTier.FreeTrial
-            ? DateTime.UtcNow.AddDays(14)
-            : DateTime.UtcNow.AddMonths(1);
+        SubscriptionPricing.StartTerm(sub, req.Plan, req.Cycle, DateTime.UtcNow);
 
         // Tagged to the AFFECTED tenant, not yours — the shared IAuditService would
         // auto-stamp your own tenant id instead, which would be the wrong cafe's log.
@@ -67,7 +64,7 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
             Action = AuditAction.SubscriptionChange,
             Resource = AuditResource.Subscription,
             ResourceId = sub.Id.ToString(),
-            Details = $"[Platform Admin] Changed plan from {oldPlan} to {req.Plan}.",
+            Details = $"[Platform Admin] Changed plan from {oldPlan} to {req.Plan} for {SubscriptionPricing.CycleLabel(sub.Cycle)}.",
             Severity = AuditSeverity.High,
         });
 

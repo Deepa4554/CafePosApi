@@ -70,10 +70,9 @@ public class PaymentsController(
             return GatewayUnavailable(ex.Message);
         }
 
-        var cycleLabel = req.Cycle == BillingCycle.Yearly ? "1 year" : "1 month";
         return new CreateOrderResponse(
             order.Id, order.Amount, order.Currency, razorpay.KeyId,
-            $"PrabandhOS {SubscriptionPricing.DisplayName(req.Plan)} — {cycleLabel}");
+            $"PrabandhOS {SubscriptionPricing.DisplayName(req.Plan)} — {SubscriptionPricing.CycleLabel(req.Cycle)}");
     }
 
     [HttpPost("verify")]
@@ -267,6 +266,12 @@ public class PaymentsController(
         // (ChangePlan resets from "now" instead; it's a manual correction, not a purchase.)
         var startFrom = sub.Plan == plan && sub.PlanExpiresAt > DateTime.UtcNow ? sub.PlanExpiresAt.Value : DateTime.UtcNow;
         sub.Plan = plan;
+        // The cycle they actually paid for, kept on the row so the Subscription screen can say
+        // "Billed yearly" instead of the app having to guess it back out of the dates.
+        sub.Cycle = cycle;
+        // Not "now" on an early renewal: the term they just bought starts where the old one
+        // ran out, which is the same instant ExpiryFrom counts from.
+        sub.PlanStartedAt = startFrom;
         sub.PlanExpiresAt = SubscriptionPricing.ExpiryFrom(startFrom, cycle);
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
@@ -277,7 +282,7 @@ public class PaymentsController(
 
         await audit.LogAsync(AuditAction.SubscriptionChange, AuditResource.Subscription, paymentId,
             $"Razorpay payment {paymentId} (order {order.Id}, ₹{order.AmountPaid / 100m:0.00}) " +
-            $"moved plan from {oldPlan} to {plan} for 1 {(cycle == BillingCycle.Yearly ? "year" : "month")}.",
+            $"moved plan from {oldPlan} to {plan} for {SubscriptionPricing.CycleLabel(cycle)}.",
             AuditSeverity.High, tenantId: tenantId);
 
         return sub;

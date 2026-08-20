@@ -246,7 +246,8 @@ public class AuthController(
         {
             TenantId = tenant.Id,
             Plan = SubscriptionTier.FreeTrial,
-            PlanExpiresAt = DateTime.UtcNow.AddDays(14),
+            PlanStartedAt = DateTime.UtcNow,
+            PlanExpiresAt = DateTime.UtcNow.AddDays(SubscriptionPricing.TrialDays),
         });
 
         await db.SaveChangesAsync(); // assigns user.Id before IssueTokensAsync references it

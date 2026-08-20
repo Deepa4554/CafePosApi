@@ -51,22 +51,18 @@ public class SubscriptionController(
         if (!string.IsNullOrWhiteSpace(req.CouponCode) && req.CouponCode.Equals("INVALID", StringComparison.OrdinalIgnoreCase))
             throw new ApiValidationException("Coupon code is invalid or expired.");
 
-        sub.Plan = req.Plan;
         sub.ActiveCouponCode = req.CouponCode;
-        sub.UpdatedAt = DateTime.UtcNow;
-        // Every plan runs on a cycle — 14 days for the free trial, 1 month for any paid
-        // tier — reset from "now" on every change (this doubles as "renew" today, since
-        // there's no payment gateway yet to trigger renewal on an actual billing date).
-        sub.PlanExpiresAt = req.Plan == SubscriptionTier.FreeTrial
-            ? DateTime.UtcNow.AddDays(14)
-            : DateTime.UtcNow.AddMonths(1);
+        // Every plan runs on a term — 14 days for the free trial, then whichever cycle was
+        // asked for — reset from "now" on every change (this doubles as "renew" for a payment
+        // taken out-of-band, where there's no gateway callback to drive the billing date).
+        SubscriptionPricing.StartTerm(sub, req.Plan, req.Cycle, DateTime.UtcNow);
 
         await db.SaveChangesAsync();
         // The plan gates read through a short-TTL cache (see ISubscriptionCache) — drop the
         // entry so an upgrade unlocks its screens on the very next request, not a minute later.
         subscriptions.Invalidate(tenantContext.TenantIdOrDefault);
         await audit.LogAsync(AuditAction.SubscriptionChange, AuditResource.Subscription, sub.Id.ToString(),
-            $"Changed plan from {oldPlan} to {req.Plan}.", AuditSeverity.High);
+            $"Changed plan from {oldPlan} to {req.Plan} for {SubscriptionPricing.CycleLabel(sub.Cycle)}.", AuditSeverity.High);
 
         var branchCount = await db.Branches.CountAsync();
         var staffCount = await db.Staff.CountAsync();

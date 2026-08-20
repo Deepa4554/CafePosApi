@@ -5,14 +5,18 @@ namespace CafePOS.Api.Contracts;
 
 public record TenantSummaryDto(
     int Id, string Name, string Slug, string Status, DateTime CreatedAt,
-    string Plan, DateTime? PlanExpiresAt, int StaffCount, int BranchCount)
+    string Plan, string Cycle, DateTime? PlanStartedAt, DateTime? PlanExpiresAt, int StaffCount, int BranchCount)
 {
     public static TenantSummaryDto From(Tenant t, Subscription? sub, int staffCount, int branchCount) => new(
         t.Id, t.Name, t.Slug, t.Status.ToString().ToUpperInvariant(), t.CreatedAt,
-        sub?.Plan.ToString().ToUpperInvariant() ?? "NONE", sub?.PlanExpiresAt, staffCount, branchCount);
+        sub?.Plan.ToString().ToUpperInvariant() ?? "NONE",
+        (sub?.Cycle ?? BillingCycle.Monthly).ToString().ToUpperInvariant(),
+        sub?.PlanStartedAt, sub?.PlanExpiresAt, staffCount, branchCount);
 }
 
-public record AdminChangePlanRequest(SubscriptionTier Plan);
+/// <summary>Same Monthly default as ChangePlanRequest, for the same reason — a request that
+/// names no cycle must not be worth a free extra eleven months.</summary>
+public record AdminChangePlanRequest(SubscriptionTier Plan, BillingCycle Cycle = BillingCycle.Monthly);
 
 // ---------- Tenant screen access ----------
 

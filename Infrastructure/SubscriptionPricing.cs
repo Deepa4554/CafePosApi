@@ -46,4 +46,31 @@ public static class SubscriptionPricing
     /// so a cycle can never be charged for a year and granted for a month.</summary>
     public static DateTime ExpiryFrom(DateTime start, BillingCycle cycle) =>
         cycle == BillingCycle.Yearly ? start.AddYears(1) : start.AddMonths(1);
+
+    /// <summary>The free trial's fixed length. It isn't sold on a cycle, so it doesn't get
+    /// one — StartTerm forces Monthly on it purely so the stored value is never garbage.</summary>
+    public const int TrialDays = 14;
+
+    /// <summary>
+    /// Puts a tenant on ONE fresh term of a plan, starting now — the "I confirmed they paid
+    /// out-of-band" grant behind both change-plan endpoints (the tenant's own and the
+    /// platform admin's). Shared so the two can't drift on the cycle length, which is exactly
+    /// how yearly used to be quietly granted as a month: both endpoints hardcoded AddMonths(1).
+    ///
+    /// Deliberately NOT what a Razorpay renewal does — PaymentsController extends from the
+    /// existing expiry so paying early doesn't burn the days already bought. This one resets
+    /// from today, because a manual grant is a correction, not a purchase.
+    /// </summary>
+    public static void StartTerm(Subscription sub, SubscriptionTier plan, BillingCycle cycle, DateTime now)
+    {
+        var isTrial = plan == SubscriptionTier.FreeTrial;
+        sub.Plan = plan;
+        sub.Cycle = isTrial ? BillingCycle.Monthly : cycle;
+        sub.PlanStartedAt = now;
+        sub.PlanExpiresAt = isTrial ? now.AddDays(TrialDays) : ExpiryFrom(now, cycle);
+        sub.UpdatedAt = now;
+    }
+
+    /// <summary>"1 month" / "1 year" — for audit lines and the Razorpay order description.</summary>
+    public static string CycleLabel(BillingCycle cycle) => cycle == BillingCycle.Yearly ? "1 year" : "1 month";
 }

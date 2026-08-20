@@ -135,6 +135,23 @@ public static class CustomerOrderPage
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    /* Anchors the specials chip below, which sits over the photo. */
+    position: relative;
+  }
+  /* The cafe's own pick, the same flag the POS and Menu screens paint a star on
+     (MenuItem.Popular). Over the photo rather than beside the name: a half-width tile has room
+     for about two words next to the veg/non-veg mark, and a chip that pushes the dish's name
+     onto a second line costs more than it earns. Not shown on unavailable items — the card is
+     already dimmed and carries its own CURRENTLY UNAVAILABLE tag, and recommending something
+     nobody can order just reads as a bug. */
+  .special-badge {
+    position: absolute; top: 7px; left: 7px; z-index: 1;
+    display: flex; align-items: center; gap: 3px;
+    padding: 3px 7px; border-radius: 999px;
+    background: var(--accent); color: #fff;
+    font-size: 9.5px; font-weight: 800; letter-spacing: 0.4px;
+    /* The photo underneath is arbitrary — a pale dish would otherwise wash the chip out. */
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
   }
   /* aspect-ratio rather than a fixed height: the tile's width depends on the phone, and a
      hardcoded height would letterbox the photo on a wide screen and crop it on a narrow one. */
@@ -1094,6 +1111,8 @@ public static class CustomerOrderPage
         // but sorting state.menu itself would reorder every other view that reads it.
         // Unavailable items sink to the bottom of their category whatever they cost: a card
         // nobody can order shouldn't lead the section just because it's the cheapest thing in it.
+        // Deliberately NOT ordered by Popular: that flag paints a badge and moves nothing, by
+        // design (see MenuItem.Popular vs MenuItem.Pinned in Entities.cs).
         .sort(function (a, b) {
           if (a.available !== b.available) return a.available ? -1 : 1;
           return entryPrice(a) - entryPrice(b);
@@ -1111,6 +1130,10 @@ public static class CustomerOrderPage
         } else {
           card.appendChild(el('div', 'item-thumb placeholder', '🍽️'));
         }
+
+        // After the thumb, so it paints over it (both are in flow order under the card's own
+        // stacking context; see .special-badge).
+        if (item.popular && item.available) card.appendChild(el('div', 'special-badge', '★ SPECIAL'));
 
         var hasOptions = (item.variants && item.variants.length > 0) || (item.modifiers && item.modifiers.length > 0);
         var info = el('div', 'item-info');

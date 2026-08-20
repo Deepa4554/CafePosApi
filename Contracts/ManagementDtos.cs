@@ -231,12 +231,17 @@ public record BranchDto(int Id, string Name, string Address, bool IsActive)
 public record CreateBranchRequest(string Name, string Address);
 
 // ---------- Subscription ----------
-public record SubscriptionDto(string Plan, DateTime? PlanExpiresAt, int MonthlyOrdersUsed, int MaxOrdersPerMonth, int MaxBranches, int MaxStaff)
+public record SubscriptionDto(
+    string Plan, string Cycle, DateTime? PlanStartedAt, DateTime? PlanExpiresAt,
+    int MonthlyOrdersUsed, int MaxOrdersPerMonth, int MaxBranches, int MaxStaff)
 {
     public static SubscriptionDto From(Subscription s, int branchCount, int staffCount, int monthlyOrdersUsed)
     {
         var limits = PlanLimits[s.Plan];
-        return new SubscriptionDto(s.Plan.ToString().ToUpperInvariant(), s.PlanExpiresAt, monthlyOrdersUsed, limits.orders, limits.branches, limits.staff);
+        return new SubscriptionDto(
+            s.Plan.ToString().ToUpperInvariant(), s.Cycle.ToString().ToUpperInvariant(),
+            s.PlanStartedAt, s.PlanExpiresAt,
+            monthlyOrdersUsed, limits.orders, limits.branches, limits.staff);
     }
 
     public static readonly Dictionary<SubscriptionTier, (int orders, int branches, int staff)> PlanLimits = new()
@@ -251,7 +256,9 @@ public record SubscriptionDto(string Plan, DateTime? PlanExpiresAt, int MonthlyO
         [SubscriptionTier.Enterprise] = (int.MaxValue, int.MaxValue, int.MaxValue),
     };
 }
-public record ChangePlanRequest(SubscriptionTier Plan, string? CouponCode);
+/// <summary>Cycle defaults to Monthly so an older client that only ever sent a plan keeps
+/// buying the month it always got, rather than silently being granted a free year.</summary>
+public record ChangePlanRequest(SubscriptionTier Plan, string? CouponCode, BillingCycle Cycle = BillingCycle.Monthly);
 
 // ---------- Integrations ----------
 public record IntegrationDto(int Id, string Name, string Category, string Status, DateTime? ConnectedAt)

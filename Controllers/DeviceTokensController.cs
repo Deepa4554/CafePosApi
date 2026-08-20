@@ -43,6 +43,8 @@ public class DeviceTokensController(CafePosDbContext db, ITenantContext tenant) 
         }
 
         await db.SaveChangesAsync();
+        // TEMP DIAGNOSTIC — remove once push delivery is confirmed working end-to-end.
+        Console.WriteLine($"[FCM DIAGNOSTIC] Device token registered: user={currentUserId} tenant={tenant.TenantIdOrDefault} platform={req.Platform} tokenPrefix={req.Token[..Math.Min(12, req.Token.Length)]}...");
         return NoContent();
     }
 

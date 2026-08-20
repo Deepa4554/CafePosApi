@@ -365,17 +365,38 @@ public class Branch : ITenantScoped
 
 public enum SubscriptionTier { FreeTrial, Starter, Professional, Enterprise }
 
+/// <summary>
+/// How long one paid term runs. Lives in the domain rather than in Contracts because the
+/// Subscription row itself now records which cycle the tenant is on — SubscriptionPricing
+/// and the storefront DTOs read the same enum.
+/// </summary>
+public enum BillingCycle { Monthly, Yearly }
+
 public class Subscription : ITenantScoped
 {
     public int Id { get; set; }
     public int TenantId { get; set; }
     public SubscriptionTier Plan { get; set; } = SubscriptionTier.FreeTrial;
     /// <summary>
-    /// When the CURRENT plan cycle ends — FreeTrial gets 14 days, every paid tier gets
-    /// 1 month, reset on every /subscription/change-plan call (including re-selecting
-    /// the same plan, which is today's stand-in for "renew" since there's no real
-    /// payment gateway yet — see docs/multi-tenant-saas-plan.md). Checked by
-    /// SubscriptionExpiryMiddleware to lock the tenant out once it passes.
+    /// Whether the current term was sold by the month or by the year. Persisted rather than
+    /// inferred from the Started/Expires gap, because that gap isn't reliable: an early
+    /// renewal stacks a term onto the leftover days of the old one, so the dates alone can't
+    /// tell a yearly plan from a monthly one. FreeTrial is always Monthly — the trial isn't
+    /// sold on a cycle, and its length comes from SubscriptionPricing.TrialDays instead.
+    /// </summary>
+    public BillingCycle Cycle { get; set; } = BillingCycle.Monthly;
+    /// <summary>
+    /// When the CURRENT term began — "now" for a manual grant or a lapsed renewal, and the
+    /// OLD expiry for an early renewal (which starts where the paid-for days ran out, not
+    /// today). Null only on rows that predate this column.
+    /// </summary>
+    public DateTime? PlanStartedAt { get; set; }
+    /// <summary>
+    /// When the CURRENT plan cycle ends — FreeTrial gets 14 days, a paid tier gets 1 month
+    /// or 1 year depending on Cycle, reset on every /subscription/change-plan call (including
+    /// re-selecting the same plan, which is the stand-in for "renew" when a platform admin
+    /// applies an out-of-band payment by hand). Checked by SubscriptionExpiryMiddleware to
+    /// lock the tenant out once it passes.
     /// </summary>
     public DateTime? PlanExpiresAt { get; set; }
     public int MonthlyOrdersUsed { get; set; }

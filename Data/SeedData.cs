@@ -1,4 +1,5 @@
 using CafePOS.Api.Domain;
+using CafePOS.Api.Infrastructure;
 using Microsoft.AspNetCore.Identity;
 
 namespace CafePOS.Api.Data;
@@ -33,7 +34,8 @@ public static class SeedData
             db.Subscriptions.Add(new Subscription
             {
                 Plan = SubscriptionTier.FreeTrial,
-                PlanExpiresAt = DateTime.UtcNow.AddDays(14),
+                PlanStartedAt = DateTime.UtcNow,
+                PlanExpiresAt = DateTime.UtcNow.AddDays(SubscriptionPricing.TrialDays),
             });
         }
 

@@ -398,6 +398,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<AuditLogEntry>().Property(a => a.Severity).HasConversion<string>();
         modelBuilder.Entity<StaffMember>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<Subscription>().Property(s => s.Plan).HasConversion<string>();
+        modelBuilder.Entity<Subscription>().Property(s => s.Cycle).HasConversion<string>();
         modelBuilder.Entity<Integration>().Property(i => i.Status).HasConversion<string>();
         modelBuilder.Entity<WhatsAppSession>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<WhatsAppMessageLog>().Property(m => m.Direction).HasConversion<string>();
@@ -822,7 +823,11 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         foreach (var entry in added)
         {
             if (settingsByTenant.TryGetValue(entry.Entity.TenantId, out var settings) && !NotificationPreferences.IsEnabled(settings, entry.Entity.Category))
+            {
+                // TEMP DIAGNOSTIC — remove once push delivery is confirmed working end-to-end.
+                Console.WriteLine($"[FCM DIAGNOSTIC] AppNotification SUPPRESSED (category disabled): tenant={entry.Entity.TenantId} category={entry.Entity.Category}");
                 entry.State = EntityState.Detached;
+            }
         }
     }
 
@@ -895,6 +900,9 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // actually runs.
         // CancellationToken.None, not the request's token: this keeps running after the
         // request scope (and its RequestAborted token) is gone, same as the realtime notify above.
+        // TEMP DIAGNOSTIC — remove once push delivery is confirmed working end-to-end.
+        Console.WriteLine($"[FCM DIAGNOSTIC] SaveChangesAsync collected {newNotifications.Count} new AppNotification(s): " +
+            string.Join(", ", newNotifications.Select(n => $"(tenant={n.TenantId} category={n.Category} targetUserId={n.TargetUserId})")));
         foreach (var n in newNotifications)
             _ = pushSender.NotifyTenantAsync(n.TenantId, n.Category, n.Title, n.Body, n.ActionUrl, n.TargetUserId, n.TargetRolesCsv, CancellationToken.None);
         // WhatsApp order-tracking module (see docs/plans — "WhatsApp Order Tracking Module").
