@@ -52,7 +52,10 @@ public static class ReceiptPdfBuilder
 
                     col.Item().Text($"Order {OrderNumberFormat.Bill(order)}").Bold();
                     col.Item().Text(order.Title).FontSize(9);
-                    col.Item().Text($"{order.CreatedAt:dd MMM yyyy, hh:mm tt}").FontSize(8);
+                    // CreatedAt is stored UTC; the guest holding this bill reads the cafe's own
+                    // clock, so it has to be shifted — printed raw it showed every bill 5:30
+                    // early (a 4:53 PM order billed as 11:23 AM).
+                    col.Item().Text($"{IstClock.ToIst(order.CreatedAt):dd MMM yyyy, hh:mm tt}").FontSize(8);
                     if (!string.IsNullOrWhiteSpace(order.GuestName))
                         col.Item().Text($"Guest: {order.GuestName}").FontSize(9);
 

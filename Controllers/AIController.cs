@@ -13,6 +13,12 @@ namespace CafePOS.Api.Controllers;
 [ApiController]
 [Route("api/ai")]
 [Authorize(Policy = Policies.RequirePlus)]
+// The system prompt below grounds the model in this cafe's live revenue, order counts and
+// menu performance — the same numbers DashboardController and ReportsController keep to
+// Owner/Manager. Without this a Waiter could just ask the chat for figures the Dashboard and
+// Reports screens deliberately never show them. Mirrors 'AI' being in the RN app's
+// FLOOR_STAFF_HIDDEN_ROUTES; this is the half that holds even for a direct API call.
+[Authorize(Policy = Policies.OwnerOrManager)]
 // Every call here holds a request slot open while a third-party model thinks, and costs
 // real money per call. Matches the literal string Program.cs's AiLimiterPolicy const uses —
 // attribute arguments must be compile-time constants, so it can't share the const directly.
