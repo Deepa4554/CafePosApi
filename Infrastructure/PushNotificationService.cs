@@ -136,6 +136,26 @@ public class FcmPushNotificationSender(IServiceScopeFactory scopeFactory, ILogge
             {
                 Tokens = tokens,
                 Notification = new Notification { Title = title, Body = body },
+                // Web delivery only — Android/iOS ignore this block and keep using the plain
+                // Notification above. It exists purely to put the brand icon on the browser
+                // notification: firebase-messaging-sw.ts can't add one itself, because the JS
+                // SDK displays a `notification` payload before it ever calls the app's
+                // onBackgroundMessage hook, so anything that hook showed came out as a SECOND
+                // notification rather than a customised first one. Title/Body are repeated
+                // because a platform block overrides the common Notification for its own
+                // platform rather than merging into it.
+                Webpush = new WebpushConfig
+                {
+                    Notification = new WebpushNotification
+                    {
+                        Title = title,
+                        Body = body,
+                        // Same asset HtmlWebpackPlugin emits the web app's favicon from (see
+                        // webpack.config.js) — there's no separate notification-specific icon.
+                        // Resolved by the browser against the service worker's own origin.
+                        Icon = "/prabandhos_icon.svg",
+                    },
+                },
                 Data = new Dictionary<string, string>
                 {
                     ["category"] = category.ToString(),
