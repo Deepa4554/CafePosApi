@@ -30,11 +30,19 @@ public class SuperAdminController(CafePosDbContext db, ISubscriptionCache subscr
         var branchCounts = await db.Branches.IgnoreQueryFilters()
             .GroupBy(b => b.TenantId).Select(g => new { g.Key, Count = g.Count() }).ToListAsync();
 
-        return tenants.Select(t => TenantSummaryDto.From(
-            t,
-            subs.FirstOrDefault(s => s.TenantId == t.Id),
-            staffCounts.FirstOrDefault(x => x.Key == t.Id)?.Count ?? 0,
-            branchCounts.FirstOrDefault(x => x.Key == t.Id)?.Count ?? 0));
+        // Soonest-expiring first, because this list is the renewal chase-list: whoever runs out
+        // next is the one worth acting on, not whoever happens to be alphabetically first. A
+        // tenant with no subscription row has nothing to expire and sinks to the bottom, and
+        // since OrderBy is stable the Name ordering above survives as the tie-break for anything
+        // sharing a date.
+        return tenants
+            .Select(t => TenantSummaryDto.From(
+                t,
+                subs.FirstOrDefault(s => s.TenantId == t.Id),
+                staffCounts.FirstOrDefault(x => x.Key == t.Id)?.Count ?? 0,
+                branchCounts.FirstOrDefault(x => x.Key == t.Id)?.Count ?? 0))
+            .OrderBy(d => d.PlanExpiresAt ?? DateTime.MaxValue)
+            .ToList();
     }
 
     /// <summary>
