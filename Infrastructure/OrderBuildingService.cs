@@ -737,6 +737,36 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 : (order.FireBatches.Count > 0 ? OrderStatus.Served : OrderStatus.New);
     }
 
+    /// <summary>Flips an order to Paid and everything that has to happen in the same instant —
+    /// shared by OrdersController.Pay/Close (the normal settle path) and
+    /// ApprovalsController.ExecuteApprovedActionAsync (a Complimentary write-off that only
+    /// gets here once an Owner approves it, well after the original Pay call already
+    /// returned). Callers still own SaveChangesAsync/concurrency handling around this.</summary>
+    public static async Task CloseOrderAsync(CafePosDbContext db, Order order)
+    {
+        order.Paid = true;
+
+        // Re-roll the status now that Paid has flipped: any leftover unfired line stops
+        // counting as outstanding kitchen work the moment the bill closes (see
+        // RecomputeOrderStatus above). Without this the order stayed pinned at New with no
+        // way back — Fire/AddItem/RemoveItem/Cancel all refuse a paid order — so its table
+        // could never be freed again.
+        RecomputeOrderStatus(order);
+
+        // Guest-session settle hook (doc Section 5.1): the exact instant a table's bill
+        // is settled, close its GuestSession too — this is what makes the old phone's
+        // cookie start getting 410s immediately instead of staying usable until the
+        // next expiry sweep. IgnoreQueryFilters: an anonymous QR settle has no JWT tenant.
+        var session = await db.GuestSessions.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.OrderId == order.Id && (s.Status == GuestSessionStatus.Active || s.Status == GuestSessionStatus.Locked));
+        if (session is not null)
+        {
+            session.Status = GuestSessionStatus.Closed;
+            session.ClosedReason = SessionCloseReason.Settled;
+            session.ClosedAt = DateTime.UtcNow;
+        }
+    }
+
     /// <summary>Recomputes tax and total from the order's live lines.
     ///
     /// Tax is charged PER LINE at that line's own snapshotted rate (OrderItem.TaxRatePct),

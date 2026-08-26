@@ -97,7 +97,7 @@ public static class NotificationAudience
 
 // ---------- Approvals ----------
 
-public enum ApprovalType { Refund, Discount, Expense, Salary, InventoryAdjustment, StockTransfer, Leave }
+public enum ApprovalType { Refund, Discount, Expense, Salary, InventoryAdjustment, StockTransfer, Leave, Complimentary }
 public enum ApprovalStatus { Pending, Approved, Rejected, Escalated }
 
 public class ApprovalRequest : ITenantScoped

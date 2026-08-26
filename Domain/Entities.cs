@@ -417,6 +417,10 @@ public class Order : ITenantScoped
     public bool Cancelled { get; set; }
     public DateTime? CancelledAt { get; set; }
     public string? CancelReason { get; set; }
+    /// <summary>Set when this bill was settled on the "Complimentary" tender (see
+    /// OrdersController.Pay/ComplimentaryMethod) — the mandatory reason an Owner/Manager gave
+    /// for writing the whole bill off. Null on every ordinary bill.</summary>
+    public string? ComplimentaryReason { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     /// <summary>Whoever was logged in when this order was rung up — the till operator,
     /// not necessarily the waiter who actually took it (a shared counter POS is often

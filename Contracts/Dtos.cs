@@ -148,7 +148,10 @@ public record PayRequest(
     bool KeepOpen = false,
     string? GuestName = null,
     string? GuestPhone = null,
-    string? UnfiredItems = null);
+    string? UnfiredItems = null,
+    // Compulsory whenever a "Complimentary" tender/split is in play — see
+    // OrdersController.Pay. Stamped onto Order.ComplimentaryReason.
+    string? ComplimentaryReason = null);
 
 /// <summary>Body for OrdersController.Close — see PayRequest.UnfiredItems, which this carries for
 /// exactly the same reason: Close is the other call that flips a bill to Paid, so it needs the
@@ -277,6 +280,10 @@ public record OrderDto(
     // on an ordinary bill. Non-zero means this much moved onto the customer's khatabook at
     // settle time and is collected there, not here.
     decimal DueAmount,
+    // How much of AmountPaid was written off on the "Complimentary" tender rather than
+    // collected. Zero on an ordinary bill. Paired with ComplimentaryReason.
+    decimal ComplimentaryAmount,
+    string? ComplimentaryReason,
     // True once at least one tender has been collected but the bill isn't fully settled yet.
     // Never true at the same time as Paid.
     bool PartiallyPaid,
@@ -342,6 +349,8 @@ public record OrderDto(
         amountPaid,
         Math.Max(0, o.Total - amountPaid),
         o.Payments.Where(p => p.Method == "Due").Sum(p => p.Amount),
+        o.Payments.Where(p => p.Method == "Complimentary").Sum(p => p.Amount),
+        o.ComplimentaryReason,
         !o.Paid && amountPaid > 0,
         o.Customer?.AvailablePoints);
     }

@@ -315,7 +315,11 @@ public class ReportsController : ControllerBase
 
         var grossSales = orders.Sum(o => o.Subtotal);
         var totalDiscounts = orders.Sum(o => o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount);
-        var netSales = orders.Sum(o => o.Total);
+        // Written off on the Complimentary tender — real food/drink went out but no money did,
+        // so it's carved out of Net Sales the same way a Due leg is NOT (Due is still revenue,
+        // just uncollected; Complimentary never was revenue at all).
+        var complimentaryTotal = orders.SelectMany(o => o.Payments).Where(p => p.Method == "Complimentary").Sum(p => p.Amount);
+        var netSales = orders.Sum(o => o.Total) - complimentaryTotal;
         var refundsTotal = orders.Where(o => o.Refunded).Sum(o => o.RefundedAmount ?? 0m);
 
         var allItems = orders.SelectMany(o => o.Items).Where(i => !i.Voided).ToList();
@@ -338,7 +342,7 @@ public class ReportsController : ControllerBase
             .OrderByDescending(x => x.Amount)
             .ToList();
 
-        return new SalesReportDto(grossSales, totalDiscounts, netSales, refundsTotal, orders.Count, itemWise, categoryWise, paymentModeWise);
+        return new SalesReportDto(grossSales, totalDiscounts, netSales, refundsTotal, orders.Count, itemWise, categoryWise, paymentModeWise, complimentaryTotal);
     }
 
     /// <summary>Rate-wise collected tax for a period — groups by OrderItem.TaxRatePct

@@ -88,7 +88,7 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
     /// "approval needed" notification is addressed to — the two must not drift, or the app
     /// ends up pinging someone whose only possible next step is a permission error.</summary>
     private static AppRole[] ResolverRoles(ApprovalType type) =>
-        (type is ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense)
+        (type is ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense or ApprovalType.Complimentary)
             ? [AppRole.Owner]
             : [AppRole.Owner, AppRole.Manager];
 
@@ -102,7 +102,7 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
         if (request.Status != ApprovalStatus.Pending && request.Status != ApprovalStatus.Escalated)
             throw new ApiConflictException("Only pending or escalated requests can be approved.");
         if (!CanResolve(request.Type))
-            throw new ApiValidationException(request.Type is ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense
+            throw new ApiValidationException(request.Type is ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense or ApprovalType.Complimentary
                 ? "Only the Owner can approve this request."
                 : "You don't have permission to approve this request.");
 
@@ -175,6 +175,29 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
                 });
                 break;
             }
+            case ApprovalType.Complimentary when request.LinkedEntityId is int compOrderId:
+            {
+                // Mirrors exactly what OrdersController.Pay would have done immediately if the
+                // write-off had been under threshold — see its Complimentary handling. Payments
+                // must be loaded: this both computes what's still owed and appends to it.
+                var order = await db.Orders.Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == compOrderId);
+                if (order is null || order.Paid || order.Cancelled) return; // settled/cancelled in the meantime — nothing to replay
+                var owed = Math.Max(0, order.Total - order.Payments.Sum(p => p.Amount));
+                if (owed <= 0) return; // already fully covered some other way — nothing left to write off
+                // Capped at what's actually still owed — the bill may have shrunk (a void, an
+                // edit) since the request went in, and request.Amount is only ever a ceiling.
+                var amount = Math.Min(request.Amount ?? 0, owed);
+                order.Payments.Add(new OrderPayment { OrderId = order.Id, Method = "Complimentary", Amount = amount, LedgerIndex = order.Payments.Count });
+                order.PaymentMethod = order.Payments.Count > 1 ? "Multiple" : "Complimentary";
+                order.ComplimentaryReason = request.Description;
+                // Same optimistic-concurrency bump every other money-mutating path on Order
+                // takes (see Order.PaymentVersion) — cheap insurance against a device settling
+                // the same order some other way in the same instant this approval lands.
+                order.PaymentVersion++;
+                if (owed - amount <= 0.01m)
+                    await OrderBuildingService.CloseOrderAsync(db, order);
+                break;
+            }
             case ApprovalType.Leave when request.LinkedEntityId is int leaveId:
             {
                 var leave = await db.LeaveRequests.FindAsync(leaveId);
@@ -203,7 +226,7 @@ public class ApprovalsController(CafePosDbContext db, IAuditService audit, ITaxR
         if (request.Status != ApprovalStatus.Pending && request.Status != ApprovalStatus.Escalated)
             throw new ApiConflictException("Only pending or escalated requests can be rejected.");
         if (!CanResolve(request.Type))
-            throw new ApiValidationException(request.Type is ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense
+            throw new ApiValidationException(request.Type is ApprovalType.Refund or ApprovalType.Discount or ApprovalType.Expense or ApprovalType.Complimentary
                 ? "Only the Owner can reject this request."
                 : "You don't have permission to reject this request.");
 

@@ -22,7 +22,10 @@ public record SalesCategoryLineDto(string Category, int QtySold, decimal NetSale
 /// <summary>Sourced from Order.Payments (one row per tender), not the summary
 /// Order.PaymentMethod string — the only correct source once split payments exist.</summary>
 public record SalesPaymentLineDto(string Method, decimal Amount, int TxnCount);
-public record SalesReportDto(decimal GrossSales, decimal TotalDiscounts, decimal NetSales, decimal RefundsTotal, int OrderCount, List<SalesItemLineDto> ItemWise, List<SalesCategoryLineDto> CategoryWise, List<SalesPaymentLineDto> PaymentModeWise);
+// ComplimentaryTotal: bills written off on the Complimentary tender — already excluded from
+// NetSales above (see ReportsController.Sales), broken out here so the report can show it as
+// its own line rather than a silent gap in Net Sales.
+public record SalesReportDto(decimal GrossSales, decimal TotalDiscounts, decimal NetSales, decimal RefundsTotal, int OrderCount, List<SalesItemLineDto> ItemWise, List<SalesCategoryLineDto> CategoryWise, List<SalesPaymentLineDto> PaymentModeWise, decimal ComplimentaryTotal);
 
 public record TaxRateLineDto(decimal RatePct, decimal TaxableAmount, decimal TaxAmount, int LineCount);
 /// <summary>Bill-level tax detail for filing — one row per order, so the rate-wise totals

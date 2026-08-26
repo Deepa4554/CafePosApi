@@ -1724,9 +1724,16 @@ public class OrdersController(
     /// so the order's ledger still adds up to its Total and the Sales report's payment-mode
     /// breakdown shows credit as its own line rather than silently inflating cash.</summary>
     public const string DueMethod = "Due";
+    /// <summary>The write-off tender — like Due it settles the bill without any money changing
+    /// hands, but unlike Due nothing is parked on a customer's khata: the amount is simply
+    /// waived. Owner/Manager-only (same discretion level as ApplyBillDiscount) and requires a
+    /// reason (PayRequest.ComplimentaryReason), stamped onto Order.ComplimentaryReason. Reported
+    /// separately from real revenue — see ReportsController.Sales.</summary>
+    public const string ComplimentaryMethod = "Complimentary";
     private static readonly HashSet<string> ValidPaymentMethods =
-        new(StringComparer.OrdinalIgnoreCase) { "Cash", "Card", "UPI", DueMethod };
+        new(StringComparer.OrdinalIgnoreCase) { "Cash", "Card", "UPI", DueMethod, ComplimentaryMethod };
     private static bool IsDue(string? method) => string.Equals(method?.Trim(), DueMethod, StringComparison.OrdinalIgnoreCase);
+    private static bool IsComplimentary(string? method) => string.Equals(method?.Trim(), ComplimentaryMethod, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The catalog's own spelling of a tender. Methods are matched case-insensitively
     /// but stored verbatim, so without this a client sending "upi" and one sending "UPI" turn
@@ -1774,6 +1781,50 @@ public class OrdersController(
             if (req.KeepOpen)
                 throw new ApiValidationException("A Pay First order can't be put on the khata — collect or close what's already been paid first.");
         }
+
+        // Same read-before-write treatment as the Due legs above: the permission/reason checks
+        // a Complimentary tender triggers have to be settled before any OrderPayment row is
+        // written, not after.
+        var complimentaryLegs = req?.Splits is { Count: > 0 } requestedComp
+            ? requestedComp.Count(s => IsComplimentary(s.Method))
+            : IsComplimentary(req?.PaymentMethod) ? 1 : 0;
+        if (complimentaryLegs > 1)
+            throw new ApiValidationException("Put the whole write-off on a single Complimentary line.");
+        if (complimentaryLegs > 0)
+        {
+            if (!IsOwnerOrManager())
+                return Forbid();
+            if (string.IsNullOrWhiteSpace(req?.ComplimentaryReason))
+                throw new ApiValidationException("A reason is required to mark a bill Complimentary.");
+
+            var complimentaryAmount = req!.Splits is { Count: > 0 } compSplits
+                ? compSplits.Where(s => IsComplimentary(s.Method)).Sum(s => s.Amount)
+                : Math.Max(0, order.Total - order.Payments.Sum(p => p.Amount));
+
+            // A write-off this size is the single largest discretionary markdown possible on
+            // a bill — the same leakage risk ApplyBillDiscount/Refund already guard against,
+            // so it gets the same Owner-only escalation above the threshold (a Manager's own
+            // comp still goes straight through below it; an Owner's always does, since the
+            // Owner IS the approver — see ApprovalThresholds). Held atomically: nothing on
+            // this Pay call is applied, even a Cash/Card leg bundled alongside it — the common
+            // case for a write-off this size is comping the whole bill in one tender, not a
+            // complex split.
+            if (!User.IsInRole(nameof(AppRole.Owner)) && complimentaryAmount > ApprovalThresholds.DiscountAmount)
+            {
+                db.Approvals.Add(new ApprovalRequest
+                {
+                    Type = ApprovalType.Complimentary,
+                    RequestedById = CurrentUserId() ?? 0,
+                    Title = $"Complimentary bill — Order #{order.Id}",
+                    Description = req.ComplimentaryReason!.Trim(),
+                    Amount = complimentaryAmount,
+                    LinkedEntityId = order.Id,
+                });
+                await db.SaveChangesAsync();
+                return Accepted(new { pendingApproval = true, message = $"Complimentary write-off of {complimentaryAmount:C} needs Owner approval (above the {ApprovalThresholds.DiscountAmount:C} auto-approve limit) — sent to Approvals." });
+            }
+        }
+
         // How much of this settle is credit rather than money in the till. Set by whichever
         // branch below runs; drives the khata entry recorded just before the bill closes.
         decimal dueAmount = 0;
@@ -1841,6 +1892,11 @@ public class OrdersController(
             // common case (a regular who pays nothing at the counter today).
             if (IsDue(method)) dueAmount = owed;
         }
+
+        // Stamp the write-off reason once — whichever branch above ran, every Complimentary
+        // leg came out of the same request, so there's exactly one reason for the whole bill.
+        if (complimentaryLegs > 0)
+            order.ComplimentaryReason = req!.ComplimentaryReason!.Trim();
 
         // Everything below this point is the bill actually closing, so the khata row goes in
         // first: a failure here (no name, no mobile) has to abort the settle rather than leave
@@ -1972,30 +2028,10 @@ public class OrdersController(
     /// settled" transition, shared by Pay (once a payment fully covers the balance) and Close
     /// (finalizing a KeepOpen/Pay First order that already covers its balance with no further
     /// payment to collect). See PayRequest.KeepOpen.</summary>
-    private async Task CloseOrderAsync(Order order)
-    {
-        order.Paid = true;
-
-        // Re-roll the status now that Paid has flipped: any leftover unfired line stops counting
-        // as outstanding kitchen work the moment the bill closes (see
-        // OrderBuildingService.RecomputeOrderStatus). Without this the order stayed pinned at New
-        // with no way back — Fire/AddItem/RemoveItem/Cancel all refuse a paid order — so its table
-        // could never be freed again.
-        OrderBuildingService.RecomputeOrderStatus(order);
-
-        // Guest-session settle hook (doc Section 5.1): the exact instant a table's bill
-        // is settled, close its GuestSession too — this is what makes the old phone's
-        // cookie start getting 410s immediately instead of staying usable until the
-        // next expiry sweep. IgnoreQueryFilters: an anonymous QR settle has no JWT tenant.
-        var session = await db.GuestSessions.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(s => s.OrderId == order.Id && (s.Status == GuestSessionStatus.Active || s.Status == GuestSessionStatus.Locked));
-        if (session is not null)
-        {
-            session.Status = GuestSessionStatus.Closed;
-            session.ClosedReason = SessionCloseReason.Settled;
-            session.ClosedAt = DateTime.UtcNow;
-        }
-    }
+    // Body lives on OrderBuildingService now — ApprovalsController needs the exact same
+    // Paid-flip/GuestSession-close sequence for a Complimentary write-off that only executes
+    // once an Owner approves it, well after this controller's own Pay call already returned.
+    private Task CloseOrderAsync(Order order) => OrderBuildingService.CloseOrderAsync(db, order);
 
     /// <summary>Finalizes a KeepOpen (Pay First) order once no more items are going to be
     /// added — the payment already recorded fully covers the balance, so there's nothing new
