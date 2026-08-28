@@ -180,12 +180,19 @@ public class PublicController(
     }
 
     /// <summary>
-    /// What the customer's own confirmation screen polls while Staff-Confirm Mode holds their
-    /// order — "has the cafe looked at this yet". Deliberately the bare minimum: pending/
-    /// cancelled and a total, nothing about who else ordered or what's in any other order. The
-    /// token (not the order id) is what's public, for the same reason GetReceipt below uses one
-    /// — Order.Id is a small sequential integer, and a plain /orders/{id}/status route would
-    /// let anyone holding the printed delivery QR walk every order this cafe has ever taken.
+    /// What the customer's own tracking screen polls, from the moment the order is placed all
+    /// the way through to settlement — "where is my order now". Deliberately the bare minimum:
+    /// pending/cancelled/kitchen-stage/paid and a total, nothing about who else ordered or what's
+    /// in any other order. The token (not the order id) is what's public, for the same reason
+    /// GetReceipt below uses one — Order.Id is a small sequential integer, and a plain
+    /// /orders/{id}/status route would let anyone holding the printed delivery QR walk every
+    /// order this cafe has ever taken.
+    ///
+    /// Status/Paid were added alongside PendingStaffConfirmation rather than replacing it: the
+    /// page still needs to tell "cafe hasn't looked yet" apart from "cafe has it and is cooking"
+    /// even though both precede Ready. Paid is the actual terminal signal — CustomerOrderPage
+    /// stops polling on it, not on Status, since a delivery order can sit at Served for a while
+    /// before the cafe settles it at the door/on handoff.
     /// </summary>
     [HttpGet("delivery-order-status/{orderToken}")]
     public async Task<ActionResult<object>> DeliveryOrderStatus(string orderToken, CancellationToken ct)
@@ -202,6 +209,8 @@ public class PublicController(
             order.Cancelled,
             order.CancelReason,
             order.Total,
+            Status = order.Status.ToString(),
+            order.Paid,
             CourierTrackingUrl = order.CourierTrackingUrl,
         };
     }

@@ -466,6 +466,9 @@ public static class CustomerOrderPage
     <div class="waiting-spinner"></div>
     <h2>Order sent — waiting for staff to confirm</h2>
     <p>Someone from the team will confirm your order in a moment before it goes to the kitchen.</p>
+    <!-- Delivery-only: a rider tracking link once one's booked, repurposed as the bill-download
+         link once the order is paid (see startDeliveryStatusPolling). Hidden otherwise. -->
+    <a class="place-btn pdf-btn" id="waiting-track-link" target="_blank" rel="noopener" style="display:none"></a>
   </div>
 
   <div id="placed-screen" class="wrap">
@@ -558,7 +561,10 @@ public static class CustomerOrderPage
   var apiBase = '/api/public/' + encodeURIComponent(token);
   var sessionBase = apiBase + '/session';
   var state = {
-    table: null, menu: [], bestSellers: [], taxRatePct: 8, cart: {}, browseOnly: false,
+    // 0 (not a guessed flat rate) until /settings resolves — this only feeds the live
+    // pre-order cart preview below, never a settled bill's own tax figure.
+    table: null, menu: [], bestSellers: [], taxRatePct: 0, cart: {}, browseOnly: false,
+    settings: null, // full CafeSettings from /settings — gstNumber/licenceNumber/etc for the bill
     order: null, // last known OrderDto from the server (session-scoped), or null
     vegOnly: false,
     // True while the guest is deliberately on the menu building a follow-up round after an
@@ -629,6 +635,66 @@ public static class CustomerOrderPage
   }
 
   function money(n) { return '₹' + n.toFixed(2); }
+
+  /** Halves a GST figure into its CGST/SGST components in whole paise, the odd paise going to
+   * SGST — mirrors the app's own splitGst (receiptFormat.ts / GstSplit.cs) exactly, so this
+   * page's bill, the printed slip and the WhatsApp PDF of the SAME order always state
+   * identical tax, never off by a rounding paisa from each other. */
+  function splitGst(taxAmount) {
+    var totalPaise = Math.round(taxAmount * 100);
+    var cgstPaise = Math.floor(totalPaise / 2);
+    return { cgst: cgstPaise / 100, sgst: (totalPaise - cgstPaise) / 100 };
+  }
+
+  /** One row per GST slab the order was actually billed at — mirrors buildTaxBreakdown in
+   * receiptFormat.ts. A mixed 5%/12% order has to show two taxable-value-and-tax rows, not
+   * one combined figure, for this to be a valid tax invoice rather than just a receipt. */
+  function buildTaxBreakdown(items, fallbackRatePct) {
+    var byRate = {};
+    (items || []).forEach(function (item) {
+      if (item.taxAmount === undefined && item.taxableAmount === undefined) return;
+      var rate = (item.taxRatePct === null || item.taxRatePct === undefined) ? fallbackRatePct : item.taxRatePct;
+      var entry = byRate[rate] || { taxableAmount: 0, taxAmount: 0 };
+      entry.taxableAmount += item.taxableAmount || 0;
+      entry.taxAmount += item.taxAmount || 0;
+      byRate[rate] = entry;
+    });
+    return Object.keys(byRate).map(Number).sort(function (a, b) { return a - b; }).map(function (rate) {
+      var sums = byRate[rate];
+      var split = splitGst(sums.taxAmount);
+      return { ratePct: rate, taxableAmount: sums.taxableAmount, taxAmount: sums.taxAmount, halfRatePct: rate / 2, cgstAmount: split.cgst, sgstAmount: split.sgst };
+    });
+  }
+
+  /** The blended rate an order was actually billed at, for a tax-row LABEL only — never for
+   * the amount, which always comes straight off order.tax. Mirrors inferTaxRatePct in
+   * receiptFormat.ts: the taxable base is what's left after every reduction (not just the
+   * plain discount) is carved out first, matching RecomputeTotals' own order of operations. */
+  function inferTaxRatePct(order) {
+    var reductions = (order.discountAmount || 0) + (order.offerDiscountAmount || 0) + (order.billDiscountAmount || 0) +
+      (order.couponDiscountAmount || 0) + (order.giftCardAmountApplied || 0) + (order.loyaltyDiscountAmount || 0);
+    var taxable = order.subtotal - reductions;
+    return taxable > 0 ? Math.round((order.tax / taxable) * 1000) / 10 : 0;
+  }
+
+  var IST_RECEIPT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  /** "26 Aug, 02:07 PM" — the cafe's own wall-clock, not the guest's phone's. A guest scanning
+   * from a phone set to a different timezone must still see the same time the printed slip and
+   * WhatsApp PDF of this order show (both computed IST-side — see backend IstClock.ToIst and
+   * the app's formatIstReceiptTime); reading the raw instant with toLocaleString would read the
+   * PHONE's timezone instead. */
+  function formatIstDateTime(iso) {
+    var IST_OFFSET_MS = 330 * 60 * 1000;
+    var d = new Date(new Date(iso).getTime() + IST_OFFSET_MS);
+    var day = d.getUTCDate();
+    var month = IST_RECEIPT_MONTHS[d.getUTCMonth()];
+    var hour = d.getUTCHours();
+    var minute = ('0' + d.getUTCMinutes()).slice(-2);
+    var ampm = hour >= 12 ? 'PM' : 'AM';
+    hour = hour % 12 || 12;
+    return day + ' ' + month + ', ' + ('0' + hour).slice(-2) + ':' + minute + ' ' + ampm;
+  }
 
   function showError(msg) {
     var b = document.getElementById('error-banner');
@@ -923,16 +989,100 @@ public static class CustomerOrderPage
     document.getElementById('bill-table-line').textContent = document.getElementById('table-line').textContent;
     var linesEl = document.getElementById('bill-lines');
     linesEl.innerHTML = '';
-    if (s.order) {
-      (s.order.items || []).forEach(function (item) {
-        var row = el('div', 'bill-line');
-        var desc = lineDescriptor(item);
-        row.appendChild(el('span', null, item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : '')));
-        row.appendChild(el('span', null, money(item.price * item.qty)));
+    var order = s.order;
+    if (order) {
+      var settings = state.settings || {};
+
+      var addRow = function (label, amount, opts) {
+        opts = opts || {};
+        var row = el('div', 'bill-line' + (opts.total ? ' total' : ''));
+        var labelSpan = el('span', null, label);
+        var amountSpan = el('span', null, amount);
+        // Matches the app's own discount color (BillingScreen's styles.positive) — a reduction
+        // reads differently from a charge at a glance, on the one document a guest studies
+        // closely before paying.
+        if (opts.positive) { labelSpan.style.color = 'var(--success)'; amountSpan.style.color = 'var(--success)'; }
+        row.appendChild(labelSpan);
+        row.appendChild(amountSpan);
         linesEl.appendChild(row);
+      };
+
+      // Order number + cafe wall-clock time, GSTIN, Licence No — the same header fields the
+      // printed slip and WhatsApp PDF of this very order carry (see ReceiptPdfBuilder /
+      // receiptFormat.ts), so whichever copy the guest ends up holding states the same bill.
+      var infoLine = el('div', null, 'Order ' + order.number + ' · ' + formatIstDateTime(order.createdAt));
+      infoLine.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:6px';
+      linesEl.appendChild(infoLine);
+      if (settings.gstNumber) {
+        var gstLine = el('div', null, 'GSTIN: ' + settings.gstNumber);
+        gstLine.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:2px';
+        linesEl.appendChild(gstLine);
+      }
+      if (settings.licenceNumber) {
+        var licLine = el('div', null, 'Licence No: ' + settings.licenceNumber);
+        licLine.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:10px';
+        linesEl.appendChild(licLine);
+      }
+
+      // Cancelled lines are on the order forever (KOT/void history) but never on the bill —
+      // the guest was not charged for them (RecomputeTotals sums live lines only). Unfired
+      // (still-in-cart) lines DO stay in: RecomputeTotals counts every non-voided line
+      // regardless of fireBatch, so an unfired line is already inside Subtotal/Total below —
+      // dropping it here would itemise to less than the total beneath it.
+      var items = (order.items || []).filter(function (i) { return !i.voided; });
+      items.forEach(function (item) {
+        var desc = lineDescriptor(item);
+        addRow(item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : ''), money(item.price * item.qty));
       });
-      linesEl.appendChild((function () { var r = el('div', 'bill-line'); r.appendChild(el('span', null, 'Tax')); r.appendChild(el('span', null, money(s.order.tax))); return r; })());
-      linesEl.appendChild((function () { var r = el('div', 'bill-line total'); r.appendChild(el('span', null, 'Total')); r.appendChild(el('span', null, money(s.order.total))); return r; })());
+
+      addRow('Subtotal', money(order.subtotal));
+      // Every row below prints only when it actually fired — a bill with nothing applied
+      // renders exactly the plain Subtotal/Tax/Total it always did.
+      if (order.discountAmount > 0) {
+        addRow(order.discountPct ? 'Discount (' + order.discountPct + '%)' : 'Discount', '−' + money(order.discountAmount), { positive: true });
+      }
+      if (order.billDiscountAmount > 0) addRow('Bill Discount', '−' + money(order.billDiscountAmount), { positive: true });
+      if (order.couponDiscountAmount > 0) {
+        addRow(order.couponCode ? 'Coupon (' + order.couponCode + ')' : 'Coupon', '−' + money(order.couponDiscountAmount), { positive: true });
+      }
+      if (order.offerDiscountAmount > 0) {
+        addRow((order.appliedOfferTitle && order.appliedOfferTitle.trim()) || 'Offer', '−' + money(order.offerDiscountAmount), { positive: true });
+      }
+      if (order.giftCardAmountApplied > 0) {
+        addRow(order.giftCardCode ? 'Gift Card (' + order.giftCardCode + ')' : 'Gift Card', '−' + money(order.giftCardAmountApplied), { positive: true });
+      }
+      if (order.loyaltyDiscountAmount > 0) {
+        addRow(order.loyaltyPointsRedeemed ? 'Loyalty Points (' + order.loyaltyPointsRedeemed + ')' : 'Loyalty Points', '−' + money(order.loyaltyDiscountAmount), { positive: true });
+      }
+
+      // One pair of rows per slab when the bill mixes rates, each a CGST/SGST half — a tax
+      // invoice has to state the two components separately (see splitGst).
+      var taxBreakdown = buildTaxBreakdown(items, state.taxRatePct);
+      if (order.tax <= 0) {
+        addRow('Tax', money(order.tax));
+      } else if (taxBreakdown.length > 1) {
+        taxBreakdown.forEach(function (slab) {
+          addRow('CGST ' + slab.halfRatePct + '% on ' + money(slab.taxableAmount), money(slab.cgstAmount));
+          addRow('SGST ' + slab.halfRatePct + '% on ' + money(slab.taxableAmount), money(slab.sgstAmount));
+        });
+      } else {
+        var ratePct = taxBreakdown[0] ? taxBreakdown[0].ratePct : inferTaxRatePct(order);
+        var split = splitGst(order.tax);
+        addRow('CGST (' + (ratePct / 2) + '%)', money(split.cgst));
+        addRow('SGST (' + (ratePct / 2) + '%)', money(split.sgst));
+      }
+
+      // Charges are added on top of tax by RecomputeTotals, not taxed themselves — printed
+      // below the GST rows so the invoice doesn't imply they were.
+      if (order.serviceChargeAmount > 0) addRow('Service Charge', money(order.serviceChargeAmount));
+      if (order.packingChargeAmount > 0) addRow('Packing Charge', money(order.packingChargeAmount));
+      if (order.deliveryChargeAmount > 0) addRow('Delivery Charge', money(order.deliveryChargeAmount));
+      if (order.tipAmount > 0) addRow('Tip', money(order.tipAmount));
+      if (order.roundOffAmount) {
+        addRow('Round Off', (order.roundOffAmount > 0 ? '+' : '−') + money(Math.abs(order.roundOffAmount)));
+      }
+
+      addRow('Total', money(order.total), { total: true });
     }
     document.getElementById('bill-screen').style.display = 'block';
     // Ordering is closed once LOCKED, but polling has to keep running: settling is what ends
@@ -1988,13 +2138,16 @@ public static class CustomerOrderPage
   /**
    * The delivery twin of the dine-in session poll, reading a status endpoint scoped to this one
    * order's own signed token rather than the shared guest session this flow never has (see
-   * PublicController.DeliveryOrderStatus). Runs only while a real reason exists to keep asking —
-   * pending confirmation — and stops itself the moment that stops being true, one way or the
-   * other, so it can never poll forever nor overlap a previous call still in flight.
+   * PublicController.DeliveryOrderStatus). Keeps polling all the way through to settlement —
+   * `paid` is the only terminal signal, since a delivery order can sit confirmed, then out for
+   * a rider, for a while before the cafe actually settles it — so a customer who scanned once
+   * always ends up somewhere true, never stuck on a screen that stopped matching reality.
    */
   function startDeliveryStatusPolling(orderToken) {
     stopDeliveryStatusPolling();
     var checking = false;
+    var screen = document.getElementById('waiting-screen');
+    var trackLink = document.getElementById('waiting-track-link');
     deliveryStatusTimer = setInterval(function () {
       if (checking) return; // a slow response must not let two checks race each other
       checking = true;
@@ -2008,17 +2161,36 @@ public static class CustomerOrderPage
               : 'The cafe declined this order. Please call them if you\'d like to know why.');
             return;
           }
-          if (!s.pendingStaffConfirmation) {
-            // Confirmed — the kitchen has it now. There is no live item/status list to show
-            // (this order was never tracked client-side the way a table session is), so this
-            // simply says so rather than presenting a placed-screen it can't honestly fill in.
+          if (s.pendingStaffConfirmation) return; // original "waiting for staff" copy still stands
+
+          if (s.paid) {
+            // The cafe has settled this order at handoff — nothing left to poll for.
             stopDeliveryStatusPolling();
-            hideAllScreens();
-            document.getElementById('waiting-screen').querySelector('h2').textContent = 'Confirmed — your order is being prepared';
-            document.getElementById('waiting-screen').querySelector('p').textContent =
-              'The cafe has accepted your order. Sit tight — they’ll get it on its way to you.';
-            document.getElementById('waiting-screen').style.display = 'flex';
+            screen.querySelector('.waiting-spinner').style.display = 'none';
+            screen.querySelector('h2').textContent = 'Delivered — thanks for ordering!';
+            screen.querySelector('p').textContent = 'Your order has been handed over and the bill is settled.';
+            trackLink.href = '/api/public/receipt/' + encodeURIComponent(orderToken);
+            trackLink.textContent = 'Download Bill (PDF)';
+            trackLink.style.display = 'block';
+            return;
           }
+
+          if (s.courierTrackingUrl) {
+            screen.querySelector('h2').textContent = 'Out for delivery';
+            screen.querySelector('p').textContent = 'Your rider is on the way.';
+            trackLink.href = s.courierTrackingUrl;
+            trackLink.textContent = 'Track your rider';
+            trackLink.style.display = 'block';
+            return;
+          }
+
+          // Confirmed and no rider booked/tracked yet — no live item list to show beyond the
+          // kitchen stage, so this simply says so rather than presenting a placed-screen it
+          // can't honestly fill in.
+          screen.querySelector('h2').textContent =
+            s.status === 'Ready' ? 'Ready — heading out shortly' : 'Confirmed — your order is being prepared';
+          screen.querySelector('p').textContent =
+            'The cafe has accepted your order. Sit tight — they’ll get it on its way to you.';
         })
         .catch(function () { checking = false; }); // transient network blip — the next tick retries
     }, 5000);
@@ -2160,6 +2332,7 @@ public static class CustomerOrderPage
       // same endpoint and must still see them, which is why the filter lives here.
       state.menu = results[1].filter(function (m) { return !m.isOpenPrice; });
       state.taxRatePct = results[2].taxRatePct;
+      state.settings = results[2];
       state.bestSellers = results[3];
 
       document.getElementById('business-name').textContent = results[2].businessName || 'CafePOS';
