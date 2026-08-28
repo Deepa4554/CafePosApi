@@ -239,6 +239,11 @@ public record OrderDto(
     // behind UI that hides itself when Borzo is off.
     string? DeliveryAddress,
     bool HasDeliveryLocation,
+    // The customer's shared pin, when they granted location — lets a self-delivered order open
+    // turn-by-turn directions instead of making whoever's riding out there re-geocode a
+    // hand-typed address. Null whenever HasDeliveryLocation is false.
+    decimal? DeliveryLatitude,
+    decimal? DeliveryLongitude,
     List<OrderItemDto> Items,
     decimal Subtotal,
     decimal DiscountPct,
@@ -313,6 +318,8 @@ public record OrderDto(
         o.CustomerId,
         o.DeliveryAddress,
         o.DeliveryLatitude is not null && o.DeliveryLongitude is not null,
+        o.DeliveryLatitude,
+        o.DeliveryLongitude,
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
             i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt,
             i.VariantId, i.VariantName, i.SelectedModifiers.Select(SelectedModifierDto.From).ToList(), i.StationName,
