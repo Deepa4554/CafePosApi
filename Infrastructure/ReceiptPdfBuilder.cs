@@ -14,6 +14,40 @@ namespace CafePOS.Api.Infrastructure;
 /// </summary>
 public static class ReceiptPdfBuilder
 {
+    /// <summary>One billing-time reduction or charge line, in the order they print. Split out
+    /// of Build so the "what goes on the bill" decision — a row only when it actually fired —
+    /// is a plain, PDF-independent function that can be unit tested without rendering a PDF
+    /// (see ReceiptPdfBuilderTests). Mirrors receiptFormat.ts's pushReduction/pushCharge on the
+    /// printed slip of the same order, so both documents state the identical set of rows.</summary>
+    public readonly record struct BillAdjustmentLine(string Label, decimal Amount, bool IsReduction);
+
+    /// <summary>Every reduction/charge row RecomputeTotals folded into Order.Total, gated on
+    /// having actually fired — an order with nothing applied returns an empty list, so the PDF
+    /// renders exactly the plain Subtotal/Tax/Total it always did. Round Off is handled
+    /// separately by the caller: unlike these, its sign can go either way.</summary>
+    public static List<BillAdjustmentLine> BuildAdjustmentLines(Order order)
+    {
+        var lines = new List<BillAdjustmentLine>();
+        void Reduction(string label, decimal amount) { if (amount > 0) lines.Add(new BillAdjustmentLine(label, amount, true)); }
+        void Charge(string label, decimal amount) { if (amount > 0) lines.Add(new BillAdjustmentLine(label, amount, false)); }
+
+        Reduction("Discount", order.DiscountAmount);
+        Reduction("Bill Discount", order.BillDiscountAmount);
+        Reduction(string.IsNullOrWhiteSpace(order.CouponCode) ? "Coupon" : $"Coupon ({order.CouponCode})", order.CouponDiscountAmount);
+        // Name the offer that fired ("Buy 2 Get 1 — Coffee") so the customer sees why the bill
+        // dropped, not an unexplained line.
+        Reduction(string.IsNullOrWhiteSpace(order.AppliedOfferTitle) ? "Offer" : order.AppliedOfferTitle, order.OfferDiscountAmount);
+        Reduction(string.IsNullOrWhiteSpace(order.GiftCardCode) ? "Gift Card" : $"Gift Card ({order.GiftCardCode})", order.GiftCardAmountApplied);
+        Reduction(order.LoyaltyPointsRedeemed > 0 ? $"Loyalty Points ({order.LoyaltyPointsRedeemed})" : "Loyalty Points", order.LoyaltyDiscountAmount);
+        // Charges are added on top of tax by RecomputeTotals, not taxed themselves — printed
+        // below the GST rows (see Build) so the invoice doesn't imply they were.
+        Charge("Service Charge", order.ServiceChargeAmount);
+        Charge("Packing Charge", order.PackingChargeAmount);
+        Charge("Delivery Charge", order.DeliveryChargeAmount);
+        Charge("Tip", order.TipAmount);
+        return lines;
+    }
+
     /// <param name="logo">The cafe's logo image bytes, or null. Optional so a bill still
     /// renders when the logo is missing or its host is unreachable — see CafeLogoLoader.</param>
     public static byte[] Build(CafeSettings settings, Order order, byte[]? logo = null)
@@ -39,10 +73,15 @@ public static class ReceiptPdfBuilder
                         col.Item().AlignCenter().Height(45).Image(logo).FitArea();
 
                     col.Item().AlignCenter().Text(businessName).FontSize(16).Bold();
-                    if (!string.IsNullOrWhiteSpace(settings.Address))
+                    // Receipt Builder toggle (see Cafe Settings → Receipt Builder) — the printed
+                    // slip already honours this (receiptFormat.ts); the PDF ignored it entirely,
+                    // so a cafe that turned the address off still had it on every WhatsApp bill.
+                    if (!string.IsNullOrWhiteSpace(settings.Address) && settings.ReceiptShowAddress)
                         col.Item().AlignCenter().Text(settings.Address).FontSize(8);
                     if (!string.IsNullOrWhiteSpace(settings.Phone))
                         col.Item().AlignCenter().Text(settings.Phone).FontSize(8);
+                    if (!string.IsNullOrWhiteSpace(settings.GstNumber))
+                        col.Item().AlignCenter().Text($"GSTIN: {settings.GstNumber}").FontSize(8);
                     // Last of the header block: a licence number is something an inspector or
                     // a customer looks up, not something anyone reads first.
                     if (!string.IsNullOrWhiteSpace(settings.LicenceNumber))
@@ -58,6 +97,11 @@ public static class ReceiptPdfBuilder
                     col.Item().Text($"{IstClock.ToIst(order.CreatedAt):dd MMM yyyy, hh:mm tt}").FontSize(8);
                     if (!string.IsNullOrWhiteSpace(order.GuestName))
                         col.Item().Text($"Guest: {order.GuestName}").FontSize(9);
+                    var waiterName = order.ServedByName ?? order.CreatedByName;
+                    if (!string.IsNullOrWhiteSpace(waiterName) && settings.ReceiptShowWaiterName)
+                        col.Item().Text($"Waiter: {waiterName}").FontSize(9);
+                    if (!string.IsNullOrWhiteSpace(order.GuestPhone) && settings.ReceiptShowGuestPhone)
+                        col.Item().Text($"Mobile: {order.GuestPhone}").FontSize(9);
 
                     col.Item().PaddingTop(6).LineHorizontal(0.5f);
 
@@ -69,9 +113,13 @@ public static class ReceiptPdfBuilder
                     foreach (var item in order.Items.Where(i => !i.Voided))
                     {
                         var variantSuffix = item.VariantName is null ? "" : $" ({item.VariantName})";
+                        // Free-text kitchen note, gated on Receipt Builder's own toggle — the
+                        // printed slip already respects this (receiptFormat.ts's showItemNotes).
+                        var modifierSuffix = !settings.ReceiptShowItemNotes || string.IsNullOrWhiteSpace(item.Modifier)
+                            ? "" : $" — {item.Modifier}";
                         col.Item().Row(row =>
                         {
-                            row.RelativeItem(3).Text($"{item.Qty}x {item.Name}{variantSuffix}{(string.IsNullOrWhiteSpace(item.Modifier) ? "" : $" — {item.Modifier}")}");
+                            row.RelativeItem(3).Text($"{item.Qty}x {item.Name}{variantSuffix}{modifierSuffix}");
                             row.RelativeItem(1).AlignRight().Text($"{item.Price * item.Qty:0.00}");
                         });
                         foreach (var mod in item.SelectedModifiers)
@@ -80,27 +128,26 @@ public static class ReceiptPdfBuilder
 
                     col.Item().PaddingTop(6).LineHorizontal(0.5f);
 
+                    // Every row below prints only when it actually fired, so a bill with
+                    // nothing applied renders exactly the plain Subtotal/Tax/Total it always
+                    // did (see BuildAdjustmentLines). Split into reductions and charges because
+                    // that's where RecomputeTotals places each: reductions come off the taxable
+                    // base, so they print before the GST rows; charges are added on top of tax,
+                    // so they print after — printing a charge above the tax rows would state on
+                    // the invoice that it had been taxed.
+                    var adjustmentLines = BuildAdjustmentLines(order);
+
                     col.Item().Row(row =>
                     {
                         row.RelativeItem().Text("Subtotal");
                         row.RelativeItem().AlignRight().Text($"{order.Subtotal:0.00}");
                     });
-                    if (order.DiscountAmount > 0)
+                    foreach (var line in adjustmentLines.Where(l => l.IsReduction))
                     {
                         col.Item().Row(row =>
                         {
-                            row.RelativeItem().Text("Discount");
-                            row.RelativeItem().AlignRight().Text($"-{order.DiscountAmount:0.00}");
-                        });
-                    }
-                    if (order.OfferDiscountAmount > 0)
-                    {
-                        col.Item().Row(row =>
-                        {
-                            // Name the offer that fired ("Buy 2 Get 1 — Coffee") so the customer
-                            // sees why the bill dropped, not an unexplained line.
-                            row.RelativeItem().Text(string.IsNullOrWhiteSpace(order.AppliedOfferTitle) ? "Offer" : order.AppliedOfferTitle);
-                            row.RelativeItem().AlignRight().Text($"-{order.OfferDiscountAmount:0.00}");
+                            row.RelativeItem().Text(line.Label);
+                            row.RelativeItem().AlignRight().Text($"-{line.Amount:0.00}");
                         });
                     }
                     // One row per tax slab on the bill — a mixed 5%/12% order has to show the
@@ -157,6 +204,26 @@ public static class ReceiptPdfBuilder
                         }
                     }
 
+                    foreach (var line in adjustmentLines.Where(l => !l.IsReduction))
+                    {
+                        col.Item().Row(row =>
+                        {
+                            row.RelativeItem().Text(line.Label);
+                            row.RelativeItem().AlignRight().Text($"{line.Amount:0.00}");
+                        });
+                    }
+                    if (order.RoundOffAmount != 0)
+                    {
+                        // The sign is the whole point of this row — a bare figure printed
+                        // against a total that went down reads as an unexplained charge.
+                        var sign = order.RoundOffAmount > 0 ? "+" : "-";
+                        col.Item().Row(row =>
+                        {
+                            row.RelativeItem().Text("Round Off");
+                            row.RelativeItem().AlignRight().Text($"{sign}{Math.Abs(order.RoundOffAmount):0.00}");
+                        });
+                    }
+
                     col.Item().PaddingTop(4).LineHorizontal(0.5f);
 
                     col.Item().Row(row =>
@@ -197,9 +264,12 @@ public static class ReceiptPdfBuilder
                         col.Item().PaddingTop(2).AlignCenter().Text(settings.UpiVpa).FontSize(8);
                     }
 
-                    col.Item().PaddingTop(10).AlignCenter().Text(
-                        string.IsNullOrWhiteSpace(settings.ReceiptFooter) ? "Thank you for visiting!" : settings.ReceiptFooter
-                    ).FontSize(9).Italic();
+                    if (settings.ReceiptShowFooter)
+                    {
+                        col.Item().PaddingTop(10).AlignCenter().Text(
+                            string.IsNullOrWhiteSpace(settings.ReceiptFooter) ? "Thank you for visiting!" : settings.ReceiptFooter
+                        ).FontSize(9).Italic();
+                    }
                 });
             });
         }).GeneratePdf();

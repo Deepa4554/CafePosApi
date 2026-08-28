@@ -12,8 +12,11 @@ public static class IstClock
 {
     public static readonly TimeSpan Offset = TimeSpan.FromMinutes(330);
 
-    /// <summary>The current wall-clock time at the cafe (Kind left Unspecified — this is
-    /// a display/bucketing value, never store it).</summary>
+    /// <summary>The current wall-clock time at the cafe. A display/bucketing value — never
+    /// store it, and never put it in a DTO: adding a TimeSpan keeps Kind = Utc, so this comes
+    /// out holding IST wall-clock while still claiming to be UTC. System.Text.Json would stamp
+    /// it with a "Z" and the client would shift it a second time (see DeliveryController's
+    /// ToOffset note). Format it to a string, or use IstDateStartUtc for a real instant.</summary>
     public static DateTime NowIst => DateTime.UtcNow + Offset;
 
     /// <summary>Shifts a stored-UTC timestamp to cafe wall-clock time for day/hour bucketing.</summary>

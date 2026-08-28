@@ -224,7 +224,11 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         DateOnly? tokenDate = null;
         if (orderType == "QSR")
         {
-            tokenDate = DateOnly.FromDateTime(DateTime.UtcNow);
+            // The cafe's calendar day, not UTC's (see IstClock) — TokenDate is what scopes the
+            // daily reset, and a UTC date rolls over at 05:30 IST. A counter open across that
+            // moment used to carry yesterday's sequence until 5:30 AM and then restart at #1
+            // mid-service, handing out the same token number twice in one morning.
+            tokenDate = DateOnly.FromDateTime(IstClock.NowIst);
             tokenNumber = await NextTokenNumberAsync(db, effectiveTenantId, tokenDate.Value);
         }
 
