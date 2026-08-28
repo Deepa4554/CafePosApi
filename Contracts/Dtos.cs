@@ -233,6 +233,12 @@ public record OrderDto(
     string? GuestName,
     string? GuestPhone,
     int? CustomerId,
+    // Where a DELIVERY order is going. Carried on the general order shape (not just
+    // DeliveryStatusDto/RiderBookingCard) so a cafe with no courier configured — doing its own
+    // deliveries — can still see the address on the order itself instead of it only existing
+    // behind UI that hides itself when Borzo is off.
+    string? DeliveryAddress,
+    bool HasDeliveryLocation,
     List<OrderItemDto> Items,
     decimal Subtotal,
     decimal DiscountPct,
@@ -305,6 +311,8 @@ public record OrderDto(
         o.GuestName,
         o.GuestPhone,
         o.CustomerId,
+        o.DeliveryAddress,
+        o.DeliveryLatitude is not null && o.DeliveryLongitude is not null,
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
             i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt,
             i.VariantId, i.VariantName, i.SelectedModifiers.Select(SelectedModifierDto.From).ToList(), i.StationName,
