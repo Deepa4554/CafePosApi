@@ -173,6 +173,9 @@ builder.Services.AddScoped<IOrderBuildingService, OrderBuildingService>();
 builder.Services.AddScoped<IGuestSessionService, GuestSessionService>();
 builder.Services.AddHostedService<GuestSessionSweepService>();
 
+// ---------- Realtime liveness (see HeartbeatService, ordersRealtime.ts's socketLiveness) ----------
+builder.Services.AddHostedService<HeartbeatService>();
+
 // ---------- Email (cafe-signup OTP) ----------
 // Sends via Brevo's HTTPS API if Email:BrevoApiKey/SenderEmail are configured; otherwise
 // logs the code so local dev isn't blocked. See appsettings.Development.json.
