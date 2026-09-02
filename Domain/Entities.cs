@@ -348,6 +348,15 @@ public class Order : ITenantScoped
     public decimal CouponDiscountAmount { get; set; }
     public decimal Tax { get; set; }
     public decimal Total { get; set; }
+    /// <summary>Set at settle time when the tender this bill was paid with isn't one the cafe
+    /// charges tax on — see CafeSettings.TaxByPaymentModeEnabled and Infrastructure.PaymentModeTax.
+    /// While it's true RecomputeTotals bills every line at 0%, so the FLAG (not the caller) is what
+    /// keeps a later recompute — an approved discount, an added item on a Pay First order — from
+    /// quietly putting the tax back on a bill that was settled without it.
+    ///
+    /// Always false unless the cafe has switched that setting on, which is what makes every
+    /// existing bill, and every cafe that never touches it, recompute exactly as before.</summary>
+    public bool TaxSuppressed { get; set; }
     /// <summary>Set when a coupon was redeemed against this order at billing time — its
     /// value lives in CouponDiscountAmount above.</summary>
     public string? CouponCode { get; set; }
@@ -708,6 +717,22 @@ public class CafeSettings : ITenantScoped
     /// see <see cref="TaxGroup"/> for the full resolution order.</summary>
     public decimal TaxRatePct { get; set; } = 0;
 
+    /// <summary>Charge tax only on the tenders listed in <see cref="TaxablePaymentModes"/>,
+    /// instead of on every bill regardless of how it was settled. Off by default, and while
+    /// it's off nothing about tax changes anywhere — this is deliberately opt-in, because it is
+    /// NOT how GST works: the tax is due on the supply, not on the customer's choice of tender.
+    /// A cafe that turns it on is choosing a billing policy its own accountant has to stand
+    /// behind; the app just stops assuming otherwise. See Infrastructure.PaymentModeTax.</summary>
+    public bool TaxByPaymentModeEnabled { get; set; }
+
+    /// <summary>Comma-separated tenders that DO carry tax while the switch above is on, e.g.
+    /// "UPI,Card". Matched case-insensitively against OrdersController's payment methods
+    /// (Cash/Card/UPI/Due/Complimentary) and stored in their canonical casing, so "upi" and
+    /// "UPI" can't behave differently. Blank means no tender is taxable, which is a real
+    /// (if drastic) choice rather than "not configured" — the switch above is what turns the
+    /// feature off.</summary>
+    public string TaxablePaymentModes { get; set; } = "";
+
     // Language & Region
     public string Currency { get; set; } = "INR (₹)";
     public string Region { get; set; } = "Asia/Kolkata";
@@ -918,6 +943,19 @@ public class CafeSettings : ITenantScoped
     /// bill and on a QR sticker at the counter), not a credential. Knowing it lets someone
     /// send money to this cafe, nothing else.</summary>
     public string? UpiVpa { get; set; }
+
+    /// <summary>Where the "Rate us on Google" QR at the foot of a bill points. Null/blank means
+    /// the cafe hasn't set one up and no review QR appears anywhere — exactly the same
+    /// "configured or absent" rule as UpiVpa above, and for the same reason: a review block
+    /// nobody can scan is worse than no block at all.
+    ///
+    /// Stored as a finished https:// URL, never as the raw thing an Owner pasted — see
+    /// Infrastructure.GoogleReviewLink, which also accepts a bare Place ID and builds the URL
+    /// from it, because "place ID" is what Google's own business dashboard hands you.
+    ///
+    /// Public for the same reason UpiVpa is: it's a link meant to be printed on paper and
+    /// handed to customers.</summary>
+    public string? GoogleReviewUrl { get; set; }
 
     // Attendance tunables — used by AttendanceController to derive Late/HalfDay/
     // Overtime status from raw punch times.

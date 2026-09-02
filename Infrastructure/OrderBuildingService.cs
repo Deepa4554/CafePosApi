@@ -787,7 +787,12 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     /// A line flagged OrderItem.PriceIncludesTax (an MRP item) has its tax carved OUT of its
     /// price instead of added on top, so its total lands exactly on the printed rate. This
     /// method therefore also restates o.Subtotal — callers set it to the plain gross first,
-    /// which is still the right answer whenever no such line is present.</summary>
+    /// which is still the right answer whenever no such line is present.
+    ///
+    /// Order.TaxSuppressed overrides every rate above to 0 — a bill settled on a tender this
+    /// cafe doesn't charge tax on. Reading it off the ORDER rather than taking it as an argument
+    /// is what makes it stick: every one of this method's ~20 call sites keeps a settled bill's
+    /// tax off without having to know the setting exists.</summary>
     /// <inheritdoc cref="IOrderBuildingService.ApplyOffersAsync"/>
     public async Task ApplyOffersAsync(CafePosDbContext db, Order order, int? explicitTenantId)
     {
@@ -831,6 +836,20 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         order.AppliedOfferTitle = evaluation.Applied.Count == 0
             ? null
             : string.Join(", ", evaluation.Applied.Select(a => a.Title));
+    }
+
+    /// <summary>What this order's Total WOULD be if it were settled on a tender the cafe charges
+    /// no tax on (see PaymentModeTax) — what the payment screen needs to show a cashier before
+    /// they commit to a tender, and what OrderDto carries for exactly that.
+    ///
+    /// Derived rather than recomputed, and exactly equal to what RecomputeTotals produces with
+    /// Order.TaxSuppressed set: dropping the tax takes `Tax` off the total, except for the part
+    /// of it that was carved OUT of a tax-inclusive line's price, which was never added on top in
+    /// the first place. On an already-suppressed order Tax is 0 and this is just the total.</summary>
+    public static decimal TaxFreeTotal(Order o)
+    {
+        var embedded = o.Items.Where(i => !i.Voided && i.PriceIncludesTax).Sum(i => i.TaxAmount);
+        return o.Total - (o.Tax - embedded);
     }
 
     public static void RecomputeTotals(Order o, decimal fallbackTaxRatePct)
@@ -888,7 +907,12 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             allocated += poolShare;
 
             var net = Math.Max(0, lineAfterOffer - poolShare);
-            var ratePct = line.TaxRatePct ?? fallbackTaxRatePct;
+            // A bill settled on a tender this cafe doesn't charge tax on (see Order.TaxSuppressed
+            // and PaymentModeTax) bills every line at 0% — including a tax-inclusive MRP line,
+            // which then simply keeps its printed price with nothing carved out of it. That's the
+            // right answer for an MRP item: the customer pays the price on the packet either way,
+            // so suppressing tax must not re-price it, only stop reporting tax inside it.
+            var ratePct = o.TaxSuppressed ? 0m : line.TaxRatePct ?? fallbackTaxRatePct;
             if (line.PriceIncludesTax)
             {
                 // Carve the tax out of the rate rather than adding it on: taxable = net / (1 + rate).

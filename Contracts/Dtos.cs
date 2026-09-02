@@ -301,7 +301,15 @@ public record OrderDto(
     // The linked customer's redeemable point balance — null unless the caller (currently only
     // Get-by-id) loaded the Customer navigation; the Points screen's own AvailablePoints
     // lookup is the source of truth, this is just a checkout-time preview.
-    int? CustomerAvailablePoints)
+    int? CustomerAvailablePoints,
+    // True once this bill was settled on a tender the cafe charges no tax on — see
+    // Order.TaxSuppressed. Always false unless CafeSettings.TaxByPaymentModeEnabled is on.
+    bool TaxSuppressed = false,
+    // What Total would be if this bill were settled on a NON-taxable tender, which is what the
+    // payment screen needs to price its tenders against before one is picked (see
+    // OrderBuildingService.TaxFreeTotal). Equal to Total whenever no tax is in play, so a client
+    // that ignores it, or a cafe with the setting off, sees exactly what it always did.
+    decimal TaxFreeTotal = 0)
 {
     public static OrderDto From(Order o)
     {
@@ -367,7 +375,9 @@ public record OrderDto(
         o.Payments.Where(p => p.Method == "Complimentary").Sum(p => p.Amount),
         o.ComplimentaryReason,
         !o.Paid && amountPaid > 0,
-        o.Customer?.AvailablePoints);
+        o.Customer?.AvailablePoints,
+        o.TaxSuppressed,
+        OrderBuildingService.TaxFreeTotal(o));
     }
 }
 
@@ -767,7 +777,19 @@ public record UpdateSettingsRequest(
     /// <summary>The cafe's UPI address for bill QR codes (see CafeSettings.UpiVpa). Send an
     /// empty string to clear it — unlike the toggles above, "" is a meaningful value here
     /// (stop showing the UPI QR) rather than "leave unchanged", which is what null means.</summary>
-    string? UpiVpa = null);
+    string? UpiVpa = null,
+    /// <summary>Where the "Rate us on Google" QR on a bill points (see
+    /// CafeSettings.GoogleReviewUrl). A full URL or a bare Place ID; an empty string clears it,
+    /// same as UpiVpa, while null means leave unchanged.</summary>
+    string? GoogleReviewUrl = null,
+    /// <summary>Charge tax only on the tenders in TaxablePaymentModes — see
+    /// CafeSettings.TaxByPaymentModeEnabled.</summary>
+    bool? TaxByPaymentModeEnabled = null,
+    /// <summary>Which tenders carry tax while the switch above is on, as a list rather than the
+    /// stored CSV so a client never has to know the storage format. Each entry must be one of
+    /// OrdersController.PaymentMethodCatalog. An EMPTY list is a real value (no tender is
+    /// taxable), not "leave unchanged" — null is what means leave it alone.</summary>
+    List<string>? TaxablePaymentModes = null);
 
 // ---------- Order Note Suggestions ----------
 

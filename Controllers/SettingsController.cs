@@ -91,6 +91,14 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
                 throw new ApiValidationException("Tax rate must be between 0 and 100.");
             settings.TaxRatePct = req.TaxRatePct.Value;
         }
+        // The tenders that DO carry tax while the switch is on — see PaymentModeTax for why this
+        // exists at all and why one taxable leg taxes the whole bill. Validated against the POS's
+        // own tender catalog and stored canonically, so a typo can't become a rule that silently
+        // never matches. An empty list is stored as an empty string, which is a real answer
+        // ("nothing is taxable"); the switch below is what turns the feature off.
+        if (req.TaxByPaymentModeEnabled is not null) settings.TaxByPaymentModeEnabled = req.TaxByPaymentModeEnabled.Value;
+        if (req.TaxablePaymentModes is not null)
+            settings.TaxablePaymentModes = PaymentModeTax.Normalize(req.TaxablePaymentModes, OrdersController.PaymentMethodCatalog);
         if (req.Currency is not null) settings.Currency = req.Currency;
         if (req.Region is not null) settings.Region = req.Region;
         if (req.BusinessName is not null) settings.BusinessName = req.BusinessName.Trim();
@@ -151,6 +159,9 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
                 throw new ApiValidationException("Enter a valid UPI ID, like cafename@okaxis.");
             settings.UpiVpa = vpa.Length > 0 ? vpa : null;
         }
+        // Same "empty clears it" rule as UpiVpa above, and validated for the same reason: a QR is
+        // scanned long after the bill left the counter, so a bad link has to fail here.
+        if (req.GoogleReviewUrl is not null) settings.GoogleReviewUrl = GoogleReviewLink.Normalize(req.GoogleReviewUrl);
         if (req.Latitude is not null) settings.Latitude = req.Latitude;
         if (req.Longitude is not null) settings.Longitude = req.Longitude;
 

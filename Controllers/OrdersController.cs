@@ -1730,8 +1730,13 @@ public class OrdersController(
     /// reason (PayRequest.ComplimentaryReason), stamped onto Order.ComplimentaryReason. Reported
     /// separately from real revenue — see ReportsController.Sales.</summary>
     public const string ComplimentaryMethod = "Complimentary";
+    /// <summary>Every tender the POS takes, in the order it offers them. Public because it's
+    /// the catalog SettingsController validates the cafe's taxable-tender list against (see
+    /// CafeSettings.TaxablePaymentModes) — a name that isn't in here would be stored and then
+    /// silently never match anything at settle time.</summary>
+    public static readonly string[] PaymentMethodCatalog = ["Cash", "UPI", "Card", DueMethod, ComplimentaryMethod];
     private static readonly HashSet<string> ValidPaymentMethods =
-        new(StringComparer.OrdinalIgnoreCase) { "Cash", "Card", "UPI", DueMethod, ComplimentaryMethod };
+        new(PaymentMethodCatalog, StringComparer.OrdinalIgnoreCase);
     private static bool IsDue(string? method) => string.Equals(method?.Trim(), DueMethod, StringComparison.OrdinalIgnoreCase);
     private static bool IsComplimentary(string? method) => string.Equals(method?.Trim(), ComplimentaryMethod, StringComparison.OrdinalIgnoreCase);
 
@@ -1823,6 +1828,26 @@ public class OrdersController(
                 await db.SaveChangesAsync();
                 return Accepted(new { pendingApproval = true, message = $"Complimentary write-off of {complimentaryAmount:C} needs Owner approval (above the {ApprovalThresholds.DiscountAmount:C} auto-approve limit) — sent to Approvals." });
             }
+        }
+
+        // Whether this bill carries tax at all can depend on how it's being settled — see
+        // CafeSettings.TaxByPaymentModeEnabled and PaymentModeTax. Off for every cafe that hasn't
+        // switched it on, in which case AppliesTo always says "taxed" and nothing below fires.
+        //
+        // This has to run BEFORE either branch below: both size their payment rows against
+        // order.Total (the remaining balance, the split-adds-up check, the over-tender reject),
+        // so the total has to be final before a single rupee is validated against it. Tenders
+        // already on the order count too — a Cash advance topped up later with UPI turns tax on
+        // for the whole bill, which is the same answer whichever order the legs arrive in.
+        var tenders = order.Payments.Select(p => (string?)p.Method).ToList();
+        if (req?.Splits is { Count: > 0 } tenderSplits) tenders.AddRange(tenderSplits.Select(s => (string?)s.Method));
+        else tenders.Add(req?.PaymentMethod);
+
+        var suppressTax = !PaymentModeTax.AppliesTo(await db.Settings.FirstAsync(), tenders);
+        if (order.TaxSuppressed != suppressTax)
+        {
+            order.TaxSuppressed = suppressTax;
+            OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
         }
 
         // How much of this settle is credit rather than money in the till. Set by whichever

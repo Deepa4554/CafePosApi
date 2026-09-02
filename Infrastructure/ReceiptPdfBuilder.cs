@@ -264,6 +264,23 @@ public static class ReceiptPdfBuilder
                         col.Item().PaddingTop(2).AlignCenter().Text(settings.UpiVpa).FontSize(8);
                     }
 
+                    // "Rate us on Google" block. Below scan-to-pay and never instead of it: the
+                    // one QR that costs the cafe money if it's missed is the one that collects
+                    // the bill. Unlike that block this one prints on a settled bill too — a
+                    // review is asked for on the way out, which is exactly when the bill is
+                    // already paid. Absent entirely until the cafe sets a link (see
+                    // CafeSettings.GoogleReviewUrl), so nothing changes for a cafe that doesn't.
+                    if (!string.IsNullOrWhiteSpace(settings.GoogleReviewUrl))
+                    {
+                        col.Item().PaddingTop(10).LineHorizontal(0.5f);
+                        col.Item().PaddingTop(6).AlignCenter().Text("ENJOYED YOUR VISIT?").FontSize(9).Bold();
+                        col.Item().AlignCenter().Text("Scan to rate us on Google").FontSize(8);
+                        // Smaller than the payment QR above (120): this one is scanned off a
+                        // phone or a screen at leisure, not squinted at to settle a bill, and a
+                        // second full-size code would crowd the foot of the page.
+                        col.Item().PaddingTop(4).AlignCenter().Width(96).Image(BuildQrPng(settings.GoogleReviewUrl));
+                    }
+
                     if (settings.ReceiptShowFooter)
                     {
                         col.Item().PaddingTop(10).AlignCenter().Text(

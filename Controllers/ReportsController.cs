@@ -348,7 +348,14 @@ public class ReportsController : ControllerBase
     /// <summary>Rate-wise collected tax for a period — groups by OrderItem.TaxRatePct
     /// (falling back to CafeSettings.TaxRatePct for lines with no snapshotted rate, same
     /// resolution RecomputeTotals itself uses). TotalTaxCollected should reconcile to the
-    /// same-period sum of Order.Tax.</summary>
+    /// same-period sum of Order.Tax.
+    ///
+    /// A bill settled tax-free (Order.TaxSuppressed — see PaymentModeTax) reports at 0%, NOT at
+    /// the slab its lines were rung up under. Its lines keep that snapshot so the tax can come
+    /// back if a taxable tender is added later, but for this report what matters is the rate the
+    /// bill was actually charged at: grouping it under 5% would put taxable value in a slab whose
+    /// tax total no longer equals taxable × rate, and the two figures an accountant reconciles
+    /// would stop agreeing.</summary>
     [HttpGet("tax-gst")]
     public async Task<TaxGstReportDto> TaxGst([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null, [FromQuery] int days = 30)
     {
@@ -362,9 +369,9 @@ public class ReportsController : ControllerBase
         var settings = await db.Settings.FirstOrDefaultAsync();
         var defaultRate = settings?.TaxRatePct ?? 8;
 
-        var byRate = orders.SelectMany(o => o.Items).Where(i => !i.Voided)
-            .GroupBy(i => i.TaxRatePct ?? defaultRate)
-            .Select(g => new TaxRateLineDto(g.Key, g.Sum(i => i.TaxableAmount), g.Sum(i => i.TaxAmount), g.Count()))
+        var byRate = orders.SelectMany(o => o.Items.Where(i => !i.Voided).Select(i => (Order: o, Item: i)))
+            .GroupBy(x => x.Order.TaxSuppressed ? 0m : x.Item.TaxRatePct ?? defaultRate)
+            .Select(g => new TaxRateLineDto(g.Key, g.Sum(x => x.Item.TaxableAmount), g.Sum(x => x.Item.TaxAmount), g.Count()))
             .OrderByDescending(x => x.RatePct)
             .ToList();
 
