@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260904032244_AddLoyaltyEarnPct")]
+    partial class AddLoyaltyEarnPct
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -533,16 +536,10 @@ namespace CafePOS.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<decimal?>("TaxRatePct")
-                        .HasColumnType("numeric");
-
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")
                         .HasDefaultValue(1);
-
-                    b.Property<string>("VendorGstin")
-                        .HasColumnType("text");
 
                     b.HasKey("Id");
 
@@ -597,9 +594,6 @@ namespace CafePOS.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("DefaultHsnCode")
-                        .HasColumnType("text");
-
                     b.Property<bool>("DeliveryChargeAutoApplyDelivery")
                         .HasColumnType("boolean");
 
@@ -627,9 +621,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<bool>("GeneralShiftEnabled")
                         .HasColumnType("boolean");
 
-                    b.Property<string>("GoogleReviewUrl")
-                        .HasColumnType("text");
-
                     b.Property<string>("GstNumber")
                         .HasColumnType("text");
 
@@ -640,9 +631,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<bool>("InventoryAlertsEnabled")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("IsCompositionScheme")
                         .HasColumnType("boolean");
 
                     b.Property<string>("KdsStageMode")
@@ -781,18 +769,8 @@ namespace CafePOS.Api.Migrations
                     b.Property<bool>("TakeawayEnabled")
                         .HasColumnType("boolean");
 
-                    b.Property<bool>("TaxByPaymentModeEnabled")
-                        .HasColumnType("boolean");
-
-                    b.Property<bool>("TaxChargesEnabled")
-                        .HasColumnType("boolean");
-
                     b.Property<decimal>("TaxRatePct")
                         .HasColumnType("numeric");
-
-                    b.Property<string>("TaxablePaymentModes")
-                        .IsRequired()
-                        .HasColumnType("text");
 
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
@@ -943,9 +921,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<DateTime>("LastVisitAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("MilestoneClaimedThreshold")
-                        .HasColumnType("integer");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -1522,35 +1497,6 @@ namespace CafePOS.Api.Migrations
                     b.ToTable("LeaveRequests");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.LoyaltyMilestone", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<decimal>("DiscountPct")
-                        .HasColumnType("numeric");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<int>("ThresholdPoints")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.ToTable("LoyaltyMilestones");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.MenuCategory", b =>
                 {
                     b.Property<int>("Id")
@@ -1602,9 +1548,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("text");
 
                     b.Property<string>("Description")
-                        .HasColumnType("text");
-
-                    b.Property<string>("HsnCode")
                         .HasColumnType("text");
 
                     b.Property<string>("Icon")
@@ -1993,15 +1936,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<decimal>("ChargesTaxAmount")
-                        .HasColumnType("numeric");
-
-                    b.Property<decimal?>("ChargesTaxRatePct")
-                        .HasColumnType("numeric");
-
-                    b.Property<decimal>("ChargesTaxableAmount")
-                        .HasColumnType("numeric");
-
                     b.Property<string>("ComplimentaryReason")
                         .HasColumnType("text");
 
@@ -2086,15 +2020,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<int>("LoyaltyPointsRedeemed")
                         .HasColumnType("integer");
 
-                    b.Property<decimal>("MilestoneDiscountAmount")
-                        .HasColumnType("numeric");
-
-                    b.Property<int?>("MilestonePreviousClaimedThreshold")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("MilestoneThresholdApplied")
-                        .HasColumnType("integer");
-
                     b.Property<decimal>("OfferDiscountAmount")
                         .HasColumnType("numeric");
 
@@ -2154,9 +2079,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<decimal>("Tax")
                         .HasColumnType("numeric");
-
-                    b.Property<bool>("TaxSuppressed")
-                        .HasColumnType("boolean");
 
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()
@@ -2279,9 +2201,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<int>("FireBatch")
                         .HasColumnType("integer");
-
-                    b.Property<string>("HsnCode")
-                        .HasColumnType("text");
 
                     b.Property<int>("MenuItemId")
                         .HasColumnType("integer");
@@ -2721,9 +2640,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<double?>("ReceivedQuantity")
                         .HasColumnType("double precision");
-
-                    b.Property<decimal?>("TaxRatePct")
-                        .HasColumnType("numeric");
 
                     b.Property<int>("TenantId")
                         .ValueGeneratedOnAdd()

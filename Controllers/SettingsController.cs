@@ -10,7 +10,7 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/settings")]
-public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage, CafeLogoLoader logoLoader) : ControllerBase
+public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage, CafeLogoLoader logoLoader, IThermalLogoCache thermalLogoCache) : ControllerBase
 {
     /// <summary>
     /// The cafe's logo, pre-rendered into ESC/POS raster print bytes — ready to drop straight
@@ -36,9 +36,16 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
     [HttpGet("logo/thermal")]
     public async Task<IActionResult> GetThermalLogo([FromQuery] int columns = 32)
     {
+        // Clamped before it ever reaches the cache key, same as it always was before the
+        // rasterize call — otherwise a caller sending an arbitrary columns value would mint
+        // its own unbounded cache entry instead of sharing the two the app actually uses.
+        var clampedColumns = Math.Clamp(columns, 16, 64);
         var settings = await db.Settings.FirstAsync();
-        var logoBytes = await logoLoader.LoadAsync(settings.LogoUrl);
-        var raster = ThermalLogoRasterizer.Rasterize(logoBytes, Math.Clamp(columns, 16, 64) * 12);
+        var raster = await thermalLogoCache.GetAsync(settings.TenantId, clampedColumns, async () =>
+        {
+            var logoBytes = await logoLoader.LoadAsync(settings.LogoUrl);
+            return ThermalLogoRasterizer.Rasterize(logoBytes, clampedColumns * 12);
+        });
         return raster is null ? NoContent() : File(raster, "application/octet-stream");
     }
 
@@ -99,9 +106,30 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         if (req.TaxByPaymentModeEnabled is not null) settings.TaxByPaymentModeEnabled = req.TaxByPaymentModeEnabled.Value;
         if (req.TaxablePaymentModes is not null)
             settings.TaxablePaymentModes = PaymentModeTax.Normalize(req.TaxablePaymentModes, OrdersController.PaymentMethodCatalog);
+        // Both take effect from the next order onwards — every order snapshots the decision at
+        // creation (Order.ChargesTaxRatePct), so flipping either one never restates a bill that
+        // is already open on a table or already settled.
+        if (req.TaxChargesEnabled is not null) settings.TaxChargesEnabled = req.TaxChargesEnabled.Value;
+        if (req.IsCompositionScheme is not null) settings.IsCompositionScheme = req.IsCompositionScheme.Value;
+        if (req.DefaultHsnCode is not null)
+            settings.DefaultHsnCode = HsnCode.Normalize(req.DefaultHsnCode, "Default HSN/SAC code");
+        if (req.LoyaltyEarnPct is not null)
+        {
+            // Above 100 the guest earns more in redeemable points than the bill was worth, so
+            // every visit funds the next one outright — refused here rather than left to an
+            // Owner to discover from the till.
+            if (req.LoyaltyEarnPct is < 0 or > 100)
+                throw new ApiValidationException("Loyalty earn rate must be between 0 and 100.");
+            settings.LoyaltyEarnPct = req.LoyaltyEarnPct.Value;
+        }
         if (req.Currency is not null) settings.Currency = req.Currency;
         if (req.Region is not null) settings.Region = req.Region;
-        if (req.BusinessName is not null) settings.BusinessName = req.BusinessName.Trim();
+        if (req.BusinessName is not null)
+        {
+            if (string.IsNullOrWhiteSpace(req.BusinessName))
+                throw new ApiValidationException("Business name cannot be empty.");
+            settings.BusinessName = req.BusinessName.Trim();
+        }
         if (req.BusinessType is not null) settings.BusinessType = req.BusinessType;
         if (req.ReceiptHeader is not null) settings.ReceiptHeader = req.ReceiptHeader;
         if (req.ReceiptFooter is not null) settings.ReceiptFooter = req.ReceiptFooter;
@@ -195,6 +223,10 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
 
         await db.SaveChangesAsync();
         taxRateCache.Invalidate(settings.TenantId);
+        // Only meaningfully stale when the logo itself changed, but Invalidate is a cheap
+        // in-memory removal either way — cheaper than threading a "did LogoUrl change" bool
+        // through every branch above just to skip it.
+        thermalLogoCache.Invalidate(settings.TenantId);
         await audit.LogAsync(AuditAction.SettingsChange, AuditResource.Settings, null, "Cafe settings updated.", AuditSeverity.Medium);
         return settings;
     }

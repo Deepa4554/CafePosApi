@@ -102,6 +102,16 @@ public class MenuItem : ITenantScoped
     /// <summary>Which tax slab this item is billed at. Null falls back to the tenant's
     /// default TaxGroup, then CafeSettings.TaxRatePct — see <see cref="TaxGroup"/>.</summary>
     public int? TaxGroupId { get; set; }
+    /// <summary>HSN/SAC code for this item, printed on the invoice and summarised rate-wise in
+    /// the GST report. Null falls back to CafeSettings.DefaultHsnCode — which is what most
+    /// cafes will use, since a restaurant supplying food for consumption on the premises bills
+    /// the whole menu under one SAC (996331) rather than a code per dish. Per-item is here for
+    /// the cafes that also sell packaged goods across the counter, where each pack carries its
+    /// own HSN.
+    ///
+    /// Free text, capped at 8 characters (the longest HSN) and digits-only — validated in
+    /// MenuController rather than here so an existing row can never fail to load.</summary>
+    public string? HsnCode { get; set; }
 
     public List<Variant> Variants { get; set; } = [];
     public List<Modifier> Modifiers { get; set; } = [];
@@ -370,6 +380,18 @@ public class Order : ITenantScoped
     /// summed into the same discount pool as Coupon/GiftCard by RecomputeTotals.</summary>
     public decimal LoyaltyDiscountAmount { get; set; }
     public int LoyaltyPointsRedeemed { get; set; }
+    /// <summary>Discount from a LoyaltyMilestone claimed against this order at billing time —
+    /// summed into the same discount pool as Coupon/GiftCard/Loyalty by RecomputeTotals.
+    /// Paired with MilestoneThresholdApplied below.</summary>
+    public decimal MilestoneDiscountAmount { get; set; }
+    /// <summary>The LoyaltyMilestone.ThresholdPoints claimed against this order, or null if
+    /// none — set alongside Customer.MilestoneClaimedThreshold advancing to this same value.
+    /// See OrdersController.ApplyBillMilestone/ReleaseBillRedemptionsAsync.</summary>
+    public int? MilestoneThresholdApplied { get; set; }
+    /// <summary>Snapshot of Customer.MilestoneClaimedThreshold immediately before this order
+    /// claimed one — lets ReleaseBillRedemptionsAsync restore the exact prior value if the
+    /// order is cancelled unpaid, instead of guessing what it should roll back to.</summary>
+    public int? MilestonePreviousClaimedThreshold { get; set; }
     /// <summary>Total taken off by auto-applied rule-driven Offers (BOGO, happy hour, category/
     /// item discounts — see Offer). Unlike the discounts above this is NOT part of the
     /// proportional discount pool in RecomputeTotals: an offer attributes to specific lines
@@ -380,14 +402,39 @@ public class Order : ITenantScoped
     /// <summary>Human-readable names of the offers that fired, comma-joined ("Buy 2 Get 1 —
     /// Coffee"), for the receipt's offer line. Null when no offer applied.</summary>
     public string? AppliedOfferTitle { get; set; }
-    /// <summary>Billing-time charges — added on top of tax, not themselves taxed (kept simple
-    /// rather than re-running per-line GST on a flat add-on). ServiceCharge/Packing/Delivery/
-    /// Tip are always ≥ 0; RoundOff can be either sign (negative rounds the total down).</summary>
+    /// <summary>Billing-time charges. Service/Packing/Delivery are taxed only when this order
+    /// carries a <see cref="ChargesTaxRatePct"/> (see CafeSettings.TaxChargesEnabled); Tip and
+    /// RoundOff never are — a tip is not consideration for the supply, and a round-off is an
+    /// adjustment to the figure tax has already been computed on. ServiceCharge/Packing/
+    /// Delivery/Tip are always ≥ 0; RoundOff can be either sign (negative rounds the total
+    /// down).</summary>
     public decimal ServiceChargeAmount { get; set; }
     public decimal PackingChargeAmount { get; set; }
     public decimal DeliveryChargeAmount { get; set; }
     public decimal TipAmount { get; set; }
     public decimal RoundOffAmount { get; set; }
+    /// <summary>The slab Service/Packing/Delivery charges on THIS bill are taxed at, snapshotted
+    /// from the cafe's settings when the order was created (see CafeSettings.TaxChargesEnabled).
+    ///
+    /// Null means those charges carry no tax — which is every order placed before this column
+    /// existed and every order at a cafe that hasn't opted in, so their arithmetic is untouched.
+    /// Snapshotted rather than read live for the same reason OrderItem.TaxRatePct is: switching
+    /// the setting on must not silently re-price a bill that is already open on a table, and
+    /// switching it off must not rewrite what a settled bill already charged.
+    ///
+    /// One rate for all three charges rather than per-charge slabs: they are ancillary to the
+    /// same composite supply as the food, so they follow the cafe's own default rate rather
+    /// than any individual item's.</summary>
+    public decimal? ChargesTaxRatePct { get; set; }
+    /// <summary>The charge value tax was computed on (Service + Packing + Delivery, less nothing
+    /// — order-level discounts apply to the goods, not to the add-ons) and the tax itself.
+    /// Both written by RecomputeTotals and both 0 whenever ChargesTaxRatePct is null.
+    ///
+    /// Stored rather than derived because the bill's GST breakdown has to fold this into the
+    /// matching slab row, and the GST report has to add it to that slab's totals — deriving it
+    /// in two places is how the printed slip and the report start disagreeing.</summary>
+    public decimal ChargesTaxableAmount { get; set; }
+    public decimal ChargesTaxAmount { get; set; }
     /// <summary>How the bill was settled — Cash / Card / UPI / Multiple. Set when the order
     /// is marked paid; null until then.</summary>
     public string? PaymentMethod { get; set; }
@@ -520,6 +567,13 @@ public class OrderItem : ITenantScoped
     /// before tax groups existed, and on any line whose item had no group and no default —
     /// RecomputeTotals bills those at CafeSettings.TaxRatePct, exactly as it always did.</summary>
     public decimal? TaxRatePct { get; set; }
+    /// <summary>HSN/SAC code this line was invoiced under, snapshotted at order time from
+    /// MenuItem.HsnCode (falling back to CafeSettings.DefaultHsnCode) for the same reason
+    /// TaxRatePct is: re-coding an item next month must not restate an invoice already issued.
+    ///
+    /// Null on every line placed before this column existed and at any cafe that hasn't entered
+    /// a code — the invoice simply omits the column, exactly as it did before.</summary>
+    public string? HsnCode { get; set; }
     /// <summary>True when <see cref="Price"/> ALREADY contains this line's tax, so RecomputeTotals
     /// back-calculates the tax out of it (taxable = price / (1 + rate)) instead of adding it on
     /// top, and the line contributes nothing extra to Order.Total.
@@ -733,6 +787,32 @@ public class CafeSettings : ITenantScoped
     /// feature off.</summary>
     public string TaxablePaymentModes { get; set; } = "";
 
+    /// <summary>Charge GST on the Service, Packing and Delivery charges too, instead of adding
+    /// them on top of an already-computed tax. Under GST those charges are part of the value of
+    /// the same supply and are taxable — but turning this on RAISES the total of every bill
+    /// that carries one of them, so it is opt-in rather than a default: flipping it for every
+    /// existing cafe on a deploy would change money nobody asked to change, and break the
+    /// reconciliation an accountant had already signed off for the period.
+    ///
+    /// Applies from the next order onwards, never retroactively — the decision is snapshotted
+    /// onto Order.ChargesTaxRatePct at creation. The rate used is the cafe's own
+    /// <see cref="TaxRatePct"/> (or its default TaxGroup), not any individual item's slab.</summary>
+    public bool TaxChargesEnabled { get; set; }
+
+    /// <summary>This cafe bills under the GST composition scheme, so it collects no GST and its
+    /// bill is a BILL OF SUPPLY rather than a TAX INVOICE (see ReceiptDocumentTitle). Purely a
+    /// labelling and reporting flag — it does not zero anything out on its own, because a
+    /// composition dealer already has its slabs set to 0.
+    ///
+    /// Needed as its own flag because GstNumber alone can't tell the two apart: a composition
+    /// dealer HAS a GSTIN and must print it, it just may not issue a tax invoice against it.</summary>
+    public bool IsCompositionScheme { get; set; }
+
+    /// <summary>HSN/SAC printed for any menu item with no code of its own — the whole menu for
+    /// most cafes (see MenuItem.HsnCode). Blank/null prints no HSN column at all, which is what
+    /// every cafe gets until someone enters one.</summary>
+    public string? DefaultHsnCode { get; set; }
+
     // Language & Region
     public string Currency { get; set; } = "INR (₹)";
     public string Region { get; set; } = "Asia/Kolkata";
@@ -863,6 +943,16 @@ public class CafeSettings : ITenantScoped
     public bool DeliveryChargeAutoApplyTakeaway { get; set; }
     public bool DeliveryChargeAutoApplyDelivery { get; set; } = true;
     public bool DeliveryChargeAutoApplyToken { get; set; }
+
+    // Loyalty — how much of a bill comes back to the customer as points. A point is worth ₹1
+    // when redeemed (see Order.LoyaltyDiscountAmount), so this reads directly as the cashback
+    // percentage: 5 means a ₹1000 bill earns 50 points the guest can spend as ₹50.
+    //
+    // Defaults to 100 because that is what every cafe has been earning at since points existed
+    // — the rate was hardcoded as "1 point per ₹1 spent" in LoyaltyPoints' callers. Migrating
+    // to a lower default would quietly cut the balance every existing guest is part-way through
+    // building, so the number an Owner already has keeps working until they choose to change it.
+    public decimal LoyaltyEarnPct { get; set; } = 100;
 
     // Borzo courier integration — books a real rider for DELIVERY orders (see BorzoClient).
     // Per-cafe rather than per-deployment: each tenant has its own Borzo account, its own

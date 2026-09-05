@@ -117,6 +117,10 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
         // ApprovalRequest's PayloadJson would only blow up days later at approve time, in
         // front of an Owner who can't fix it and didn't type it.
         var paymentMode = NormalizePaymentMode(req.PaymentMode);
+        // Same reasoning as the mode above — validate before the approval branch, so a bad rate
+        // can't sit frozen in PayloadJson and fail days later in front of the approving Owner.
+        if (req.TaxRatePct is < 0 or > 100)
+            throw new ApiValidationException("GST rate must be between 0 and 100.");
 
         var idClaim = User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value
             ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
@@ -149,6 +153,8 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
             SpentBy = req.SpentBy.Trim(),
             SpentAt = req.SpentAt ?? DateTime.UtcNow,
             PaymentMode = paymentMode,
+            TaxRatePct = req.TaxRatePct,
+            VendorGstin = string.IsNullOrWhiteSpace(req.VendorGstin) ? null : req.VendorGstin.Trim(),
             RecordedByUserId = recordedBy?.Id ?? 0,
             RecordedByName = recordedBy?.Name ?? "",
         };

@@ -247,10 +247,19 @@ public class OrdersController(
 
         // A QSR counter order has no staff member coming back to press "Fire" — like the
         // guest-QR path, it goes straight to the kitchen the instant it's rung up.
+        //
+        // Wrapped the same way Fire/ConfirmGuestOrder are: firing deducts stock, which needs
+        // a transaction for ConsumeInventoryAsync's ingredient locks — and by this point
+        // BuildOrderAsync's own transaction has already committed, so without this wrap the
+        // lock's manual BeginTransactionAsync runs outside EF's retrying execution strategy
+        // and throws outright the moment a recipe item actually needs a lock.
         if (req.OrderType == "QSR")
         {
-            await orderBuilder.FireUnfiredItemsAsync(db, order, null);
-            await db.SaveChangesAsync();
+            await DbConcurrency.InTransactionAsync(db, async () =>
+            {
+                await orderBuilder.FireUnfiredItemsAsync(db, order, null);
+                await db.SaveChangesAsync();
+            });
         }
         // Cash Sale: no kitchen involved at all — fire (so the order still gets a real
         // fire-batch for the usual status bookkeeping/rollup) and immediately jump every
@@ -260,11 +269,14 @@ public class OrdersController(
         // no extra order-type filtering is needed there.
         else if (req.OrderType == "CASH")
         {
-            await orderBuilder.FireUnfiredItemsAsync(db, order, null);
-            foreach (var item in order.Items) JumpToServed(item);
-            foreach (var batch in order.FireBatches) orderBuilder.RecomputeBatchStatus(db, order, batch.BatchNumber);
-            OrderBuildingService.RecomputeOrderStatus(order);
-            await db.SaveChangesAsync();
+            await DbConcurrency.InTransactionAsync(db, async () =>
+            {
+                await orderBuilder.FireUnfiredItemsAsync(db, order, null);
+                foreach (var item in order.Items) JumpToServed(item);
+                foreach (var batch in order.FireBatches) orderBuilder.RecomputeBatchStatus(db, order, batch.BatchNumber);
+                OrderBuildingService.RecomputeOrderStatus(order);
+                await db.SaveChangesAsync();
+            });
         }
 
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
@@ -381,7 +393,19 @@ public class OrdersController(
         var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers).Include(o => o.FireBatches).Include(o => o.Payments).FirstOrDefaultAsync(o => o.Id == id);
         if (order is null) return NotFound();
         // Serving progress is independent of payment — see AdvanceUnitsEndpoint above.
+        ServeAllItems(order);
 
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    }
+
+    /// <summary>The actual work behind ServeAll above — pulled out so Pay can apply the same
+    /// "everything on this order is served" transition inline (see PayRequest.ServeAll) instead
+    /// of the POS having to make a whole separate round trip for it before settling. Doesn't
+    /// save; the caller's own SaveChangesAsync covers it (Pay's is already about to run one for
+    /// the payment itself).</summary>
+    private void ServeAllItems(Order order)
+    {
         var touchedBatches = new HashSet<int>();
         foreach (var item in order.Items.Where(i => i.FireBatch != 0 && !i.Voided))
         {
@@ -391,9 +415,6 @@ public class OrdersController(
         foreach (var batchNumber in touchedBatches)
             orderBuilder.RecomputeBatchStatus(db, order, batchNumber);
         OrderBuildingService.RecomputeOrderStatus(order);
-
-        await db.SaveChangesAsync();
-        return OrderDto.From(order);
     }
 
     /// <summary>Production View bulk action: advance `Qty` units of one dish (menuItemId) from
@@ -593,8 +614,9 @@ public class OrdersController(
         if (menuItem is null) throw new ApiValidationException("Menu item not found.");
         if (!menuItem.Available) throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
 
-        var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax) =
-            await orderBuilder.ResolveLinePricingAsync(db, menuItem, req.VariantId, req.ModifierOptionIds, explicitTenantId: null, req.OpenPrice);
+        var defaultHsn = await db.Settings.Select(s => s.DefaultHsnCode).FirstOrDefaultAsync();
+        var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
+            await orderBuilder.ResolveLinePricingAsync(db, menuItem, req.VariantId, req.ModifierOptionIds, explicitTenantId: null, req.OpenPrice, defaultHsn);
         var newItem = new OrderItem
         {
             OrderId = order.Id,
@@ -610,6 +632,7 @@ public class OrdersController(
             VegNonVegType = menuItem.VegNonVegType,
             TaxRatePct = taxRatePct,
             PriceIncludesTax = priceIncludesTax,
+            HsnCode = hsnCode,
             FireBatch = 0,
         };
         order.Items.Add(newItem);
@@ -1348,6 +1371,19 @@ public class OrdersController(
             order.LoyaltyPointsRedeemed = 0;
             order.LoyaltyDiscountAmount = 0;
         }
+
+        if (order.MilestoneThresholdApplied is not null)
+        {
+            if (order.CustomerId is int lockCid) await DbConcurrency.LockRowsAsync<Customer>(db, lockCid);
+            var customer = order.CustomerId is int cid ? await db.Customers.FirstOrDefaultAsync(c => c.Id == cid) : null;
+            // Restores the exact prior high-water mark rather than just decrementing — this
+            // isn't an additive balance like points, it's a claimed/not-claimed flag per tier.
+            if (customer is not null && order.MilestonePreviousClaimedThreshold is int prevThreshold)
+                customer.MilestoneClaimedThreshold = prevThreshold;
+            order.MilestoneThresholdApplied = null;
+            order.MilestoneDiscountAmount = 0;
+            order.MilestonePreviousClaimedThreshold = null;
+        }
     }
 
     private int? CurrentUserId()
@@ -1610,6 +1646,74 @@ public class OrdersController(
         return OrderDto.From(order);
     });
 
+    /// <summary>Claims the highest not-yet-claimed LoyaltyMilestone the order's customer has
+    /// reached — checked against their lifetime Customer.TotalPoints, never AvailablePoints,
+    /// so redeeming points elsewhere can't undo a milestone already crossed. Same
+    /// not-gated-on-Served timing and guest-phone gate as ApplyBillLoyalty above: an anonymous
+    /// walk-in's shared Customer bucket has no milestone history worth claiming against. Once
+    /// claimed, Customer.MilestoneClaimedThreshold advances past this tier so it can't fire
+    /// again until a HIGHER milestone is reached.</summary>
+    [HttpPatch("{id:int}/bill-milestone")]
+    public Task<ActionResult<OrderDto>> ApplyBillMilestone(int id) =>
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
+    {
+        await DbConcurrency.LockRowsAsync<Order>(db, id);
+        var order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
+            .Include(o => o.FireBatches).Include(o => o.Payments)
+            .FirstOrDefaultAsync(o => o.Id == id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot apply a milestone reward to a paid order.");
+        if (order.MilestoneThresholdApplied is not null) throw new ApiConflictException("A milestone reward has already been applied to this order.");
+        if (string.IsNullOrWhiteSpace(order.GuestPhone)) throw new ApiValidationException("A guest mobile number is needed to claim a milestone reward.");
+        if (order.CustomerId is null) throw new ApiValidationException("No customer linked to this order.");
+
+        // Same shape as the loyalty-points path above: the claimed high-water mark belongs to
+        // the customer, not this order, so it has to be locked and re-read before it's spent.
+        await DbConcurrency.LockRowsAsync<Customer>(db, order.CustomerId.Value);
+        var customer = await db.Customers.FirstOrDefaultAsync(c => c.Id == order.CustomerId.Value)
+            ?? throw new ApiValidationException("No customer linked to this order.");
+        order.Customer = customer;
+
+        var milestone = await db.LoyaltyMilestones
+            .Where(m => m.IsActive && m.ThresholdPoints <= customer.TotalPoints && m.ThresholdPoints > customer.MilestoneClaimedThreshold)
+            .OrderByDescending(m => m.ThresholdPoints)
+            .FirstOrDefaultAsync();
+        if (milestone is null) throw new ApiValidationException("No unclaimed milestone reward available for this customer.");
+
+        var discount = Math.Round(order.Subtotal * milestone.DiscountPct / 100, 2);
+        var previousClaimed = customer.MilestoneClaimedThreshold;
+
+        await using var txn = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync() : null;
+        if (txn is not null)
+        {
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "Orders" SET "MilestoneThresholdApplied" = {milestone.ThresholdPoints}
+                WHERE "Id" = {order.Id} AND "MilestoneThresholdApplied" IS NULL
+                """), "A milestone reward has already been applied to this order.");
+
+            // Compare-and-swap on the claimed high-water mark itself: two bills for the same
+            // customer racing to claim it can't both win, and a claim that changed the
+            // customer's row in between (a higher tier claimed elsewhere, or a points
+            // adjustment) correctly loses instead of overwriting it.
+            ClaimOrThrow(await db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "Customers" SET "MilestoneClaimedThreshold" = {milestone.ThresholdPoints}
+                WHERE "Id" = {customer.Id} AND "MilestoneClaimedThreshold" = {previousClaimed} AND "TotalPoints" >= {milestone.ThresholdPoints}
+                """), "This customer's milestone status just changed — reopen the bill and try again.");
+        }
+        else
+        {
+            customer.MilestoneClaimedThreshold = milestone.ThresholdPoints;
+        }
+
+        order.MilestoneDiscountAmount = discount;
+        order.MilestoneThresholdApplied = milestone.ThresholdPoints;
+        order.MilestonePreviousClaimedThreshold = previousClaimed;
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+        await db.SaveChangesAsync();
+        if (txn is not null) await txn.CommitAsync();
+        return OrderDto.From(order);
+    });
+
     /// <summary>Sets Service Charge / Packing Charge / Delivery Charge / Tip / Round Off in
     /// one call — every field optional, only the ones supplied change (send 0 to clear one).
     /// Same not-gated-on-Served timing as the discount/coupon/gift-card adjustments above, and
@@ -1760,6 +1864,13 @@ public class OrdersController(
         if (order is null) return NotFound();
         if (order.Cancelled) throw new ApiConflictException("A cancelled order can't be marked paid.");
         if (order.Paid) throw new ApiConflictException("Order is already paid.");
+
+        // See PayRequest.ServeAll — folds the "Mark items as Served on Settlement" tick into
+        // this same request/transaction instead of the POS making a separate ServeAll call
+        // first and waiting on it before settling. Unconditional on KeepOpen: serving and
+        // paying are independent state (ServeAll's own doc comment), so a Pay First advance
+        // wants this exactly as much as a normal settle does.
+        if (req?.ServeAll == true) ServeAllItems(order);
 
         // Skipped for KeepOpen (Pay First), which deliberately leaves the order open with more
         // items still expected — an unfired line there is a round that hasn't been sent yet
@@ -2002,17 +2113,21 @@ public class OrdersController(
         var customer = await orderBuilder.FindOrCreateCustomerAsync(db, name, phone);
         if (previous is not null && previous.Id == customer.Id) return customer;
 
+        // One rate for both halves of the move, read once: debiting at a different number than
+        // the credit is how points get stranded on the record the order left behind.
+        var points = LoyaltyPoints.ForSpend(order.Total, (await db.Settings.FirstAsync()).LoyaltyEarnPct);
+
         // Clamped at zero: an order created before CRM linking existed can point at a record
         // whose counters were never incremented for it.
         if (previous is not null)
         {
             previous.VisitCount = Math.Max(0, previous.VisitCount - 1);
             previous.TotalSpent = Math.Max(0m, previous.TotalSpent - order.Total);
-            previous.TotalPoints = Math.Max(0, previous.TotalPoints - (int)Math.Floor(order.Total));
+            previous.TotalPoints = Math.Max(0, previous.TotalPoints - points);
         }
         customer.VisitCount += 1;
         customer.TotalSpent += order.Total;
-        customer.TotalPoints += (int)Math.Floor(order.Total);
+        customer.TotalPoints += points;
         customer.LastVisitAt = DateTime.UtcNow;
         order.Customer = customer;
         return customer;

@@ -52,6 +52,12 @@ public class Customer : ITenantScoped
     public int SuccessfulReferrals { get; set; }
     public decimal ReferralEarned { get; set; }
 
+    /// <summary>Highest LoyaltyMilestone.ThresholdPoints already claimed as a bill-time
+    /// discount (see OrdersController.ApplyBillMilestone) — checked against TotalPoints, not
+    /// AvailablePoints, so redeeming points later can't undo a milestone already reached. A
+    /// milestone only fires again once TotalPoints crosses one HIGHER than this.</summary>
+    public int MilestoneClaimedThreshold { get; set; }
+
     public List<Coupon> Coupons { get; set; } = [];
     public List<GiftCard> GiftCards { get; set; } = [];
     public List<FavoriteItem> FavoriteItems { get; set; } = [];
@@ -102,6 +108,22 @@ public class Reward : ITenantScoped
     public string Icon { get; set; } = "gift-outline";
     /// <summary>Soft-hide instead of delete, so a reward tied to loyalty history/old
     /// receipts isn't yanked out from under past redemptions.</summary>
+    public bool IsActive { get; set; } = true;
+}
+
+/// <summary>A cafe-defined lifetime-points milestone — an Owner picks a ThresholdPoints and a
+/// DiscountPct; once a customer's Customer.TotalPoints crosses it for the first time, their
+/// very next bill can claim DiscountPct off (see OrdersController.ApplyBillMilestone), then
+/// it's marked claimed (Customer.MilestoneClaimedThreshold) so it fires exactly once per
+/// milestone rather than on every order past the threshold.</summary>
+public class LoyaltyMilestone : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int ThresholdPoints { get; set; }
+    public decimal DiscountPct { get; set; }
+    /// <summary>Soft-hide instead of delete, matching Reward — a past order's
+    /// MilestoneThresholdApplied stays meaningful even after the tier is retired.</summary>
     public bool IsActive { get; set; } = true;
 }
 

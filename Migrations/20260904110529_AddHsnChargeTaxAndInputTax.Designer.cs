@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260904110529_AddHsnChargeTaxAndInputTax")]
+    partial class AddHsnChargeTaxAndInputTax
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -664,9 +667,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<decimal?>("Longitude")
                         .HasColumnType("numeric");
 
-                    b.Property<decimal>("LoyaltyEarnPct")
-                        .HasColumnType("numeric");
-
                     b.Property<bool>("MorningShiftEnabled")
                         .HasColumnType("boolean");
 
@@ -943,9 +943,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<DateTime>("LastVisitAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("MilestoneClaimedThreshold")
-                        .HasColumnType("integer");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -1522,35 +1519,6 @@ namespace CafePOS.Api.Migrations
                     b.ToTable("LeaveRequests");
                 });
 
-            modelBuilder.Entity("CafePOS.Api.Domain.LoyaltyMilestone", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<decimal>("DiscountPct")
-                        .HasColumnType("numeric");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<int>("ThresholdPoints")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.ToTable("LoyaltyMilestones");
-                });
-
             modelBuilder.Entity("CafePOS.Api.Domain.MenuCategory", b =>
                 {
                     b.Property<int>("Id")
@@ -2084,15 +2052,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("numeric");
 
                     b.Property<int>("LoyaltyPointsRedeemed")
-                        .HasColumnType("integer");
-
-                    b.Property<decimal>("MilestoneDiscountAmount")
-                        .HasColumnType("numeric");
-
-                    b.Property<int?>("MilestonePreviousClaimedThreshold")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("MilestoneThresholdApplied")
                         .HasColumnType("integer");
 
                     b.Property<decimal>("OfferDiscountAmount")

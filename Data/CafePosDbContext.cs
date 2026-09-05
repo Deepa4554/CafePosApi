@@ -160,6 +160,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Coupon> Coupons => Set<Coupon>();
     public DbSet<GiftCard> GiftCards => Set<GiftCard>();
     public DbSet<Reward> Rewards => Set<Reward>();
+    public DbSet<LoyaltyMilestone> LoyaltyMilestones => Set<LoyaltyMilestone>();
     public DbSet<FavoriteItem> FavoriteItems => Set<FavoriteItem>();
     /// <summary>Rule-driven promotions (BOGO, happy hour, category discounts) as opposed to
     /// Coupons, which are codes a customer presents. Priced by OfferEngine on every recompute

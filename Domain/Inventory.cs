@@ -209,4 +209,22 @@ public class PurchaseItem : ITenantScoped
     public DateOnly? ExpiryDate { get; set; }
     /// <summary>Null until Received. May differ from Quantity (short/over shipment).</summary>
     public double? ReceivedQuantity { get; set; }
+    /// <summary>GST rate the vendor charged on this line, captured at Receive so the cafe can
+    /// report the input tax it paid (the credit side of what ReportsController.TaxGst reports on
+    /// the output side).
+    ///
+    /// <see cref="UnitCost"/> is read as INCLUSIVE of this — it is what the cafe actually paid
+    /// the vendor per unit, which is what a biller has in hand when they key the invoice in.
+    /// The tax is therefore carved out (cost / (1 + rate)), exactly as a tax-inclusive MRP sale
+    /// line is, rather than added on top; keying a gross cost and having the app inflate it
+    /// would restate every purchase order's value.
+    ///
+    /// Null — every existing row, and every line whose biller didn't enter a rate — means "not
+    /// recorded", NOT zero-rated: those lines are reported separately rather than being counted
+    /// as exempt purchases, because the difference matters to whoever claims the credit.
+    ///
+    /// Reporting only. Inventory valuation still carries the gross UnitCost, so a registered
+    /// dealer's COGS is overstated by the credit it can claim back — pre-existing, and a
+    /// deliberate follow-up rather than something to change under a reporting feature.</summary>
+    public decimal? TaxRatePct { get; set; }
 }

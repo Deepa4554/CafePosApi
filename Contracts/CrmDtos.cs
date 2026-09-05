@@ -70,6 +70,15 @@ public record RewardDto(int Id, string Name, int PointsCost, string Icon, bool I
 public record CreateRewardRequest(string Name, int PointsCost, string? Icon);
 public record UpdateRewardRequest(string? Name, int? PointsCost, string? Icon, bool? IsActive);
 
+// ---------- Loyalty Milestones (owner-configured "cross N lifetime points, next bill gets X% off") ----------
+
+public record LoyaltyMilestoneDto(int Id, int ThresholdPoints, decimal DiscountPct, bool IsActive)
+{
+    public static LoyaltyMilestoneDto From(LoyaltyMilestone m) => new(m.Id, m.ThresholdPoints, m.DiscountPct, m.IsActive);
+}
+public record CreateLoyaltyMilestoneRequest(int ThresholdPoints, decimal DiscountPct);
+public record UpdateLoyaltyMilestoneRequest(int? ThresholdPoints, decimal? DiscountPct, bool? IsActive);
+
 // ---------- CRM Insights (real customer analytics — replaces the old hardcoded screen) ----------
 
 public record CrmGrowthPointDto(string Day, int NewCustomers, int ReturningCustomers);

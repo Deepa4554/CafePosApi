@@ -140,7 +140,14 @@ public record PaymentSplitRequest(string Method, decimal Amount);
 /// exists and the call would close the bill; without it the settle is refused (see
 /// OrdersController.EnsureUnfiredItemsResolved, which explains why the answers that change the
 /// total are separate calls made before settling rather than values here). Null on every bill
-/// that has no unfired line, which is almost all of them.</summary>
+/// that has no unfired line, which is almost all of them.
+///
+/// ServeAll folds OrdersController.ServeAll's own action into this call instead of making the
+/// POS place it as a separate request first (see OrderBillActions' "Mark items as Served on
+/// Settlement" tick, which is on by default) — serving and paying are independent state (see
+/// ServeAll's own doc comment) so there was never a reason for the cashier to wait on two round
+/// trips where one does. False/omitted leaves every line's serve progress untouched, exactly as
+/// a Pay call with no such flag always has.</summary>
 public record PayRequest(
     string? PaymentMethod,
     List<PaymentSplitRequest>? Splits = null,
@@ -151,7 +158,8 @@ public record PayRequest(
     string? UnfiredItems = null,
     // Compulsory whenever a "Complimentary" tender/split is in play — see
     // OrdersController.Pay. Stamped onto Order.ComplimentaryReason.
-    string? ComplimentaryReason = null);
+    string? ComplimentaryReason = null,
+    bool ServeAll = false);
 
 /// <summary>Body for OrdersController.Close — see PayRequest.UnfiredItems, which this carries for
 /// exactly the same reason: Close is the other call that flips a bill to Paid, so it needs the
@@ -188,7 +196,10 @@ public record SelectedModifierDto(int ModifierOptionId, string Name, decimal Pri
 public record OrderItemDto(int Id, int MenuItemId, string Name, int Qty, decimal Price, string? Modifier, int FireBatch, string Status,
     int NewQty, int ReadQty, int PreparingQty, int ReadyQty, int ServedQty, bool Voided, DateTime? VoidedAt,
     int? VariantId, string? VariantName, List<SelectedModifierDto> SelectedModifiers, string StationName,
-    decimal? TaxRatePct, decimal TaxableAmount, decimal TaxAmount, string? VegNonVegType = null, string? Subtitle = null);
+    decimal? TaxRatePct, decimal TaxableAmount, decimal TaxAmount, string? VegNonVegType = null, string? Subtitle = null,
+    /// <summary>HSN/SAC this line was invoiced under (see OrderItem.HsnCode) — null at a cafe
+    /// that has entered no codes, which is when the invoice drops the column entirely.</summary>
+    string? HsnCode = null);
 
 /// <summary>One row of the bill's tax summary — the taxable value and tax charged at a single
 /// rate. A GST invoice has to break tax down per slab rather than print one combined figure,
@@ -197,14 +208,23 @@ public record OrderTaxLineDto(decimal RatePct, decimal TaxableAmount, decimal Ta
 {
     /// <summary>Groups an order's live lines by their effective rate. `fallbackRatePct` stands
     /// in for lines with no snapshot (placed before tax groups, or an item with no group and no
-    /// tenant default) — the same rate RecomputeTotals billed them at.</summary>
+    /// tenant default) — the same rate RecomputeTotals billed them at.
+    ///
+    /// Tax charged on the Service/Packing/Delivery charges (Order.ChargesTaxAmount, only ever
+    /// non-zero where the cafe opted in) folds into the slab it was charged at rather than
+    /// getting a row of its own — it is part of Order.Tax, so a breakdown that left it out
+    /// would print slab rows that don't add up to the bill's own tax line.</summary>
     public static List<OrderTaxLineDto> From(Order o, decimal fallbackRatePct) =>
         o.Items
             .Where(i => !i.Voided)
-            .GroupBy(i => i.TaxRatePct ?? fallbackRatePct)
-            .Where(g => g.Sum(i => i.TaxAmount) != 0 || g.Key != 0)
+            .Select(i => (Rate: i.TaxRatePct ?? fallbackRatePct, i.TaxableAmount, i.TaxAmount))
+            .Concat(o.ChargesTaxableAmount != 0 || o.ChargesTaxAmount != 0
+                ? [(Rate: o.ChargesTaxRatePct ?? 0m, TaxableAmount: o.ChargesTaxableAmount, TaxAmount: o.ChargesTaxAmount)]
+                : Array.Empty<(decimal Rate, decimal TaxableAmount, decimal TaxAmount)>())
+            .GroupBy(x => x.Rate)
+            .Where(g => g.Sum(x => x.TaxAmount) != 0 || g.Key != 0)
             .OrderBy(g => g.Key)
-            .Select(g => new OrderTaxLineDto(g.Key, g.Sum(i => i.TaxableAmount), g.Sum(i => i.TaxAmount)))
+            .Select(g => new OrderTaxLineDto(g.Key, g.Sum(x => x.TaxableAmount), g.Sum(x => x.TaxAmount)))
             .ToList();
 }
 
@@ -275,6 +295,8 @@ public record OrderDto(
     List<OrderPaymentDto> Payments,
     decimal LoyaltyDiscountAmount,
     int LoyaltyPointsRedeemed,
+    decimal MilestoneDiscountAmount,
+    int? MilestoneThresholdApplied,
     decimal ServiceChargeAmount,
     decimal PackingChargeAmount,
     decimal DeliveryChargeAmount,
@@ -302,6 +324,12 @@ public record OrderDto(
     // Get-by-id) loaded the Customer navigation; the Points screen's own AvailablePoints
     // lookup is the source of truth, this is just a checkout-time preview.
     int? CustomerAvailablePoints,
+    // Lifetime points and the highest LoyaltyMilestone threshold already claimed — same
+    // Customer-navigation caveat as CustomerAvailablePoints above. Paired client-side against
+    // GET /loyalty-milestones to decide whether the Milestone Reward tile has anything to
+    // offer; ApplyBillMilestone re-derives eligibility itself, so this is a display hint only.
+    int? CustomerTotalPoints,
+    int? CustomerMilestoneClaimedThreshold,
     // True once this bill was settled on a tender the cafe charges no tax on — see
     // Order.TaxSuppressed. Always false unless CafeSettings.TaxByPaymentModeEnabled is on.
     bool TaxSuppressed = false,
@@ -309,7 +337,14 @@ public record OrderDto(
     // payment screen needs to price its tenders against before one is picked (see
     // OrderBuildingService.TaxFreeTotal). Equal to Total whenever no tax is in play, so a client
     // that ignores it, or a cafe with the setting off, sees exactly what it always did.
-    decimal TaxFreeTotal = 0)
+    decimal TaxFreeTotal = 0,
+    // Tax charged on the Service/Packing/Delivery charges, and the slab it was charged at — see
+    // Order.ChargesTaxRatePct. Null rate / zero amounts at every cafe that hasn't opted in, and
+    // on every bill placed before the setting existed. Already inside Tax and Total; carried
+    // separately so a bill can show what the charge line itself cost in tax.
+    decimal? ChargesTaxRatePct = null,
+    decimal ChargesTaxableAmount = 0,
+    decimal ChargesTaxAmount = 0)
 {
     public static OrderDto From(Order o)
     {
@@ -331,7 +366,7 @@ public record OrderDto(
         o.Items.Select(i => new OrderItemDto(i.Id, i.MenuItemId, i.Name, i.Qty, i.Price, i.Modifier, i.FireBatch, i.Status.ToString().ToUpperInvariant(),
             i.NewQty, i.ReadQty, i.PreparingQty, i.ReadyQty, i.ServedQty, i.Voided, i.VoidedAt,
             i.VariantId, i.VariantName, i.SelectedModifiers.Select(SelectedModifierDto.From).ToList(), i.StationName,
-            i.TaxRatePct, i.TaxableAmount, i.TaxAmount, i.VegNonVegType?.ToString(), i.Subtitle)).ToList(),
+            i.TaxRatePct, i.TaxableAmount, i.TaxAmount, i.VegNonVegType?.ToString(), i.Subtitle, i.HsnCode)).ToList(),
         o.Subtotal,
         o.DiscountPct,
         o.DiscountAmount,
@@ -364,6 +399,8 @@ public record OrderDto(
         o.Payments.Select(OrderPaymentDto.From).ToList(),
         o.LoyaltyDiscountAmount,
         o.LoyaltyPointsRedeemed,
+        o.MilestoneDiscountAmount,
+        o.MilestoneThresholdApplied,
         o.ServiceChargeAmount,
         o.PackingChargeAmount,
         o.DeliveryChargeAmount,
@@ -376,8 +413,13 @@ public record OrderDto(
         o.ComplimentaryReason,
         !o.Paid && amountPaid > 0,
         o.Customer?.AvailablePoints,
+        o.Customer?.TotalPoints,
+        o.Customer?.MilestoneClaimedThreshold,
         o.TaxSuppressed,
-        OrderBuildingService.TaxFreeTotal(o));
+        OrderBuildingService.TaxFreeTotal(o),
+        o.ChargesTaxRatePct,
+        o.ChargesTaxableAmount,
+        o.ChargesTaxAmount);
     }
 }
 
@@ -452,7 +494,10 @@ public record CreateMenuItemRequest(
     string? VegNonVegType = null,
     int? TaxGroupId = null,
     /// <summary>MRP item — the biller types the rate at billing time. See MenuItem.IsOpenPrice.</summary>
-    bool? IsOpenPrice = null);
+    bool? IsOpenPrice = null,
+    /// <summary>HSN/SAC for this item. Null or empty leaves it on the cafe-wide default
+    /// (CafeSettings.DefaultHsnCode), which is what most items want.</summary>
+    string? HsnCode = null);
 
 /// <summary>ImageDataUri is a "data:image/...;base64,..." string — same shape the client's
 /// own image picker already produces for every other photo upload in the app.</summary>
@@ -480,7 +525,10 @@ public record UpdateMenuItemRequest(
     /// tenant default (null on a PATCH means "leave unchanged", so it can't clear).</summary>
     int? TaxGroupId = null,
     /// <summary>MRP item — the biller types the rate at billing time. See MenuItem.IsOpenPrice.</summary>
-    bool? IsOpenPrice = null);
+    bool? IsOpenPrice = null,
+    /// <summary>HSN/SAC for this item. An EMPTY string clears it back to the cafe-wide default
+    /// (the UpiVpa convention); null means leave unchanged, as everywhere else on this PATCH.</summary>
+    string? HsnCode = null);
 
 public record BulkImportResultDto(int CreatedCount, int SkippedCount);
 
@@ -644,12 +692,16 @@ public record PurchaseItemRequest(int InventoryItemId, double Quantity, string U
 /// free-text fallback, still accepted when no vendor master entry exists yet.</summary>
 public record CreatePurchaseOrderRequest(int? VendorId, string? SupplierName, string? Note, List<PurchaseItemRequest> Items);
 
-public record ReceivePurchaseItemRequest(int PurchaseItemId, double ReceivedQuantity, decimal UnitCost, DateOnly? ExpiryDate);
+/// <summary>TaxRatePct is the GST the vendor charged on this line; UnitCost stays INCLUSIVE of
+/// it (see PurchaseItem.TaxRatePct), so recording a rate never restates the purchase's value.
+/// Omitting it records "rate not known", which the input-tax report keeps out of the credit
+/// rather than counting as exempt.</summary>
+public record ReceivePurchaseItemRequest(int PurchaseItemId, double ReceivedQuantity, decimal UnitCost, DateOnly? ExpiryDate, decimal? TaxRatePct = null);
 
 /// <summary>Every line on the order must be covered — partial receipt isn't supported yet.</summary>
 public record ReceivePurchaseOrderRequest(List<ReceivePurchaseItemRequest> Items);
 
-public record PurchaseItemDto(int PurchaseItemId, int InventoryItemId, string InventoryItemName, double Quantity, string Unit, decimal? UnitCost, DateOnly? ExpiryDate, double? ReceivedQuantity);
+public record PurchaseItemDto(int PurchaseItemId, int InventoryItemId, string InventoryItemName, double Quantity, string Unit, decimal? UnitCost, DateOnly? ExpiryDate, double? ReceivedQuantity, decimal? TaxRatePct);
 
 public record PurchaseOrderDto(int Id, int? VendorId, string? SupplierName, string? VendorPhone, string? Note, string Status, string CreatedByName, DateTime CreatedAt, DateTime? ReceivedAt, string? ReceivedByName, List<PurchaseItemDto> Items);
 
@@ -789,7 +841,20 @@ public record UpdateSettingsRequest(
     /// stored CSV so a client never has to know the storage format. Each entry must be one of
     /// OrdersController.PaymentMethodCatalog. An EMPTY list is a real value (no tender is
     /// taxable), not "leave unchanged" — null is what means leave it alone.</summary>
-    List<string>? TaxablePaymentModes = null);
+    List<string>? TaxablePaymentModes = null,
+    /// <summary>Charge GST on the Service/Packing/Delivery charges too — see
+    /// CafeSettings.TaxChargesEnabled. Applies to orders placed after the change, never to
+    /// existing bills.</summary>
+    bool? TaxChargesEnabled = null,
+    /// <summary>This cafe bills under the composition scheme, so its bill prints as a BILL OF
+    /// SUPPLY rather than a TAX INVOICE — see CafeSettings.IsCompositionScheme.</summary>
+    bool? IsCompositionScheme = null,
+    /// <summary>HSN/SAC for menu items with no code of their own. An empty string clears it
+    /// (dropping the HSN column from the invoice), same as UpiVpa; null leaves it unchanged.</summary>
+    string? DefaultHsnCode = null,
+    /// <summary>Percentage of a bill that comes back as loyalty points, 0-100 (see
+    /// CafeSettings.LoyaltyEarnPct). 0 turns earning off.</summary>
+    decimal? LoyaltyEarnPct = null);
 
 // ---------- Order Note Suggestions ----------
 

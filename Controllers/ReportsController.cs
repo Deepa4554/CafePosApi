@@ -355,36 +355,170 @@ public class ReportsController : ControllerBase
     /// back if a taxable tender is added later, but for this report what matters is the rate the
     /// bill was actually charged at: grouping it under 5% would put taxable value in a slab whose
     /// tax total no longer equals taxable × rate, and the two figures an accountant reconciles
-    /// would stop agreeing.</summary>
+    /// would stop agreeing.
+    ///
+    /// Cancelled orders are excluded outright. The app refuses to cancel a paid order (Cancel
+    /// says "use Refund instead"), so this only ever bites on a row edited straight in the
+    /// database — but a cancelled bill has no supply behind it, and leaving it to be caught by
+    /// the Paid filter alone put a bill nobody owes tax on into a filing figure.
+    ///
+    /// A REFUND does not remove a bill from the slabs. Its tax is reported as a separate
+    /// reversal, prorated by how much of the bill's total was handed back — a refund is a credit
+    /// note against a supply that did happen, and a return states the two separately. Only the
+    /// Net* figures have it taken off.</summary>
     [HttpGet("tax-gst")]
     public async Task<TaxGstReportDto> TaxGst([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int? branchId = null, [FromQuery] int days = 30)
     {
         var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, days);
 
         var ordersQuery = db.Orders.Include(o => o.Items)
-            .Where(o => o.Paid && o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
+            .Where(o => o.Paid && !o.Cancelled && o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc);
         if (branchId is int bid) ordersQuery = ordersQuery.Where(o => o.BranchId == bid);
         var orders = await ordersQuery.ToListAsync();
 
         var settings = await db.Settings.FirstOrDefaultAsync();
         var defaultRate = settings?.TaxRatePct ?? 8;
+        var defaultHsn = string.IsNullOrWhiteSpace(settings?.DefaultHsnCode) ? null : settings!.DefaultHsnCode!.Trim();
 
-        var byRate = orders.SelectMany(o => o.Items.Where(i => !i.Voided).Select(i => (Order: o, Item: i)))
-            .GroupBy(x => x.Order.TaxSuppressed ? 0m : x.Item.TaxRatePct ?? defaultRate)
-            .Select(g => new TaxRateLineDto(g.Key, g.Sum(x => x.Item.TaxableAmount), g.Sum(x => x.Item.TaxAmount), g.Count()))
+        // One flattened row per taxable component, so the rate-wise and HSN-wise summaries are
+        // two groupings of the SAME rows and can't drift apart. Service/Packing/Delivery charge
+        // tax (Order.ChargesTaxAmount, only ever non-zero where the cafe opted in) rides in as
+        // one extra row per order at the slab it was charged at — it is part of Order.Tax, so
+        // leaving it out would stop this report reconciling to the period's Order.Tax sum.
+        var rows = orders.SelectMany(o => o.Items.Where(i => !i.Voided).Select(i => (
+                Rate: o.TaxSuppressed ? 0m : i.TaxRatePct ?? defaultRate,
+                Hsn: i.HsnCode ?? defaultHsn,
+                i.TaxableAmount,
+                i.TaxAmount)))
+            .Concat(orders.Where(o => o.ChargesTaxableAmount != 0 || o.ChargesTaxAmount != 0)
+                .Select(o => (
+                    Rate: o.TaxSuppressed ? 0m : o.ChargesTaxRatePct ?? 0m,
+                    // Charges are ancillary to the cafe's own service, so they belong under its
+                    // default SAC rather than any dish's HSN.
+                    Hsn: defaultHsn,
+                    TaxableAmount: o.ChargesTaxableAmount,
+                    TaxAmount: o.ChargesTaxAmount)))
+            .ToList();
+
+        var byRate = rows
+            .GroupBy(x => x.Rate)
+            .Select(g => new TaxRateLineDto(g.Key, g.Sum(x => x.TaxableAmount), g.Sum(x => x.TaxAmount), g.Count()))
             .OrderByDescending(x => x.RatePct)
             .ToList();
 
+        var byHsn = rows
+            .GroupBy(x => (x.Hsn, x.Rate))
+            .Select(g => new TaxHsnLineDto(g.Key.Hsn, g.Key.Rate, g.Sum(x => x.TaxableAmount), g.Sum(x => x.TaxAmount), g.Count()))
+            .OrderBy(x => x.HsnCode is null).ThenBy(x => x.HsnCode).ThenByDescending(x => x.RatePct)
+            .ToList();
+
+        // A partial refund reverses the same proportion of the bill's tax as it did of its
+        // total — the only split available, since a refund is recorded as one amount against
+        // the bill rather than against particular lines. Guarded against a zero total (a bill
+        // fully covered by discounts) and clamped, so a hand-edited RefundedAmount larger than
+        // the bill can't reverse more tax than was charged.
+        static decimal RefundRatio(Order o) =>
+            o.Refunded && o.Total > 0 ? Math.Clamp((o.RefundedAmount ?? 0m) / o.Total, 0m, 1m) : 0m;
+
         var bills = orders
-            .Select(o => new TaxBillLineDto(
-                o.Id, OrderNumberFormat.Bill(o), o.Title, o.CreatedAt,
-                o.Items.Where(i => !i.Voided).Sum(i => i.TaxableAmount),
-                o.Items.Where(i => !i.Voided).Sum(i => i.TaxAmount)))
+            .Select(o =>
+            {
+                var taxable = o.Items.Where(i => !i.Voided).Sum(i => i.TaxableAmount) + o.ChargesTaxableAmount;
+                var taxAmount = o.Items.Where(i => !i.Voided).Sum(i => i.TaxAmount) + o.ChargesTaxAmount;
+                return new TaxBillLineDto(
+                    o.Id, OrderNumberFormat.Bill(o), o.Title, o.CreatedAt,
+                    taxable, taxAmount, Math.Round(taxAmount * RefundRatio(o), 2));
+            })
             .Where(b => b.TaxAmount > 0)
             .OrderByDescending(b => b.CreatedAt)
             .ToList();
 
-        return new TaxGstReportDto(byRate.Sum(x => x.TaxableAmount), byRate.Sum(x => x.TaxAmount), byRate, bills);
+        var refundedTaxable = orders.Sum(o =>
+            Math.Round((o.Items.Where(i => !i.Voided).Sum(i => i.TaxableAmount) + o.ChargesTaxableAmount) * RefundRatio(o), 2));
+        var refundedTax = orders.Sum(o =>
+            Math.Round((o.Items.Where(i => !i.Voided).Sum(i => i.TaxAmount) + o.ChargesTaxAmount) * RefundRatio(o), 2));
+
+        var grossTaxable = byRate.Sum(x => x.TaxableAmount);
+        var grossTax = byRate.Sum(x => x.TaxAmount);
+
+        return new TaxGstReportDto(
+            grossTaxable, grossTax,
+            refundedTaxable, refundedTax,
+            grossTaxable - refundedTaxable, grossTax - refundedTax,
+            byRate, byHsn, bills);
+    }
+
+    /// <summary>Input tax (ITC) paid on the period's purchases and expenses, and what it leaves
+    /// owing once set against the same period's output tax — the other half of what TaxGst
+    /// reports, and the pair of figures a return is actually built from.
+    ///
+    /// Both sources record a GROSS amount (what the cafe paid) with an optional rate, so the tax
+    /// is carved out of it (amount / (1 + rate)) exactly as a tax-inclusive MRP sale line is. A
+    /// row with no rate recorded is NOT treated as zero-rated: it is excluded from the credit and
+    /// surfaced as UnrecordedGrossAmount, because "we didn't enter it" and "there was no tax"
+    /// are answers with very different consequences for whoever claims the credit.
+    ///
+    /// Purchases are dated by ReceivedAt, not order date — the credit belongs to the period the
+    /// goods and the vendor's invoice actually arrived in, and a PO can sit open for weeks.</summary>
+    [HttpGet("tax-input")]
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    public async Task<TaxInputReportDto> TaxInput([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null, [FromQuery] int days = 30)
+    {
+        var (periodStartUtc, periodEndExclusiveUtc) = ResolveIstRange(from, to, days);
+
+        var purchaseLines = await db.PurchaseOrders
+            .Where(p => p.ReceivedAt != null && p.ReceivedAt >= periodStartUtc && p.ReceivedAt < periodEndExclusiveUtc)
+            .SelectMany(p => p.Items)
+            .Where(i => i.UnitCost != null)
+            .Select(i => new { Gross = i.UnitCost!.Value * (decimal)(i.ReceivedQuantity ?? i.Quantity), i.TaxRatePct })
+            .ToListAsync();
+
+        var expenseLines = await db.CafeExpenses
+            .Where(e => e.SpentAt >= periodStartUtc && e.SpentAt < periodEndExclusiveUtc)
+            .Select(e => new { Gross = e.Amount, e.TaxRatePct })
+            .ToListAsync();
+
+        // Carve the tax out of a gross figure. Derived by subtraction rather than a second
+        // Round so taxable + tax lands exactly back on the amount that left the till.
+        static (decimal Taxable, decimal Tax) Carve(decimal gross, decimal ratePct)
+        {
+            var taxable = Math.Round(gross / (1 + ratePct / 100), 2);
+            return (taxable, gross - taxable);
+        }
+
+        var all = purchaseLines.Select(l => (Source: "Purchase Orders", l.Gross, l.TaxRatePct))
+            .Concat(expenseLines.Select(l => (Source: "Expenses", l.Gross, l.TaxRatePct)))
+            .ToList();
+
+        var rated = all.Where(l => l.TaxRatePct is not null)
+            .Select(l => { var (taxable, tax) = Carve(l.Gross, l.TaxRatePct!.Value); return (l.Source, l.Gross, Rate: l.TaxRatePct!.Value, Taxable: taxable, Tax: tax); })
+            .ToList();
+
+        var byRate = rated
+            .GroupBy(l => l.Rate)
+            .Select(g => new TaxInputRateLineDto(g.Key, g.Sum(l => l.Taxable), g.Sum(l => l.Tax), g.Count()))
+            .OrderByDescending(x => x.RatePct)
+            .ToList();
+
+        var bySource = rated
+            .GroupBy(l => l.Source)
+            .Select(g => new TaxInputSourceDto(g.Key, g.Sum(l => l.Gross), g.Sum(l => l.Taxable), g.Sum(l => l.Tax), g.Count()))
+            .OrderByDescending(x => x.TaxAmount)
+            .ToList();
+
+        // Output side over the same window, so the caller gets the net position without having
+        // to make a second call and re-derive the date range identically.
+        var outputTax = await db.Orders
+            .Where(o => o.Paid && !o.Cancelled && o.CreatedAt >= periodStartUtc && o.CreatedAt < periodEndExclusiveUtc)
+            .SumAsync(o => (decimal?)o.Tax) ?? 0m;
+
+        var totalInputTax = rated.Sum(l => l.Tax);
+
+        return new TaxInputReportDto(
+            all.Sum(l => l.Gross), rated.Sum(l => l.Taxable), totalInputTax,
+            all.Where(l => l.TaxRatePct is null).Sum(l => l.Gross),
+            outputTax, outputTax - totalInputTax,
+            byRate, bySource);
     }
 
     /// <summary>Bill-wise register — one row per order with its line items, the transaction-level

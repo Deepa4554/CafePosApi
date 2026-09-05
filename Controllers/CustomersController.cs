@@ -365,7 +365,13 @@ public class CustomersController(CafePosDbContext db) : ControllerBase
     [HttpPost("{id:int}/coupons")]
     public async Task<ActionResult<CouponDto>> IssueCoupon(int id, IssueCouponRequest req)
     {
-        if (!await db.Customers.AnyAsync(c => c.Id == id)) return NotFound();
+        var targetCustomer = await db.Customers.FindAsync(id);
+        if (targetCustomer is null) return NotFound();
+        // A coupon is only worth issuing if the customer can actually be matched back to an
+        // order at redemption — that lookup is by phone (OrderBuildingService.FindOrCreateCustomerAsync),
+        // so a phone-less record could never redeem it anyway.
+        if (string.IsNullOrWhiteSpace(targetCustomer.Phone))
+            throw new ApiValidationException("Add a phone number for this customer before issuing a coupon.");
         if (string.IsNullOrWhiteSpace(req.Title)) throw new ApiValidationException("Title is required.");
         if (req.Value <= 0) throw new ApiValidationException("Value must be greater than zero.");
         if (req.MinOrderValue < 0) throw new ApiValidationException("Minimum order value cannot be negative.");
@@ -427,6 +433,15 @@ public class CustomersController(CafePosDbContext db) : ControllerBase
     {
         if (req.Amount <= 0) throw new ApiValidationException("Amount must be greater than zero.");
         if (req.ValidDays <= 0) throw new ApiValidationException("Valid days must be greater than zero.");
+        if (req.CustomerId is int targetCustomerId)
+        {
+            var targetCustomer = await db.Customers.FindAsync(targetCustomerId);
+            if (targetCustomer is null) return NotFound();
+            // Same reasoning as IssueCoupon: redemption matches the order back to a Customer
+            // by phone, so a phone-less record could never actually redeem this card.
+            if (string.IsNullOrWhiteSpace(targetCustomer.Phone))
+                throw new ApiValidationException("Add a phone number for this customer before issuing a gift card.");
+        }
 
         var card = new GiftCard
         {

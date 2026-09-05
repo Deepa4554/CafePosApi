@@ -46,9 +46,14 @@ public interface IOrderBuildingService
     /// belongs to a different item, or a missing/non-positive rate on an MRP item. Shared by
     /// BuildOrderAsync, AddOrUpdateCartItemAsync, and OrdersController.AddItem so the three
     /// order-item-creation paths can never compute this differently.</summary>
-    Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax)> ResolveLinePricingAsync(
+    /// <paramref name="defaultHsnCode"/> is the cafe's CafeSettings.DefaultHsnCode, used for an
+    /// item with no HSN of its own. Passed in rather than looked up here so resolving it costs
+    /// one query per ORDER instead of one per line, while the resolution itself stays in this
+    /// single place. Callers that genuinely don't have settings to hand pass null, which just
+    /// means the line snapshots the item's own code or nothing.
+    Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
-        decimal? openPrice = null);
+        decimal? openPrice = null, string? defaultHsnCode = null);
 
     /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
     /// batch's own kitchen-ticket row, notifies the kitchen about just those items, and
@@ -158,6 +163,11 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var menu = await TenantScoped(db.MenuItems, explicitTenantId).Include(m => m.Station)
             .Where(m => menuIds.Contains(m.Id)).ToDictionaryAsync(m => m.Id);
 
+        // Loaded before the line loop (rather than at its old spot beside ComputeDefaultCharges
+        // below) because the loop now needs DefaultHsnCode — one fetch for the order instead of
+        // one per line. Same row either way; nothing between here and there writes to it.
+        var settings = await TenantScoped(db.Settings, explicitTenantId).FirstAsync();
+
         var orderItems = new List<OrderItem>();
         foreach (var line in items)
         {
@@ -168,8 +178,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             if (line.Qty <= 0)
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
-            var (linePrice, variantName, selections, stationName, lineTaxRatePct, linePriceIncludesTax) =
-                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice);
+            var (linePrice, variantName, selections, stationName, lineTaxRatePct, linePriceIncludesTax, lineHsnCode) =
+                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice, settings.DefaultHsnCode);
             var orderItem = new OrderItem
             {
                 MenuItemId = menuItem.Id,
@@ -185,6 +195,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 Subtitle = string.IsNullOrWhiteSpace(menuItem.Subtitle) ? null : menuItem.Subtitle,
                 TaxRatePct = lineTaxRatePct,
                 PriceIncludesTax = linePriceIncludesTax,
+                HsnCode = lineHsnCode,
             };
             // Anonymous guest requests have no JWT, so StampTenantIds would fall back to the
             // default tenant — and the ambient query filter would then hide these lines from
@@ -213,7 +224,6 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             discountAmount = Math.Round(subtotal * clampedDiscountPct / 100, 2);
         }
 
-        var settings = await TenantScoped(db.Settings, explicitTenantId).FirstAsync();
         var (defaultServiceCharge, defaultPackingCharge, defaultDeliveryCharge) = ComputeDefaultCharges(settings, orderType, subtotal);
 
         // QSR counter orders get a daily-resetting token instead of a table. The UPSERT is
@@ -290,16 +300,33 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             ServiceChargeAmount = defaultServiceCharge,
             PackingChargeAmount = defaultPackingCharge,
             DeliveryChargeAmount = defaultDeliveryCharge,
+            // Snapshotted at creation, exactly like each line's own slab: the cafe turning the
+            // setting on tomorrow must not add tax to a bill that is open on a table today, and
+            // turning it off must not strip tax from one already settled. Null (the setting off)
+            // is the pre-existing behaviour — charges added on top of tax, untaxed.
+            ChargesTaxRatePct = settings.TaxChargesEnabled ? taxRatePct : null,
         };
         await ApplyOffersAsync(db, order, explicitTenantId);
         RecomputeTotals(order, taxRatePct);
         if (explicitTenantId is int tid2) order.TenantId = tid2;
         db.Orders.Add(order);
 
-        var customer = await FindOrCreateCustomerAsync(db, guest ?? "Walk-in Guest", guestPhone, explicitTenantId, guestAddress);
-        order.Customer = customer;
-        RecordVisit(customer, order.Total);
-        TrackFavorites(db, customer, orderItems, explicitTenantId);
+        // No phone means no reliable identity to attach — matching by name alone would land
+        // this visit on a stranger who happens to share it (or, for an unnamed walk-in, on the
+        // one shared "Walk-in Guest" bucket every other nameless order piles onto too). Leave
+        // order.CustomerId null instead; a phone added later (UpdateGuest, or the khata path in
+        // Pay) links it to a real Customer via AttachCustomerAsync, same as it always has.
+        if (!string.IsNullOrWhiteSpace(guestPhone))
+        {
+            var customer = await FindOrCreateCustomerAsync(db, guest ?? "Walk-in Guest", guestPhone, explicitTenantId, guestAddress);
+            order.Customer = customer;
+            // IgnoreQueryFilters + explicit TenantId, mirroring GetTaxRatePctAsync above: a guest
+            // order arrives with no tenant on the ambient context, so the filtered set is empty.
+            var loyaltyEarnPct = (await db.Settings.IgnoreQueryFilters()
+                .FirstAsync(s => s.TenantId == effectiveTenantId)).LoyaltyEarnPct;
+            RecordVisit(customer, order.Total, loyaltyEarnPct);
+            TrackFavorites(db, customer, orderItems, explicitTenantId);
+        }
 
         // No inventory deduction here — orders are created "Open"/unfired (see doc Section
         // 4.1). Stock is only consumed once FireUnfiredItemsAsync actually sends items to
@@ -467,8 +494,10 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
         else
         {
-            var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax) =
-                await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId);
+            var defaultHsn = await TenantScoped(db.Settings, explicitTenantId)
+                .Select(s => s.DefaultHsnCode).FirstOrDefaultAsync();
+            var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
+                await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId, openPrice: null, defaultHsn);
             existing = new OrderItem
             {
                 OrderId = order.Id,
@@ -485,6 +514,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 Subtitle = string.IsNullOrWhiteSpace(menuItem.Subtitle) ? null : menuItem.Subtitle,
                 TaxRatePct = taxRatePct,
                 PriceIncludesTax = priceIncludesTax,
+                HsnCode = hsnCode,
                 FireBatch = 0,
                 // Guest cart lines are created without a JWT — stamp the tenant explicitly or
                 // StampTenantIds defaults them to tenant 1, hiding them from the cafe's staff.
@@ -503,9 +533,9 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         return existing;
     }
 
-    public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax)> ResolveLinePricingAsync(
+    public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
-        decimal? openPrice = null)
+        decimal? openPrice = null, string? defaultHsnCode = null)
     {
         var price = menuItem.Price;
         string? variantName = null;
@@ -613,7 +643,14 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         var taxRatePct = taxGroups.FirstOrDefault(t => t.Id == menuItem.TaxGroupId)?.RatePct
             ?? taxGroups.FirstOrDefault(t => t.IsDefault)?.RatePct;
 
-        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen", taxRatePct, menuItem.IsOpenPrice);
+        // The item's own HSN wins; otherwise the cafe-wide default (a restaurant bills its whole
+        // menu under one SAC). Blank is normalised to null so "code not set" is one value rather
+        // than two, and the invoice's HSN column can be dropped on a simple null check.
+        var hsn = Blank(menuItem.HsnCode) ?? Blank(defaultHsnCode);
+
+        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen", taxRatePct, menuItem.IsOpenPrice, hsn);
+
+        static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
     }
 
     public async Task<bool> FireUnfiredItemsAsync(CafePosDbContext db, Order order, int? explicitTenantId)
@@ -845,7 +882,10 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     /// Derived rather than recomputed, and exactly equal to what RecomputeTotals produces with
     /// Order.TaxSuppressed set: dropping the tax takes `Tax` off the total, except for the part
     /// of it that was carved OUT of a tax-inclusive line's price, which was never added on top in
-    /// the first place. On an already-suppressed order Tax is 0 and this is just the total.</summary>
+    /// the first place. Tax charged on the Service/Packing/Delivery charges (Order.ChargesTaxAmount,
+    /// included in Tax) needs no special case here — it is added on top like ordinary line tax, so
+    /// subtracting Tax removes it. On an already-suppressed order Tax is 0 and this is just the
+    /// total.</summary>
     public static decimal TaxFreeTotal(Order o)
     {
         var embedded = o.Items.Where(i => !i.Voided && i.PriceIncludesTax).Sum(i => i.TaxAmount);
@@ -878,7 +918,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // The order-level discounts (manual, bill, coupon, gift card, loyalty) still spread
         // proportionally, now over what's left once offers have been taken off — so a line an
         // offer already made free doesn't also soak up a share of the coupon.
-        var poolRaw = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount;
+        var poolRaw = o.DiscountAmount + o.BillDiscountAmount + o.CouponDiscountAmount + o.GiftCardAmountApplied + o.LoyaltyDiscountAmount + o.MilestoneDiscountAmount;
         var pool = Math.Min(Math.Max(0, poolRaw), Math.Max(0, afterOfferGross));
 
         decimal tax = 0;
@@ -930,6 +970,27 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             tax += line.TaxAmount;
         }
 
+        // Service/Packing/Delivery are ancillary to the same supply as the food, so at a cafe
+        // that has opted in (Order.ChargesTaxRatePct — see CafeSettings.TaxChargesEnabled) they
+        // carry tax too. Added ON TOP of the charge rather than carved out of it: unlike an MRP,
+        // these are figures the cafe sets itself, so the amount configured is the charge and the
+        // tax is additional — carving it out would quietly cut the cafe's own service revenue.
+        //
+        // Tip and RoundOff are excluded on purpose. A tip is not consideration for the supply,
+        // and the round-off is an adjustment to a figure tax has already been computed on —
+        // taxing it would make the printed total un-roundable.
+        //
+        // The order-level discount pool doesn't reduce this: those discounts are given on the
+        // goods, and the charge is billed at its stated amount either way.
+        //
+        // Null rate (the setting off, and every order placed before the column existed) leaves
+        // both figures at 0 and the arithmetic below identical to what it always was.
+        var chargeBase = o.ServiceChargeAmount + o.PackingChargeAmount + o.DeliveryChargeAmount;
+        decimal? chargesRate = o.ChargesTaxRatePct is null ? null : (o.TaxSuppressed ? 0m : o.ChargesTaxRatePct.Value);
+        o.ChargesTaxableAmount = chargesRate is null ? 0m : chargeBase;
+        o.ChargesTaxAmount = chargesRate is null ? 0m : Math.Round(chargeBase * chargesRate.Value / 100, 2);
+        tax += o.ChargesTaxAmount;
+
         o.Tax = tax;
         // Restated (callers set it to the plain gross before calling) so the printed
         // Subtotal + Tax = Total still holds once an inclusive line's tax has been carved out
@@ -975,18 +1036,20 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         if (guestPhone is not null)
             customer = await customersQuery.FirstOrDefaultAsync(c => c.Phone == guestPhone);
 
-        if (customer is null)
+        // Name-only matching requires a phone to check the match against — without one, two
+        // strangers who happen to share a name (or every unnamed walk-in, which all land on
+        // the literal "Walk-in Guest" string) would otherwise merge onto the same record.
+        // Callers with no guestPhone always get a fresh Customer below instead.
+        if (customer is null && guestPhone is not null)
         {
             var normalizedName = guestName.Trim().ToLower();
             var byName = await customersQuery.FirstOrDefaultAsync(c => c.Name.ToLower() == normalizedName);
-            // A name match only counts when it can't contradict the phone we were given:
-            // either no phone was supplied (the walk-in bucket case), or the matched
-            // record has no phone yet (it adopts this one just below). Same name but a
-            // DIFFERENT number on file is a different person — fall through and create a
-            // fresh customer instead of crediting this visit to a stranger and silently
-            // dropping the new number.
-            if (guestPhone is null || byName?.Phone is null)
-                customer = byName;
+            // A name match only counts when it can't contradict the phone we were given: the
+            // matched record either has no phone on file yet (it adopts this one just below)
+            // or already has this same one. Same name but a DIFFERENT number on file is a
+            // different person — fall through and create a fresh customer instead of
+            // crediting this visit to a stranger and silently dropping the new number.
+            if (byName?.Phone is null) customer = byName;
         }
 
         var trimmedAddress = string.IsNullOrWhiteSpace(guestAddress) ? null : guestAddress.Trim();
@@ -1013,11 +1076,11 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         return customer;
     }
 
-    private static void RecordVisit(Customer customer, decimal amountSpent)
+    private static void RecordVisit(Customer customer, decimal amountSpent, decimal loyaltyEarnPct)
     {
         customer.VisitCount += 1;
         customer.TotalSpent += amountSpent;
-        customer.TotalPoints += (int)Math.Floor(amountSpent);
+        customer.TotalPoints += LoyaltyPoints.ForSpend(amountSpent, loyaltyEarnPct);
         customer.LastVisitAt = DateTime.UtcNow;
     }
 
@@ -1113,21 +1176,37 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             InventoryBatchService.ConsumeFifoAsync(db, ingredient, amount, InventoryTransactionType.Sale,
                 orderId.ToString(), orderItemId, reason, wasteReasonCode: null, userId: null, userName: "System");
 
-        async Task TrackMissingRecipeAsync(MenuItem menuItem)
+        // Prefetched once, in one query, for every prepared menu item ON THIS FIRE that has no
+        // recipe — this used to be a FirstOrDefaultAsync per LINE inside the loop below, so a
+        // cafe that simply hasn't set up recipes yet (every prepared item "missing") paid one
+        // query per line on every single Fire for a lookup the loop asks the same handful of
+        // times over. Keyed by menu item id and mutated in place as TrackMissingRecipe runs, so
+        // two lines on the same fire sharing a never-before-seen menu item bump the same
+        // in-memory alert's OccurrenceCount instead of the old per-line query path's blind spot:
+        // its second FirstOrDefaultAsync call couldn't see the first call's still-unsaved Add
+        // and would have inserted a second alert row for the same menu item.
+        var missingRecipeMenuItemIds = preparedMenuItemIds.Where(id => !recipeByMenuItem.ContainsKey(id)).ToHashSet();
+        var missingRecipeAlerts = missingRecipeMenuItemIds.Count > 0
+            ? await TenantScoped(db.MissingRecipeAlerts, explicitTenantId)
+                .Where(a => missingRecipeMenuItemIds.Contains(a.MenuItemId))
+                .ToDictionaryAsync(a => a.MenuItemId)
+            : new Dictionary<int, MissingRecipeAlert>();
+
+        void TrackMissingRecipe(MenuItem menuItem)
         {
             logger.LogInformation("No recipe defined for menu item {MenuItemName} (id {MenuItemId}) — order {OrderId} deducted no ingredients for this line.", menuItem.Name, menuItem.Id, orderId);
-            var alert = await TenantScoped(db.MissingRecipeAlerts, explicitTenantId).FirstOrDefaultAsync(a => a.MenuItemId == menuItem.Id);
-            if (alert is null)
-            {
-                var newAlert = new MissingRecipeAlert { MenuItemId = menuItem.Id };
-                if (explicitTenantId is int tid) newAlert.TenantId = tid;
-                db.MissingRecipeAlerts.Add(newAlert);
-            }
-            else
+            if (missingRecipeAlerts.TryGetValue(menuItem.Id, out var alert))
             {
                 alert.OccurrenceCount++;
                 alert.LastOccurredAt = DateTime.UtcNow;
                 alert.Dismissed = false; // a resurfaced gap should reappear even if previously dismissed
+            }
+            else
+            {
+                var newAlert = new MissingRecipeAlert { MenuItemId = menuItem.Id };
+                if (explicitTenantId is int tid) newAlert.TenantId = tid;
+                db.MissingRecipeAlerts.Add(newAlert);
+                missingRecipeAlerts[menuItem.Id] = newAlert;
             }
         }
 
@@ -1144,7 +1223,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
 
             if (!recipeByMenuItem.TryGetValue(menuItem.Id, out var recipe))
             {
-                await TrackMissingRecipeAsync(menuItem);
+                TrackMissingRecipe(menuItem);
                 continue;
             }
 

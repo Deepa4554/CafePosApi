@@ -176,15 +176,18 @@ public record ReviewLeaveRequest(string? Note);
 /// <summary>PaymentMode is null on rows saved before the column existed — the Expenses screen
 /// buckets those under "Not set" rather than reading them as Cash, since a guess there would
 /// quietly shift money between the mode-wise totals staff are trying to reconcile.</summary>
-public record CafeExpenseDto(int Id, decimal Amount, string Category, string Purpose, string SpentBy, DateTime SpentAt, string RecordedByName, DateTime CreatedAt, string? PaymentMode)
+public record CafeExpenseDto(int Id, decimal Amount, string Category, string Purpose, string SpentBy, DateTime SpentAt, string RecordedByName, DateTime CreatedAt, string? PaymentMode, decimal? TaxRatePct, string? VendorGstin)
 {
-    public static CafeExpenseDto From(CafeExpense e) => new(e.Id, e.Amount, e.Category.ToString(), e.Purpose, e.SpentBy, e.SpentAt, e.RecordedByName, e.CreatedAt, e.PaymentMode);
+    public static CafeExpenseDto From(CafeExpense e) => new(e.Id, e.Amount, e.Category.ToString(), e.Purpose, e.SpentBy, e.SpentAt, e.RecordedByName, e.CreatedAt, e.PaymentMode, e.TaxRatePct, e.VendorGstin);
 }
 /// <summary>PaymentMode is validated against ExpensesController.ValidPaymentModes. Unlike the
 /// daily sheet it is deliberately NOT defaulted to Cash when omitted — an older client that
 /// does not send one leaves the row unset rather than padding the Cash total with entries
 /// nobody actually classified.</summary>
-public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt, string? PaymentMode = null);
+/// <summary>TaxRatePct is the GST on the vendor's bill; Amount stays INCLUSIVE of it (see
+/// CafeExpense.TaxRatePct). Omitting it records "rate not known", which reports separately from
+/// a genuine 0% rather than being counted as exempt.</summary>
+public record CreateCafeExpenseRequest(decimal Amount, ExpenseCategory Category, string Purpose, string SpentBy, DateTime? SpentAt, string? PaymentMode = null, decimal? TaxRatePct = null, string? VendorGstin = null);
 public record CategoryTotalDto(string Category, decimal Total);
 /// <summary>Mode is one of ExpensesController.ValidPaymentModes, or "Not set" for the rows that
 /// carry none. Kept separate from CategoryTotalDto despite the identical shape — the two lists

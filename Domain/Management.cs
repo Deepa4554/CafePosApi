@@ -318,6 +318,23 @@ public class CafeExpense : ITenantScoped
     /// client too old to send one — both entry paths ask for it now. Those rows report under
     /// "Not set" rather than being counted as Cash.</summary>
     public string? PaymentMode { get; set; }
+
+    /// <summary>GST rate on the vendor's bill for this expense, so the input tax paid on it can
+    /// be reported alongside purchases (see ReportsController.TaxInput).
+    ///
+    /// <see cref="Amount"/> stays INCLUSIVE of it — an expense is booked at what left the till,
+    /// and that must not change because someone recorded the rate. The tax is carved out of the
+    /// amount, same treatment as PurchaseItem.TaxRatePct.
+    ///
+    /// Null (every existing row, and anything entered without a rate) means "not recorded"
+    /// rather than exempt, and reports as its own bucket.</summary>
+    public decimal? TaxRatePct { get; set; }
+
+    /// <summary>GSTIN on the vendor's bill. Free text and unvalidated for the same reason
+    /// CafeSettings.LicenceNumber is: an expense is often a small cash purchase whose bill
+    /// carries whatever the vendor printed, and refusing to save it would just cost the cafe
+    /// the record. Null wherever nobody had a GSTIN to enter — which is most rows.</summary>
+    public string? VendorGstin { get; set; }
 }
 
 /// <summary>One line of a cafe's own daily purchase list — the fixed set of vendors and

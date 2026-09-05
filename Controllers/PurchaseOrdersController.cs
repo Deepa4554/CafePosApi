@@ -127,6 +127,10 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
             line.ReceivedQuantity = received.ReceivedQuantity;
             line.UnitCost = received.UnitCost;
             line.ExpiryDate = received.ExpiryDate;
+            // Recorded at Receive because that's when the vendor's invoice is in hand. Purely
+            // for the input-tax report — UnitCost above is unchanged by it, so the weighted
+            // average computed below and every inventory value derived from it stay put.
+            line.TaxRatePct = received.TaxRatePct;
 
             var previous = ingredient.Current;
             var addedInIngredientUnit = UnitConverter.AreCompatible(line.Unit, ingredient.Unit)
@@ -182,7 +186,7 @@ public class PurchaseOrdersController(CafePosDbContext db) : ControllerBase
             o.Id, o.VendorId, o.SupplierName,
             o.VendorId is int vid && vendorPhones.TryGetValue(vid, out var phone) ? phone : null,
             o.Note, o.Status.ToString().ToUpperInvariant(), o.CreatedByName, o.CreatedAt, o.ReceivedAt, o.ReceivedByName,
-            o.Items.Select(i => new PurchaseItemDto(i.Id, i.InventoryItemId, names.TryGetValue(i.InventoryItemId, out var n) ? n : "Unknown", i.Quantity, i.Unit, i.UnitCost, i.ExpiryDate, i.ReceivedQuantity)).ToList()
+            o.Items.Select(i => new PurchaseItemDto(i.Id, i.InventoryItemId, names.TryGetValue(i.InventoryItemId, out var n) ? n : "Unknown", i.Quantity, i.Unit, i.UnitCost, i.ExpiryDate, i.ReceivedQuantity, i.TaxRatePct)).ToList()
         )).ToList();
     }
 

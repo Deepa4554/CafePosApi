@@ -165,6 +165,7 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             item.VegNonVegType = vegType;
         item.IsOpenPrice = req.IsOpenPrice ?? false;
         item.TaxGroupId = await ValidatedTaxGroupIdAsync(req.TaxGroupId);
+        item.HsnCode = HsnCode.Normalize(req.HsnCode, "HSN/SAC code");
         db.MenuItems.Add(item);
         await db.SaveChangesAsync();
         return CreatedAtAction(nameof(List), new { id = item.Id }, item);
@@ -348,6 +349,9 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         // like every other field here, so it can't also mean "back to the tenant default".
         if (req.TaxGroupId is not null)
             item.TaxGroupId = req.TaxGroupId == 0 ? null : await ValidatedTaxGroupIdAsync(req.TaxGroupId);
+        // An empty string clears the override back to the cafe-wide default; Normalize maps
+        // blank to null, so no separate sentinel is needed the way TaxGroupId's 0 is.
+        if (req.HsnCode is not null) item.HsnCode = HsnCode.Normalize(req.HsnCode, "HSN/SAC code");
 
         await db.SaveChangesAsync();
         return item;

@@ -19,7 +19,11 @@ public static class ReceiptPdfBuilder
     /// is a plain, PDF-independent function that can be unit tested without rendering a PDF
     /// (see ReceiptPdfBuilderTests). Mirrors receiptFormat.ts's pushReduction/pushCharge on the
     /// printed slip of the same order, so both documents state the identical set of rows.</summary>
-    public readonly record struct BillAdjustmentLine(string Label, decimal Amount, bool IsReduction);
+    /// <param name="IsTaxedCharge">This charge was itself taxed (see CafeSettings.TaxChargesEnabled),
+    /// so it has to print ABOVE the GST rows — the taxable value on those rows already includes
+    /// it, and printing it below would state on the invoice that it had been added after tax.
+    /// False for every untaxed charge and every reduction, which is the pre-existing layout.</param>
+    public readonly record struct BillAdjustmentLine(string Label, decimal Amount, bool IsReduction, bool IsTaxedCharge = false);
 
     /// <summary>Every reduction/charge row RecomputeTotals folded into Order.Total, gated on
     /// having actually fired — an order with nothing applied returns an empty list, so the PDF
@@ -29,7 +33,10 @@ public static class ReceiptPdfBuilder
     {
         var lines = new List<BillAdjustmentLine>();
         void Reduction(string label, decimal amount) { if (amount > 0) lines.Add(new BillAdjustmentLine(label, amount, true)); }
-        void Charge(string label, decimal amount) { if (amount > 0) lines.Add(new BillAdjustmentLine(label, amount, false)); }
+        void Charge(string label, decimal amount, bool taxed = false) { if (amount > 0) lines.Add(new BillAdjustmentLine(label, amount, false, taxed)); }
+        // Whether Service/Packing/Delivery carried tax on THIS bill — snapshotted per order, so
+        // a cafe that switched the setting on last week still prints its older bills the old way.
+        var chargesTaxed = order.ChargesTaxAmount != 0;
 
         Reduction("Discount", order.DiscountAmount);
         Reduction("Bill Discount", order.BillDiscountAmount);
@@ -39,11 +46,14 @@ public static class ReceiptPdfBuilder
         Reduction(string.IsNullOrWhiteSpace(order.AppliedOfferTitle) ? "Offer" : order.AppliedOfferTitle, order.OfferDiscountAmount);
         Reduction(string.IsNullOrWhiteSpace(order.GiftCardCode) ? "Gift Card" : $"Gift Card ({order.GiftCardCode})", order.GiftCardAmountApplied);
         Reduction(order.LoyaltyPointsRedeemed > 0 ? $"Loyalty Points ({order.LoyaltyPointsRedeemed})" : "Loyalty Points", order.LoyaltyDiscountAmount);
-        // Charges are added on top of tax by RecomputeTotals, not taxed themselves — printed
-        // below the GST rows (see Build) so the invoice doesn't imply they were.
-        Charge("Service Charge", order.ServiceChargeAmount);
-        Charge("Packing Charge", order.PackingChargeAmount);
-        Charge("Delivery Charge", order.DeliveryChargeAmount);
+        // Where these print depends on whether they were taxed: above the GST rows when they
+        // were (they are inside the taxable value shown there), below when they weren't (added
+        // on top of an already-computed tax). See Build, which reads IsTaxedCharge to place them.
+        Charge("Service Charge", order.ServiceChargeAmount, chargesTaxed);
+        Charge("Packing Charge", order.PackingChargeAmount, chargesTaxed);
+        Charge("Delivery Charge", order.DeliveryChargeAmount, chargesTaxed);
+        // A tip is never taxed — it isn't consideration for the supply — so it always prints
+        // below the GST rows, even at a cafe that taxes the three charges above.
         Charge("Tip", order.TipAmount);
         return lines;
     }
@@ -89,6 +99,12 @@ public static class ReceiptPdfBuilder
 
                     col.Item().PaddingTop(8).LineHorizontal(0.5f);
 
+                    // What kind of document this is — see BillDocument. Sits between the cafe's
+                    // identity block and the order's own details because that is where a reader
+                    // looks for it, and where the same line sits on the thermal slip.
+                    col.Item().PaddingTop(4).AlignCenter().Text(BillDocument.Title(settings)).FontSize(11).Bold();
+                    col.Item().PaddingBottom(4).LineHorizontal(0.5f);
+
                     col.Item().Text($"Order {OrderNumberFormat.Bill(order)}").Bold();
                     col.Item().Text(order.Title).FontSize(9);
                     // CreatedAt is stored UTC; the guest holding this bill reads the cafe's own
@@ -122,6 +138,12 @@ public static class ReceiptPdfBuilder
                             row.RelativeItem(3).Text($"{item.Qty}x {item.Name}{variantSuffix}{modifierSuffix}");
                             row.RelativeItem(1).AlignRight().Text($"{item.Price * item.Qty:0.00}");
                         });
+                        // Under the line rather than in a column of its own: this bill renders
+                        // as narrow as A6, where a fourth column would squeeze the item name to
+                        // nothing. Printed only where a code exists, so a cafe that has entered
+                        // none gets exactly the bill it had before (see MenuItem.HsnCode).
+                        if (!string.IsNullOrWhiteSpace(item.HsnCode))
+                            col.Item().PaddingLeft(12).Text($"HSN/SAC: {item.HsnCode}").FontSize(7).FontColor(Colors.Grey.Darken1);
                         foreach (var mod in item.SelectedModifiers)
                             col.Item().PaddingLeft(12).Text($"+ {mod.Name}").FontSize(8).FontColor(Colors.Grey.Darken1);
                     }
@@ -148,6 +170,16 @@ public static class ReceiptPdfBuilder
                         {
                             row.RelativeItem().Text(line.Label);
                             row.RelativeItem().AlignRight().Text($"-{line.Amount:0.00}");
+                        });
+                    }
+                    // Charges that were themselves taxed belong above the GST rows — the taxable
+                    // value printed there includes them. Empty at every cafe that hasn't opted in.
+                    foreach (var line in adjustmentLines.Where(l => l.IsTaxedCharge))
+                    {
+                        col.Item().Row(row =>
+                        {
+                            row.RelativeItem().Text(line.Label);
+                            row.RelativeItem().AlignRight().Text($"{line.Amount:0.00}");
                         });
                     }
                     // One row per tax slab on the bill — a mixed 5%/12% order has to show the
@@ -204,7 +236,7 @@ public static class ReceiptPdfBuilder
                         }
                     }
 
-                    foreach (var line in adjustmentLines.Where(l => !l.IsReduction))
+                    foreach (var line in adjustmentLines.Where(l => !l.IsReduction && !l.IsTaxedCharge))
                     {
                         col.Item().Row(row =>
                         {

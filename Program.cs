@@ -63,6 +63,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<ITaxRateCache, TaxRateCache>();
+builder.Services.AddSingleton<IThermalLogoCache, ThermalLogoCache>();
 builder.Services.AddSingleton<ISubscriptionCache, SubscriptionCache>();
 builder.Services.AddSingleton<ITenantScreenAccessCache, TenantScreenAccessCache>();
 

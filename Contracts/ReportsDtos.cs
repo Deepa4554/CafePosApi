@@ -28,10 +28,43 @@ public record SalesPaymentLineDto(string Method, decimal Amount, int TxnCount);
 public record SalesReportDto(decimal GrossSales, decimal TotalDiscounts, decimal NetSales, decimal RefundsTotal, int OrderCount, List<SalesItemLineDto> ItemWise, List<SalesCategoryLineDto> CategoryWise, List<SalesPaymentLineDto> PaymentModeWise, decimal ComplimentaryTotal);
 
 public record TaxRateLineDto(decimal RatePct, decimal TaxableAmount, decimal TaxAmount, int LineCount);
+/// <summary>Rate-wise totals broken down by the HSN/SAC each line was invoiced under — the
+/// summary a GST return asks for separately from the plain rate-wise one. HsnCode is null for
+/// lines whose item had no code and whose cafe set no default; those rows are shown as "Not set"
+/// rather than dropped, so this list always totals to the same figures as ByRate.</summary>
+public record TaxHsnLineDto(string? HsnCode, decimal RatePct, decimal TaxableAmount, decimal TaxAmount, int LineCount);
 /// <summary>Bill-level tax detail for filing — one row per order, so the rate-wise totals
-/// above can be traced back to individual invoices.</summary>
-public record TaxBillLineDto(int OrderId, string OrderNumber, string Title, DateTime CreatedAt, decimal TaxableAmount, decimal TaxAmount);
-public record TaxGstReportDto(decimal TotalTaxableAmount, decimal TotalTaxCollected, List<TaxRateLineDto> ByRate, List<TaxBillLineDto> Bills);
+/// above can be traced back to individual invoices. RefundedTaxAmount is the share of this
+/// bill's tax that a refund has since reversed (0 on the vast majority of rows).</summary>
+public record TaxBillLineDto(int OrderId, string OrderNumber, string Title, DateTime CreatedAt, decimal TaxableAmount, decimal TaxAmount, decimal RefundedTaxAmount);
+/// <summary>ByRate/ByHsn/Bills are all GROSS — tax as originally invoiced. Refunds are reported
+/// as their own reversal (RefundedTaxable/RefundedTax) with the Net figures derived from them,
+/// rather than being netted into the slabs: a return states supplies and credit notes as
+/// separate figures, and quietly shrinking a slab would break a period someone had already
+/// reconciled against the bill-wise list.</summary>
+public record TaxGstReportDto(
+    decimal TotalTaxableAmount, decimal TotalTaxCollected,
+    decimal RefundedTaxableAmount, decimal RefundedTaxAmount,
+    decimal NetTaxableAmount, decimal NetTaxAmount,
+    List<TaxRateLineDto> ByRate, List<TaxHsnLineDto> ByHsn, List<TaxBillLineDto> Bills);
+
+// ---------- Input tax (ITC) ----------
+
+public record TaxInputRateLineDto(decimal RatePct, decimal TaxableAmount, decimal TaxAmount, int LineCount);
+/// <summary>Where the input tax came from — "Purchase Orders" or "Expenses" — so the two entry
+/// paths can be reconciled against their own registers.</summary>
+public record TaxInputSourceDto(string Source, decimal GrossAmount, decimal TaxableAmount, decimal TaxAmount, int LineCount);
+/// <summary>Input tax paid on purchases and expenses in the period, and what it leaves owing
+/// once set against the output tax collected over the same period.
+///
+/// UnrecordedGross is spend whose GST rate nobody entered (TaxRatePct null). It is NOT counted
+/// as zero-rated — reported on its own precisely so the figure can't be mistaken for a complete
+/// credit position, since every rupee of it may be hiding claimable tax.</summary>
+public record TaxInputReportDto(
+    decimal TotalGrossAmount, decimal TotalTaxableAmount, decimal TotalInputTax,
+    decimal UnrecordedGrossAmount,
+    decimal OutputTaxCollected, decimal NetTaxPayable,
+    List<TaxInputRateLineDto> ByRate, List<TaxInputSourceDto> BySource);
 
 // ---------- Bill-wise Order Detail ----------
 
