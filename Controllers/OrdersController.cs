@@ -13,7 +13,8 @@ namespace CafePOS.Api.Controllers;
 [Route("api/orders")]
 public class OrdersController(
     CafePosDbContext db, IAuditService audit, QrTokenService qrTokens, ReceiptTokenService receiptTokens,
-    ITaxRateCache taxRateCache, ITenantContext tenantContext, IOrderBuildingService orderBuilder) : ControllerBase
+    ITaxRateCache taxRateCache, ITenantContext tenantContext, IOrderBuildingService orderBuilder,
+    ILogger<OrdersController> logger) : ControllerBase
 {
     // REMOVED: Read stage - workflow simplified: New → Preparing → Ready → Served
     private static readonly OrderStatus[] StatusFlow =
@@ -277,6 +278,39 @@ public class OrdersController(
                 OrderBuildingService.RecomputeOrderStatus(order);
                 await db.SaveChangesAsync();
             });
+        }
+        // The POS's KOT button, which always wanted both steps — see
+        // CreateOrderRequest.FireImmediately. Deliberately a separate transaction AFTER
+        // BuildOrderAsync's has committed, exactly like the QSR/CASH branches above, rather than
+        // folded into it: that transaction holds this cafe's bill-number counter, a per-CAFE lock
+        // every concurrent order queues behind, and its window is kept short on purpose (see
+        // NextBillNumberAsync). Stretching it across the inventory work would trade one round
+        // trip for contention on every other order in the building. The wrap itself is required
+        // for the same reason spelled out above QSR.
+        else if (req.FireImmediately)
+        {
+            try
+            {
+                await DbConcurrency.InTransactionAsync(db, async () =>
+                {
+                    await orderBuilder.FireUnfiredItemsAsync(db, order, null);
+                    await db.SaveChangesAsync();
+                });
+            }
+            catch (Exception ex)
+            {
+                // The order itself is already committed, so a failed fire must NOT fail the
+                // request — the POS recovers by telling the cashier it was placed but not sent to
+                // the kitchen, and offering Fire from the Tables screen, exactly as it did when
+                // Fire was its own call and failed. The tracker is cleared and the order re-read
+                // so the response reports what actually persisted: a half-applied in-memory fire
+                // would otherwise report a KOT that never went out.
+                logger.LogError(ex, "Immediate fire failed for order {OrderId}; returning it unfired.", order.Id);
+                db.ChangeTracker.Clear();
+                order = await db.Orders.Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
+                    .Include(o => o.FireBatches).Include(o => o.Payments)
+                    .FirstAsync(o => o.Id == order.Id);
+            }
         }
 
         return CreatedAtAction(nameof(Get), new { id = order.Id }, OrderDto.From(order));
@@ -685,6 +719,9 @@ public class OrdersController(
 
         var defaultHsn = await db.Settings.Select(s => s.DefaultHsnCode).FirstOrDefaultAsync();
 
+        // One modifier-group lookup for the round, same reasoning as the menu lookup above.
+        var modifierGroups = await orderBuilder.LoadModifierGroupsAsync(db, menuItemIds, explicitTenantId: null);
+
         // Built up first and attached only once every line has passed — see the atomicity note
         // above. ResolveLinePricingAsync throws on a bad variant/add-on/MRP rate, which unwinds
         // the surrounding transaction with nothing added.
@@ -700,7 +737,7 @@ public class OrdersController(
 
             var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
                 await orderBuilder.ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds,
-                    explicitTenantId: null, line.OpenPrice, defaultHsn);
+                    explicitTenantId: null, line.OpenPrice, defaultHsn, modifierGroups);
             newItems.Add(new OrderItem
             {
                 OrderId = order.Id,

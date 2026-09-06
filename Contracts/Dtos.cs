@@ -37,7 +37,15 @@ public record CreateOrderRequest(
     int? ServedByStaffId = null,
     // Saved onto the guest's Customer record (see OrderBuildingService.FindOrCreateCustomerAsync)
     // rather than the order itself — useful for delivery, and remembered for next visit.
-    string? GuestAddress = null);
+    string? GuestAddress = null,
+    // Fire to the kitchen inside this same request instead of following up with a separate
+    // POST /orders/{id}/fire — what the POS's KOT button wants, since it always needed both and
+    // the second round trip was pure latency in front of the cashier's spinner. Ignored for
+    // QSR/CASH (already auto-fired below) and omitted by Hold Order, which must not fire at all.
+    // A fire that fails still returns the created order, unfired (CurrentFireBatch == 0), rather
+    // than failing the whole request — the order exists either way, and the POS reads that field
+    // to tell the cashier it needs firing from the Tables screen. See OrdersController.Create.
+    bool FireImmediately = false);
 
 /// <summary>Fills in (or corrects) the guest's details on an order that already exists —
 /// the "cashier hits Send-on-WhatsApp and only then realises no number was taken" case, which

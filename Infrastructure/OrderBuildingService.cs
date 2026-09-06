@@ -13,6 +13,12 @@ namespace CafePOS.Api.Infrastructure;
 /// in OrdersController.Create/CreatePublic; the extraction is purely mechanical — same
 /// behaviour, just callable from more than one controller.
 /// </summary>
+/// <summary>The handful of Modifier-group fields line pricing actually needs — option
+/// ownership, the per-type selection cap, and required-group enforcement. A named type rather
+/// than the anonymous one this used to project into, so a whole order's groups can be loaded
+/// once and handed back per line (see LoadModifierGroupsAsync).</summary>
+public record ModifierGroupInfo(int Id, string Name, string Type, bool IsRequired);
+
 public interface IOrderBuildingService
 {
     Task<Order> BuildOrderAsync(
@@ -53,7 +59,17 @@ public interface IOrderBuildingService
     /// means the line snapshots the item's own code or nothing.
     Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
-        decimal? openPrice = null, string? defaultHsnCode = null);
+        decimal? openPrice = null, string? defaultHsnCode = null,
+        IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null);
+
+    /// <summary>Every modifier group of MANY menu items in one query, keyed by menu item — hand
+    /// the whole dictionary to ResolveLinePricingAsync as <c>preloadedGroups</c> and it stops
+    /// querying per line. Pricing a line needs its item's groups whether or not the line has any
+    /// add-ons at all (required groups have to be enforced against an EMPTY selection too), so
+    /// the old per-line query fired for every single line on every order — the one part of
+    /// creating an order that still scaled with cart size.</summary>
+    Task<Dictionary<int, List<ModifierGroupInfo>>> LoadModifierGroupsAsync(
+        CafePosDbContext db, IEnumerable<int> menuItemIds, int? explicitTenantId);
 
     /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
     /// batch's own kitchen-ticket row, notifies the kitchen about just those items, and
@@ -168,6 +184,10 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // one per line. Same row either way; nothing between here and there writes to it.
         var settings = await TenantScoped(db.Settings, explicitTenantId).FirstAsync();
 
+        // Same "once per order, not once per line" treatment as the menu and settings lookups
+        // above — see LoadModifierGroupsAsync.
+        var modifierGroups = await LoadModifierGroupsAsync(db, menuIds, explicitTenantId);
+
         var orderItems = new List<OrderItem>();
         foreach (var line in items)
         {
@@ -179,7 +199,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
             var (linePrice, variantName, selections, stationName, lineTaxRatePct, linePriceIncludesTax, lineHsnCode) =
-                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice, settings.DefaultHsnCode);
+                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice, settings.DefaultHsnCode, modifierGroups);
             var orderItem = new OrderItem
             {
                 MenuItemId = menuItem.Id,
@@ -443,6 +463,25 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         return result[0];
     }
 
+    public async Task<Dictionary<int, List<ModifierGroupInfo>>> LoadModifierGroupsAsync(
+        CafePosDbContext db, IEnumerable<int> menuItemIds, int? explicitTenantId)
+    {
+        var ids = menuItemIds.Distinct().ToArray();
+        if (ids.Length == 0) return [];
+
+        var groups = await TenantScoped(db.Modifiers, explicitTenantId)
+            .Where(m => ids.Contains(m.MenuItemId))
+            .Select(m => new { m.MenuItemId, Info = new ModifierGroupInfo(m.Id, m.Name, m.Type, m.IsRequired) })
+            .ToListAsync();
+
+        // Every requested id gets an entry, including the (common) items with no groups at all —
+        // otherwise ResolveLinePricingAsync couldn't tell "this item has none" from "nothing was
+        // preloaded" and would fall back to querying for exactly the items that need it least.
+        var byMenuItem = ids.ToDictionary(id => id, _ => new List<ModifierGroupInfo>());
+        foreach (var g in groups) byMenuItem[g.MenuItemId].Add(g.Info);
+        return byMenuItem;
+    }
+
     public async Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId,
         int? variantId = null, List<int>? modifierOptionIds = null)
     {
@@ -535,7 +574,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
 
     public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
-        decimal? openPrice = null, string? defaultHsnCode = null)
+        decimal? openPrice = null, string? defaultHsnCode = null,
+        IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null)
     {
         var price = menuItem.Price;
         string? variantName = null;
@@ -570,10 +610,16 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
 
         // Every modifier group on this item, needed for three separate checks below:
         // option ownership, per-type selection limits, and required-group enforcement.
-        var groups = await TenantScoped(db.Modifiers, explicitTenantId)
-            .Where(m => m.MenuItemId == menuItem.Id)
-            .Select(m => new { m.Id, m.Name, m.Type, m.IsRequired })
-            .ToListAsync();
+        //
+        // Skipped when the caller preloaded the whole order's groups (see
+        // LoadModifierGroupsAsync). An item with no groups at all is a present-but-empty entry
+        // there, so a miss genuinely means "not preloaded", not "none".
+        var groups = preloadedGroups is not null
+            ? preloadedGroups.GetValueOrDefault(menuItem.Id) ?? []
+            : await TenantScoped(db.Modifiers, explicitTenantId)
+                .Where(m => m.MenuItemId == menuItem.Id)
+                .Select(m => new ModifierGroupInfo(m.Id, m.Name, m.Type, m.IsRequired))
+                .ToListAsync();
 
         var selections = new List<OrderItemModifier>();
         var chosenGroupIds = new List<int>();
