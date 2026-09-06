@@ -103,8 +103,6 @@ QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 var connectionString = builder.Configuration.GetConnectionString("CafePos");
 // Per-request DB round-trip accounting — see DbQueryCounter.cs. Costs one counter increment per
 // command and answers "what is this endpoint's latency actually made of" without a profiler.
-builder.Services.AddHttpContextAccessor();
-builder.Services.AddScoped<DbQueryStats>();
 builder.Services.AddSingleton<DbQueryCountingInterceptor>();
 
 builder.Services.AddDbContext<CafePosDbContext>((sp, options) =>
@@ -587,14 +585,14 @@ app.UseCors(app.Environment.IsDevelopment() ? DevCorsPolicy : ProdCorsPolicy);
 // the response-starting callback because headers are locked once the body begins.
 app.Use(async (context, next) =>
 {
+    // Started here rather than resolved from DI: the tally has to be the same object the EF
+    // interceptor writes to, and an AsyncLocal set at the top of the request guarantees that
+    // where two DI lookups did not — see DbQueryCounter.cs.
+    var stats = DbQueryStats.BeginRequest();
     context.Response.OnStarting(() =>
     {
-        var stats = context.RequestServices.GetService<DbQueryStats>();
-        if (stats is not null && !context.Response.HasStarted)
-        {
-            context.Response.Headers["X-Db-Queries"] = stats.Count.ToString();
-            context.Response.Headers["X-Db-Ms"] = ((int)stats.Elapsed.TotalMilliseconds).ToString();
-        }
+        context.Response.Headers["X-Db-Queries"] = stats.Count.ToString();
+        context.Response.Headers["X-Db-Ms"] = ((int)stats.Elapsed.TotalMilliseconds).ToString();
         return Task.CompletedTask;
     });
     await next();
