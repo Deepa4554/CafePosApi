@@ -66,12 +66,16 @@ public record AuditEntryDto(int Id, DateTime Timestamp, int? UserId, string User
 // finding #4).
 public record StaffDto(
     int Id, string Name, string Role, string? Email, string? Phone, string Status, DateTime JoinedAt,
-    decimal? HourlyRate, int? BranchId, bool HasLogin, string? PhotoUrl,
+    decimal? HourlyRate, int? BranchId, bool HasLogin, bool AccessRevoked, string? PhotoUrl,
     string? Department, string? Designation, string SalaryType, decimal? BasicSalary)
 {
-    public static StaffDto From(StaffMember s, bool includeCompensation = true) => new(
+    /// <summary>userIsActive is the linked AppUser.IsActive, looked up by the caller (List/Get
+    /// batch it, single-staff endpoints fetch it inline) — null when there's no login at all,
+    /// which From treats the same as "not revoked" since AccessRevoked only means something
+    /// when HasLogin is true.</summary>
+    public static StaffDto From(StaffMember s, bool includeCompensation = true, bool? userIsActive = null) => new(
         s.Id, s.Name, s.Role, s.Email, s.Phone, s.Status.ToString().ToUpperInvariant(), s.JoinedAt,
-        includeCompensation ? s.HourlyRate : null, s.BranchId, s.UserId is not null, s.PhotoUrl,
+        includeCompensation ? s.HourlyRate : null, s.BranchId, s.UserId is not null, s.UserId is not null && userIsActive == false, s.PhotoUrl,
         includeCompensation ? s.Department : null, includeCompensation ? s.Designation : null,
         s.SalaryType.ToString().ToUpperInvariant(), includeCompensation ? s.BasicSalary : null);
 }

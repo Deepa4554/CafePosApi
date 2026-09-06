@@ -61,6 +61,16 @@ public record CheckGiftCardResult(bool Valid, string? Error, decimal Balance);
 
 public record FavoriteItemDto(int MenuItemId, string Name, decimal Price, int OrderCount);
 
+/// <summary>What a specific customer can actually redeem right now — unused, unexpired
+/// coupons issued to them and active, non-empty, unexpired gift cards on their account.
+/// Ordered soonest-expiring first. Lets checkout surface these without the cashier having to
+/// leave the bill and look the codes up in the customer's CRM profile — see
+/// CustomersController.RedeemableOffers. Purely a display/suggestion aid: ApplyBillCoupon/
+/// ApplyBillGiftCard re-validate everything from scratch when a code is actually submitted.</summary>
+public record RedeemableCouponDto(int Id, string Code, string Title, string Type, decimal Value, decimal MinOrderValue, DateTime ExpiresAt);
+public record RedeemableGiftCardDto(int Id, string Code, decimal Balance, DateTime ExpiresAt);
+public record RedeemableOffersDto(List<RedeemableCouponDto> Coupons, List<RedeemableGiftCardDto> GiftCards);
+
 // ---------- Reward Catalog (cafe-owned, replaces the old hardcoded 4-item list) ----------
 
 public record RewardDto(int Id, string Name, int PointsCost, string Icon, bool IsActive)

@@ -647,6 +647,91 @@ public class OrdersController(
         return OrderDto.From(order);
     });
 
+    /// <summary>Batch counterpart of <see cref="AddItem"/> — appends a whole round of lines in
+    /// ONE call, with identical per-line rules and pricing.
+    ///
+    /// The POS's "Add Items" flow used to loop <c>POST /orders/{id}/items</c>, once per line, and
+    /// each of those calls paid for the whole order again: its own HTTP round trip, its own
+    /// <see cref="LoadOrderForUpdateAsync"/> (a row-lock plus the full item/modifier/batch/payment
+    /// graph), its own menu and settings lookups, its own offer re-evaluation and its own totals
+    /// recompute. Five lines meant five of everything. Here all of that happens once for the
+    /// round, and only the genuinely per-line work (<see cref="OrderBuildingService.ResolveLinePricingAsync"/>)
+    /// still runs per line.
+    ///
+    /// Atomic: the lines are validated and priced BEFORE any of them is attached, so one bad line
+    /// (unknown/unavailable item, bad quantity, missing MRP rate) rejects the whole round and adds
+    /// nothing — a waiter re-keys the round rather than discovering a half-added order. Like
+    /// AddItem this does NOT fire; the caller follows with Fire to make the round a KOT.</summary>
+    [HttpPost("{id:int}/items/batch")]
+    public Task<ActionResult<OrderDto>> AddItems(int id, AddOrderItemsRequest req) =>
+        // Same serialisation reason as AddItem: totals are recomputed from the line collection as
+        // this request sees it, so two waiters appending to the same table concurrently must not
+        // interleave — the second has to recompute over the first's lines too.
+        DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
+    {
+        if (req.Items is not { Count: > 0 })
+            throw new ApiValidationException("Add at least one item.");
+
+        var order = await LoadOrderForUpdateAsync(id);
+        if (order is null) return NotFound();
+        if (order.Paid) throw new ApiConflictException("Cannot modify a paid order.");
+
+        // One menu lookup for the whole round instead of one per line. Station is included for
+        // the same reason AddItem includes it — the line snapshots StationName for the KOT.
+        var menuItemIds = req.Items.Select(i => i.MenuItemId).Distinct().ToList();
+        var menuItems = await db.MenuItems.Include(m => m.Station)
+            .Where(m => menuItemIds.Contains(m.Id))
+            .ToDictionaryAsync(m => m.Id);
+
+        var defaultHsn = await db.Settings.Select(s => s.DefaultHsnCode).FirstOrDefaultAsync();
+
+        // Built up first and attached only once every line has passed — see the atomicity note
+        // above. ResolveLinePricingAsync throws on a bad variant/add-on/MRP rate, which unwinds
+        // the surrounding transaction with nothing added.
+        var newItems = new List<OrderItem>();
+        foreach (var line in req.Items)
+        {
+            if (!menuItems.TryGetValue(line.MenuItemId, out var menuItem))
+                throw new ApiValidationException("Menu item not found.");
+            if (!menuItem.Available)
+                throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
+            if (line.Qty <= 0)
+                throw new ApiValidationException($"Quantity must be a positive number for {menuItem.Name}.");
+
+            var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
+                await orderBuilder.ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds,
+                    explicitTenantId: null, line.OpenPrice, defaultHsn);
+            newItems.Add(new OrderItem
+            {
+                OrderId = order.Id,
+                MenuItemId = menuItem.Id,
+                Name = menuItem.Name,
+                Qty = line.Qty,
+                Price = linePrice,
+                Modifier = line.Modifier,
+                VariantId = line.VariantId,
+                VariantName = variantName,
+                SelectedModifiers = selections,
+                StationName = stationName,
+                VegNonVegType = menuItem.VegNonVegType,
+                TaxRatePct = taxRatePct,
+                PriceIncludesTax = priceIncludesTax,
+                HsnCode = hsnCode,
+                FireBatch = 0,
+            });
+        }
+
+        foreach (var item in newItems) order.Items.Add(item);
+        order.Subtotal = order.Items.Where(i => !i.Voided).Sum(i => i.Price * i.Qty);
+        // Once for the round, not once per line — a BOGO has to be judged against the finished
+        // cart anyway, so re-running it per line was both slower and (mid-loop) wrong.
+        await orderBuilder.ApplyOffersAsync(db, order, explicitTenantId: null);
+        OrderBuildingService.RecomputeTotals(order, await GetTaxRatePctAsync());
+
+        await db.SaveChangesAsync();
+        return OrderDto.From(order);
+    });
+
     /// <summary>Removes/voids an item from a not-yet-paid order.
     /// Unfired (FireBatch == 0): freely hard-deleted — nothing was ever deducted, even if
     /// other items on the same order are already Served (this one never reached the kitchen).

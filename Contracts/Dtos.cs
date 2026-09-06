@@ -60,6 +60,13 @@ public record ShiftTableRequest(string NewTableCode);
 public record AddOrderItemRequest(int MenuItemId, int Qty, string? Modifier, int? VariantId = null, List<int>? ModifierOptionIds = null,
     decimal? OpenPrice = null);
 
+/// <summary>A whole round's worth of lines for one <c>POST /orders/{id}/items/batch</c> call —
+/// same rules and pricing as <see cref="AddOrderItemRequest"/>, applied to the list as a unit.
+/// Exists because the POS's "Add Items" flow used to loop the single-item endpoint, paying a
+/// full HTTP round trip, an order row-lock, an offer re-evaluation and a totals recompute for
+/// every line the waiter had keyed in.</summary>
+public record AddOrderItemsRequest(List<AddOrderItemRequest> Items);
+
 /// <summary>Corrects an existing line's quantity — <paramref name="Qty"/> is the line's FINAL
 /// quantity, not a delta. Must be ≥ 1; removing a line entirely is still DELETE .../items/{itemId},
 /// which carries its own "order must keep at least one item" rule. Reason is required only when the

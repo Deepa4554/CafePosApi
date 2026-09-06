@@ -29,14 +29,18 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
         if (branchId is not null) query = query.Where(s => s.BranchId == branchId);
         var staff = await query.OrderBy(s => s.Name).ToListAsync();
         var includeCompensation = IsOwnerOrManager();
-        return staff.Select(s => StaffDto.From(s, includeCompensation));
+        var userIds = staff.Where(s => s.UserId is not null).Select(s => s.UserId!.Value).ToList();
+        var activeById = await db.Users.Where(u => userIds.Contains(u.Id)).ToDictionaryAsync(u => u.Id, u => u.IsActive);
+        return staff.Select(s => StaffDto.From(s, includeCompensation, s.UserId is not null ? activeById.GetValueOrDefault(s.UserId.Value, true) : null));
     }
 
     [HttpGet("{id:int}")]
     public async Task<ActionResult<StaffDto>> Get(int id)
     {
         var staff = await db.Staff.FindAsync(id);
-        return staff is null ? NotFound() : StaffDto.From(staff, IsOwnerOrManager());
+        if (staff is null) return NotFound();
+        bool? isActive = staff.UserId is null ? null : (await db.Users.FindAsync(staff.UserId.Value))?.IsActive;
+        return StaffDto.From(staff, IsOwnerOrManager(), isActive);
     }
 
     /// <summary>Whether the caller can see a staff member's compensation (HourlyRate/
@@ -280,6 +284,61 @@ public class StaffController(CafePosDbContext db, ITenantContext tenant, IPasswo
             $"{actor.Name} gave {staff.Name} app access.", AuditSeverity.High, actor.Id, actor.Name);
 
         return StaffDto.From(staff);
+    }
+
+    /// <summary>
+    /// Blocks a staff member's app login without touching the HR roster — flips the
+    /// linked AppUser.IsActive off (the same flag AuthController.Login rejects on) and
+    /// revokes every active refresh token so any already-signed-in device is kicked out
+    /// immediately too. The staff member stays on the roster and their login link
+    /// (StaffMember.UserId) is left in place, so RestoreAccess can flip it back on
+    /// later — this is deliberately not the same thing as Delete, which removes the
+    /// roster entry permanently.
+    /// </summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("{id:int}/revoke-access")]
+    public async Task<ActionResult<StaffDto>> RevokeAccess(int id)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access.");
+
+        var user = await db.Users.FindAsync(staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access.");
+
+        user.IsActive = false;
+        var activeSessions = await db.RefreshTokens.Where(t => t.UserId == user.Id && t.RevokedAt == null).ToListAsync();
+        foreach (var entry in activeSessions) entry.RevokedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+
+        var actor = await CurrentUserAsync();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Staff, staff.Id.ToString(),
+            $"{actor.Name} revoked app access for {staff.Name}.", AuditSeverity.High, actor.Id, actor.Name);
+
+        return StaffDto.From(staff, true, false);
+    }
+
+    /// <summary>Reverses RevokeAccess — flips AppUser.IsActive back on so the staff
+    /// member's existing login (same phone/password as before) works again.</summary>
+    [Authorize(Policy = Policies.OwnerOrManager)]
+    [HttpPost("{id:int}/restore-access")]
+    public async Task<ActionResult<StaffDto>> RestoreAccess(int id)
+    {
+        var staff = await db.Staff.FindAsync(id);
+        if (staff is null) return NotFound();
+        if (staff.UserId is null) throw new ApiValidationException("This staff member doesn't have app access.");
+
+        var user = await db.Users.FindAsync(staff.UserId.Value);
+        if (user is null) throw new ApiValidationException("This staff member doesn't have app access.");
+
+        user.IsActive = true;
+        await db.SaveChangesAsync();
+
+        var actor = await CurrentUserAsync();
+        await audit.LogAsync(AuditAction.Update, AuditResource.Staff, staff.Id.ToString(),
+            $"{actor.Name} restored app access for {staff.Name}.", AuditSeverity.High, actor.Id, actor.Name);
+
+        return StaffDto.From(staff, true, true);
     }
 
     [Authorize(Policy = Policies.OwnerOrManager)]

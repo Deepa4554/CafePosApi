@@ -36,6 +36,39 @@ public static class InventoryBatchService
         db.MarkStockLocked(ids);
     }
 
+    /// <summary>Loads the FIFO-consumable batches of MANY ingredients in one query, grouped by
+    /// ingredient and in the exact order <see cref="ConsumeFifoAsync"/> would have read them —
+    /// hand the right group back to it as <c>preloadedBatches</c>.
+    ///
+    /// Safe to reuse across every deduction in one unit of work, and identical to re-querying per
+    /// deduction: nothing is written until SaveChanges, so the <c>Quantity &gt; 0</c> filter (which
+    /// Postgres evaluates against committed values) matches the same rows every time, and EF hands
+    /// back the very same tracked instances — carrying whatever earlier deductions already took off
+    /// them in memory — on each of those repeat queries anyway. A batch this run creates from
+    /// scratch (ConsumeFifoAsync's negative-stock fallback) is deliberately NOT added here, for the
+    /// same reason a re-query wouldn't have seen it: it isn't saved yet.</summary>
+    public static async Task<Dictionary<int, List<InventoryBatch>>> LoadConsumableBatchesAsync(
+        CafePosDbContext db, IEnumerable<int> inventoryItemIds)
+    {
+        var ids = inventoryItemIds.Where(id => id != 0).Distinct().ToArray();
+        if (ids.Length == 0) return [];
+
+        // IgnoreQueryFilters for the same reason ConsumeFifoAsync's own query uses it: guest
+        // flows have no JWT, so the ambient filter would resolve to the default tenant and hide
+        // the real cafe's batches. No TenantId predicate is needed to scope it — an
+        // InventoryItemId belongs to exactly one tenant — but ConsumeFifoAsync still re-checks
+        // TenantId on whatever group it is handed, so a mis-grouped batch can never be drawn.
+        var batches = await db.InventoryBatches
+            .IgnoreQueryFilters()
+            .Where(b => ids.Contains(b.InventoryItemId) && b.Quantity > 0)
+            .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
+            .ThenBy(b => b.ReceivedAt)
+            .ThenBy(b => b.Id)
+            .ToListAsync();
+
+        return batches.GroupBy(b => b.InventoryItemId).ToDictionary(g => g.Key, g => g.ToList());
+    }
+
     /// <summary>Serializes one ingredient the way <see cref="LockIngredientsAsync"/> does, then —
     /// because the caller loaded the row before any lock existed — re-reads the balance that lock
     /// now protects. Only Current/LowStockNotified are refreshed rather than reloading the whole
@@ -79,7 +112,7 @@ public static class InventoryBatchService
     public static async Task ConsumeFifoAsync(
         CafePosDbContext db, InventoryItem ingredient, double amount, InventoryTransactionType type,
         string? referenceId, int? orderItemId, string? reason, WasteReason? wasteReasonCode,
-        int? userId, string userName)
+        int? userId, string userName, IReadOnlyList<InventoryBatch>? preloadedBatches = null)
     {
         if (amount <= 0) return;
 
@@ -98,13 +131,20 @@ public static class InventoryBatchService
         // OrderBuildingService.ConsumeInventoryAsync), where the ambient filter resolves to
         // the DEFAULT tenant — leaving the real cafe's batches invisible, so every guest
         // sale skipped FIFO and piled up phantom negative batches instead.
-        var batches = await db.InventoryBatches
-            .IgnoreQueryFilters()
-            .Where(b => b.TenantId == ingredient.TenantId && b.InventoryItemId == ingredient.Id && b.Quantity > 0)
-            .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
-            .ThenBy(b => b.ReceivedAt)
-            .ThenBy(b => b.Id)
-            .ToListAsync();
+        //
+        // Skipped entirely when the caller already loaded these in bulk (see
+        // LoadConsumableBatchesAsync): firing a KOT calls this once per (line x ingredient), so a
+        // six-line order whose recipes average five ingredients used to run thirty of these
+        // queries back to back inside the fire transaction.
+        var batches = preloadedBatches is not null
+            ? preloadedBatches.Where(b => b.TenantId == ingredient.TenantId).ToList()
+            : await db.InventoryBatches
+                .IgnoreQueryFilters()
+                .Where(b => b.TenantId == ingredient.TenantId && b.InventoryItemId == ingredient.Id && b.Quantity > 0)
+                .OrderBy(b => b.ExpiryDate ?? DateOnly.MaxValue)
+                .ThenBy(b => b.ReceivedAt)
+                .ThenBy(b => b.Id)
+                .ToListAsync();
 
         void WriteRow(InventoryBatch batch, double take)
         {

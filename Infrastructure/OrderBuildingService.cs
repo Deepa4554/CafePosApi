@@ -1172,9 +1172,18 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
             .Where(i => inventoryIds.Contains(i.Id))
             .ToDictionaryAsync(i => i.Id);
 
+        // Every batch this fire could draw from, in one query, instead of one query per
+        // (line x ingredient) inside ConsumeFifoAsync — see LoadConsumableBatchesAsync for why
+        // sharing one load across the whole unit of work is equivalent to re-querying each time.
+        var batchesByIngredient = await InventoryBatchService.LoadConsumableBatchesAsync(db, inventoryIds);
+
+        // An ingredient with no consumable batches passes an EMPTY group rather than null: null
+        // means "nothing preloaded, go and query", and querying would only confirm the emptiness
+        // the bulk load already established.
         Task Deduct(InventoryItem ingredient, double amount, int orderItemId) =>
             InventoryBatchService.ConsumeFifoAsync(db, ingredient, amount, InventoryTransactionType.Sale,
-                orderId.ToString(), orderItemId, reason, wasteReasonCode: null, userId: null, userName: "System");
+                orderId.ToString(), orderItemId, reason, wasteReasonCode: null, userId: null, userName: "System",
+                preloadedBatches: batchesByIngredient.GetValueOrDefault(ingredient.Id) ?? []);
 
         // Prefetched once, in one query, for every prepared menu item ON THIS FIRE that has no
         // recipe — this used to be a FirstOrDefaultAsync per LINE inside the loop below, so a

@@ -393,6 +393,30 @@ public class CustomersController(CafePosDbContext db) : ControllerBase
         return CouponDto.From(coupon);
     }
 
+    /// <summary>What this customer can redeem right now — see RedeemableOffersDto. Not
+    /// Plus-gated, same reasoning as ApplyCoupon/CheckGiftCard below: checkout has to work on
+    /// every plan tier, and this just comes back empty for a customer with nothing issued
+    /// (which is every customer on a tier that can't issue coupons/gift cards to begin with).</summary>
+    [HttpGet("{id:int}/redeemable-offers")]
+    public async Task<ActionResult<RedeemableOffersDto>> RedeemableOffers(int id)
+    {
+        if (!await db.Customers.AnyAsync(c => c.Id == id)) return NotFound();
+        var now = DateTime.UtcNow;
+
+        var coupons = await db.Coupons
+            .Where(c => c.CustomerId == id && !c.IsUsed && c.ExpiresAt > now)
+            .OrderBy(c => c.ExpiresAt)
+            .Select(c => new RedeemableCouponDto(c.Id, c.Code, c.Title, c.Type.ToString().ToUpperInvariant(), c.Value, c.MinOrderValue, c.ExpiresAt))
+            .ToListAsync();
+        var giftCards = await db.GiftCards
+            .Where(g => g.CustomerId == id && g.Status == GiftCardStatus.Active && g.Balance > 0 && g.ExpiresAt > now)
+            .OrderBy(g => g.ExpiresAt)
+            .Select(g => new RedeemableGiftCardDto(g.Id, g.Code, g.Balance, g.ExpiresAt))
+            .ToListAsync();
+
+        return new RedeemableOffersDto(coupons, giftCards);
+    }
+
     /// <summary>Validates a coupon code against an order subtotal — used by POS checkout.</summary>
     [HttpPost("coupons/apply")]
     public async Task<ActionResult<ApplyCouponResult>> ApplyCoupon(ApplyCouponRequest req)
