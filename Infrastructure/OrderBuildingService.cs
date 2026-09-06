@@ -19,6 +19,10 @@ namespace CafePOS.Api.Infrastructure;
 /// once and handed back per line (see LoadModifierGroupsAsync).</summary>
 public record ModifierGroupInfo(int Id, string Name, string Type, bool IsRequired);
 
+/// <summary>The tax slabs a line can bill at. A cafe has a handful of these in total, so the
+/// whole set is loaded once per order and matched in memory — see LoadTaxGroupsAsync.</summary>
+public record TaxGroupInfo(int Id, decimal RatePct, bool IsDefault);
+
 public interface IOrderBuildingService
 {
     Task<Order> BuildOrderAsync(
@@ -60,7 +64,8 @@ public interface IOrderBuildingService
     Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
         decimal? openPrice = null, string? defaultHsnCode = null,
-        IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null);
+        IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null,
+        IReadOnlyList<TaxGroupInfo>? preloadedTaxGroups = null);
 
     /// <summary>Every modifier group of MANY menu items in one query, keyed by menu item — hand
     /// the whole dictionary to ResolveLinePricingAsync as <c>preloadedGroups</c> and it stops
@@ -70,6 +75,12 @@ public interface IOrderBuildingService
     /// creating an order that still scaled with cart size.</summary>
     Task<Dictionary<int, List<ModifierGroupInfo>>> LoadModifierGroupsAsync(
         CafePosDbContext db, IEnumerable<int> menuItemIds, int? explicitTenantId);
+
+    /// <summary>This cafe's whole tax-slab table in one query — hand it to
+    /// ResolveLinePricingAsync as <c>preloadedTaxGroups</c>. Same story as the modifier groups
+    /// beside it: resolving a line's slab needs the item's own group OR the tenant default, so
+    /// the query ran for every line whether or not the item had a slab of its own.</summary>
+    Task<List<TaxGroupInfo>> LoadTaxGroupsAsync(CafePosDbContext db, int? explicitTenantId);
 
     /// <summary>Assigns the next fire-batch number to every not-yet-fired item, creates that
     /// batch's own kitchen-ticket row, notifies the kitchen about just those items, and
@@ -187,6 +198,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // Same "once per order, not once per line" treatment as the menu and settings lookups
         // above — see LoadModifierGroupsAsync.
         var modifierGroups = await LoadModifierGroupsAsync(db, menuIds, explicitTenantId);
+        var taxGroupSlabs = await LoadTaxGroupsAsync(db, explicitTenantId);
 
         var orderItems = new List<OrderItem>();
         foreach (var line in items)
@@ -199,7 +211,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
             var (linePrice, variantName, selections, stationName, lineTaxRatePct, linePriceIncludesTax, lineHsnCode) =
-                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice, settings.DefaultHsnCode, modifierGroups);
+                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice, settings.DefaultHsnCode, modifierGroups, taxGroupSlabs);
             var orderItem = new OrderItem
             {
                 MenuItemId = menuItem.Id,
@@ -482,6 +494,11 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         return byMenuItem;
     }
 
+    public Task<List<TaxGroupInfo>> LoadTaxGroupsAsync(CafePosDbContext db, int? explicitTenantId) =>
+        TenantScoped(db.TaxGroups, explicitTenantId)
+            .Select(t => new TaxGroupInfo(t.Id, t.RatePct, t.IsDefault))
+            .ToListAsync();
+
     public async Task<OrderItem?> AddOrUpdateCartItemAsync(CafePosDbContext db, Order order, int menuItemId, int qty, string? modifier, int explicitTenantId,
         int? variantId = null, List<int>? modifierOptionIds = null)
     {
@@ -575,7 +592,8 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
     public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
         decimal? openPrice = null, string? defaultHsnCode = null,
-        IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null)
+        IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null,
+        IReadOnlyList<TaxGroupInfo>? preloadedTaxGroups = null)
     {
         var price = menuItem.Price;
         string? variantName = null;
@@ -682,10 +700,14 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // The item's own slab wins; otherwise the tenant's default group. Both come back in
         // one query. Null means neither exists — RecomputeTotals then bills this line at
         // CafeSettings.TaxRatePct, i.e. exactly the pre-tax-group behaviour.
-        var taxGroups = await TenantScoped(db.TaxGroups, explicitTenantId)
-            .Where(t => t.Id == menuItem.TaxGroupId || t.IsDefault)
-            .Select(t => new { t.Id, t.RatePct, t.IsDefault })
-            .ToListAsync();
+        // Filtered in memory when the caller preloaded the cafe's slabs (see LoadTaxGroupsAsync);
+        // the predicate is identical either way.
+        var taxGroups = preloadedTaxGroups is not null
+            ? preloadedTaxGroups.Where(t => t.Id == menuItem.TaxGroupId || t.IsDefault).ToList()
+            : await TenantScoped(db.TaxGroups, explicitTenantId)
+                .Where(t => t.Id == menuItem.TaxGroupId || t.IsDefault)
+                .Select(t => new TaxGroupInfo(t.Id, t.RatePct, t.IsDefault))
+                .ToListAsync();
         var taxRatePct = taxGroups.FirstOrDefault(t => t.Id == menuItem.TaxGroupId)?.RatePct
             ?? taxGroups.FirstOrDefault(t => t.IsDefault)?.RatePct;
 

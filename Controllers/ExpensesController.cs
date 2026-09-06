@@ -58,8 +58,14 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
         .OrderByDescending(m => m.Total)
         .ToList();
 
+    /// <summary>`from`/`to` narrow only the `Recent` list below (the screen's history), same
+    /// IST-calendar-day math as PurchaseOrdersController.List() — the ALL TIME / THIS MONTH
+    /// summary figures above stay whole-history/whole-month regardless, so the two cards never
+    /// appear to disagree with a filter the caller applied to the list underneath them. Both
+    /// default to null ("no filter"), so a client that never passes them keeps working
+    /// unchanged.</summary>
     [HttpGet]
-    public async Task<CafeExpenseSummaryDto> List()
+    public async Task<CafeExpenseSummaryDto> List([FromQuery] DateOnly? from = null, [FromQuery] DateOnly? to = null)
     {
         var all = await db.CafeExpenses.OrderByDescending(e => e.SpentAt).ToListAsync();
         var monthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -71,12 +77,16 @@ public class ExpensesController(CafePosDbContext db) : ControllerBase
             .OrderByDescending(c => c.Total)
             .ToList();
 
+        var recent = all.AsEnumerable();
+        if (from is DateOnly f) recent = recent.Where(e => e.SpentAt >= f.ToDateTime(TimeOnly.MinValue) - IstClock.Offset);
+        if (to is DateOnly t) recent = recent.Where(e => e.SpentAt < t.ToDateTime(TimeOnly.MinValue).AddDays(1) - IstClock.Offset);
+
         return new CafeExpenseSummaryDto(
             all.Sum(e => e.Amount),
             thisMonth.Sum(e => e.Amount),
             byCategory,
             ByPaymentMode(thisMonth),
-            all.Select(CafeExpenseDto.From).ToList());
+            recent.Select(CafeExpenseDto.From).ToList());
     }
 
     /// <summary>Date-ranged view for the Expense Report — a separate action (not new params

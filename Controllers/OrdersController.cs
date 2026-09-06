@@ -721,6 +721,7 @@ public class OrdersController(
 
         // One modifier-group lookup for the round, same reasoning as the menu lookup above.
         var modifierGroups = await orderBuilder.LoadModifierGroupsAsync(db, menuItemIds, explicitTenantId: null);
+        var taxGroupSlabs = await orderBuilder.LoadTaxGroupsAsync(db, explicitTenantId: null);
 
         // Built up first and attached only once every line has passed — see the atomicity note
         // above. ResolveLinePricingAsync throws on a bad variant/add-on/MRP rate, which unwinds
@@ -737,7 +738,7 @@ public class OrdersController(
 
             var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
                 await orderBuilder.ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds,
-                    explicitTenantId: null, line.OpenPrice, defaultHsn, modifierGroups);
+                    explicitTenantId: null, line.OpenPrice, defaultHsn, modifierGroups, taxGroupSlabs);
             newItems.Add(new OrderItem
             {
                 OrderId = order.Id,
@@ -812,7 +813,7 @@ public class OrdersController(
         if (order.Items.Count(i => !i.Voided) == 1) throw new ApiValidationException("Order must contain at least one item.");
         if (item.FireBatch > 0)
         {
-            if (!IsOwnerOrManager()) return Forbid();
+            if (!IsOwnerOrManager()) return OwnerManagerOnly("Only the Owner or Manager can remove an item that's already been sent to the kitchen.");
             // The picked reason IS the reason once the list covers it — free text is only the
             // fallback, so it's only demanded when the staff member fell back to Other.
             if (item.Status is OrderStatus.Preparing or OrderStatus.Ready or OrderStatus.Served
@@ -922,7 +923,7 @@ public class OrdersController(
         }
         else
         {
-            if (!IsOwnerOrManager()) return Forbid();
+            if (!IsOwnerOrManager()) return OwnerManagerOnly("Only the Owner or Manager can reduce the quantity of an item that's already been sent to the kitchen.");
 
             var removed = ReduceFiredLineQty(item, req.Qty);
             // Anything past the not-yet-cooked units is either food already in the pass or food
@@ -1004,7 +1005,7 @@ public class OrdersController(
         // recomputed away. No stock path here, unlike qty.
         DbConcurrency.InTransactionAsync<ActionResult<OrderDto>>(db, async () =>
     {
-        if (!IsOwnerOrManager()) return Forbid();
+        if (!IsOwnerOrManager()) return OwnerManagerOnly("Only the Owner or Manager can change an item's price.");
 
         var order = await LoadOrderForUpdateAsync(id);
         if (order is null) return NotFound();
@@ -1168,7 +1169,7 @@ public class OrdersController(
         if (order.Cancelled) throw new ApiConflictException("Order is already cancelled.");
 
         var hasServedItems = order.Items.Any(i => !i.Voided && i.Status == OrderStatus.Served);
-        if (hasServedItems && !IsOwnerOrManager()) return Forbid();
+        if (hasServedItems && !IsOwnerOrManager()) return OwnerManagerOnly("Only the Owner or Manager can cancel an order that has already-served items.");
 
         foreach (var item in order.Items.Where(i => !i.Voided && i.Status != OrderStatus.Served).ToList())
             await VoidItemAsync(order, item, req.Reason);
@@ -1271,7 +1272,7 @@ public class OrdersController(
         if (batchItems.Count == 0) throw new ApiValidationException("This KOT has nothing left to cancel.");
 
         var hasServedItems = batchItems.Any(i => i.Status == OrderStatus.Served);
-        if (hasServedItems && !IsOwnerOrManager()) return Forbid();
+        if (hasServedItems && !IsOwnerOrManager()) return OwnerManagerOnly("Only the Owner or Manager can cancel a KOT that has already-served items.");
 
         foreach (var item in batchItems.Where(i => i.Status != OrderStatus.Served))
             await VoidItemAsync(order, item, req.Reason);
@@ -1915,6 +1916,18 @@ public class OrdersController(
     private bool IsOwnerOrManager() =>
         User.IsInRole(nameof(AppRole.Owner)) || User.IsInRole(nameof(AppRole.Manager));
 
+    /// <summary>Same 403 as the bare <c>Forbid()</c> every Owner/Manager-only check below used
+    /// to return, but with a body — <c>Forbid()</c> alone has none, so the client's
+    /// getApiErrorMessage had nothing to read and fell back to a generic "Could not ___ item"
+    /// with no hint that this was a permission gate, not a real failure (e.g. a Waiter/Cashier
+    /// tapping void on a fired item saw only "Could not void item").</summary>
+    private static ObjectResult OwnerManagerOnly(string reason) => new(new ProblemDetails
+    {
+        Status = StatusCodes.Status403Forbidden,
+        Title = reason,
+    })
+    { StatusCode = StatusCodes.Status403Forbidden };
+
     /// <summary>The same eager-load every endpoint here needs (lines + their add-ons, fire
     /// batches, payments) — but with the order's row locked first, so a second device doing
     /// the same thing waits for this one to commit and then reads what it actually wrote.
@@ -2031,7 +2044,7 @@ public class OrdersController(
         if (complimentaryLegs > 0)
         {
             if (!IsOwnerOrManager())
-                return Forbid();
+                return OwnerManagerOnly("Only the Owner or Manager can mark a bill Complimentary.");
             if (string.IsNullOrWhiteSpace(req?.ComplimentaryReason))
                 throw new ApiValidationException("A reason is required to mark a bill Complimentary.");
 

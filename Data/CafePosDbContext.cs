@@ -135,6 +135,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Modifier> Modifiers => Set<Modifier>();
     public DbSet<ModifierOption> ModifierOptions => Set<ModifierOption>();
     public DbSet<CafeTable> Tables => Set<CafeTable>();
+    public DbSet<WaitlistEntry> WaitlistEntries => Set<WaitlistEntry>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderItemModifier> OrderItemModifiers => Set<OrderItemModifier>();
@@ -477,6 +478,8 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // Codes only need to be unique within a cafe — two different tenants can
         // both have a table "T1" or a coupon "WELCOME10" without colliding.
         modelBuilder.Entity<CafeTable>().HasIndex(t => new { t.TenantId, t.Code }).IsUnique();
+        // The Waiting tab's only query: this tenant's still-waiting parties, oldest first.
+        modelBuilder.Entity<WaitlistEntry>().HasIndex(w => new { w.TenantId, w.Status, w.CreatedAt });
         modelBuilder.Entity<Customer>().HasIndex(c => c.Name);
         // Every khata read is "this customer's ledger, newest first" or "sum this customer's
         // rows" — both are covered by one composite. Tenant-prefixed like the rest.
@@ -766,6 +769,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // doc comment for why push and SignalR stay on separate tracks.
         [typeof(StaffTask)] = RealtimeScopes.Tasks,
         [typeof(ApprovalRequest)] = RealtimeScopes.Approvals,
+        [typeof(WaitlistEntry)] = RealtimeScopes.Waitlist,
 
         [typeof(CafeSettings)] = RealtimeScopes.Settings,
         [typeof(Branch)] = RealtimeScopes.Settings,

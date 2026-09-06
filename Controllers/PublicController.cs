@@ -180,6 +180,46 @@ public class PublicController(
     }
 
     /// <summary>
+    /// Joins the waitlist from the entrance QR — no session, no order, just Name/Phone/PartySize
+    /// added as a Waiting row for staff to see on TableManagementScreen's Waiting tab. Rate
+    /// limited per IP (see WaitlistJoinLimiter in Program.cs) since, unlike the dine-in/delivery
+    /// flows, there's no per-cafe device or session to blame a burst on.
+    /// </summary>
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("WaitlistJoinLimiter")]
+    [HttpPost("{token}/waitlist")]
+    public async Task<IActionResult> JoinWaitlist(string token, JoinWaitlistRequest req)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) throw new ApiValidationException("This link is invalid. Please re-scan the QR code.");
+        var (tenantId, tableCode) = decoded.Value;
+
+        if (QrTokenService.ModeFor(tableCode) != "waitlist")
+            throw new ApiValidationException("This QR code isn’t set up for the waitlist.");
+
+        var name = req.Name?.Trim();
+        if (string.IsNullOrWhiteSpace(name)) throw new ApiValidationException("Please enter your name.");
+        if (name.Length > 60) throw new ApiValidationException("Name can be at most 60 characters.");
+
+        var phone = new string((req.Phone ?? "").Where(char.IsDigit).ToArray());
+        if (phone.Length != 10) throw new ApiValidationException("Enter a 10-digit mobile number so staff can call you.");
+
+        if (req.PartySize < 1 || req.PartySize > 50) throw new ApiValidationException("Party size must be between 1 and 50.");
+
+        // No ambient tenant context on an anonymous request — StampTenantIds only fills TenantId
+        // in when it's still 0, so the decoded token's tenant has to be set explicitly here.
+        db.WaitlistEntries.Add(new WaitlistEntry
+        {
+            TenantId = tenantId,
+            Name = name,
+            Phone = phone,
+            PartySize = req.PartySize,
+        });
+        await db.SaveChangesAsync();
+
+        return NoContent();
+    }
+
+    /// <summary>
     /// What the customer's own tracking screen polls, from the moment the order is placed all
     /// the way through to settlement — "where is my order now". Deliberately the bare minimum:
     /// pending/cancelled/kitchen-stage/paid and a total, nothing about who else ordered or what's

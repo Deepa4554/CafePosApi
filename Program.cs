@@ -101,8 +101,15 @@ QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 // ("ConnectionStrings:CafePos") or the ConnectionStrings__CafePos env var — no
 // code change needed. See README.md.
 var connectionString = builder.Configuration.GetConnectionString("CafePos");
-builder.Services.AddDbContext<CafePosDbContext>(options =>
+// Per-request DB round-trip accounting — see DbQueryCounter.cs. Costs one counter increment per
+// command and answers "what is this endpoint's latency actually made of" without a profiler.
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<DbQueryStats>();
+builder.Services.AddSingleton<DbQueryCountingInterceptor>();
+
+builder.Services.AddDbContext<CafePosDbContext>((sp, options) =>
 {
+    options.AddInterceptors(sp.GetRequiredService<DbQueryCountingInterceptor>());
     if (string.IsNullOrWhiteSpace(connectionString))
         options.UseInMemoryDatabase("CafePosDev");
     else
@@ -412,6 +419,11 @@ const string AiLimiterPolicy = "AiLimiter";
 // Matches PublicController.MyBills' [EnableRateLimiting(...)] literal, same constraint as
 // GuestSessionLimiterPolicy above.
 const string BillLookupLimiterPolicy = "BillLookupLimiter";
+// Matches PublicController.JoinWaitlist' [EnableRateLimiting(...)] literal, same constraint
+// as GuestSessionLimiterPolicy above. Its own policy rather than reusing GuestSessionLimiter
+// since a one-shot write (join the list once) has a different abuse shape than a guest's
+// polling/ordering session.
+const string WaitlistJoinLimiterPolicy = "WaitlistJoinLimiter";
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -496,6 +508,18 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0,
             }));
 
+    // The waitlist QR sits printed at the entrance, same exposure as a guest-ordering QR —
+    // same limit as GuestSessionLimiterPolicy for the same reason.
+    options.AddPolicy(WaitlistJoinLimiterPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            }));
+
     // See AiLimiterPolicy's declaration above. Partitioned per tenant, not per IP: the cost
     // being protected (upstream API spend + a request slot held open for seconds) is the
     // cafe's, however many of its devices asked.
@@ -557,6 +581,24 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors(app.Environment.IsDevelopment() ? DevCorsPolicy : ProdCorsPolicy);
+
+// Stamps every response with how many Postgres round trips it took, and how long they
+// added up to — see DbQueryCounter.cs. Sits before auth so even a 401 is measured, and writes on
+// the response-starting callback because headers are locked once the body begins.
+app.Use(async (context, next) =>
+{
+    context.Response.OnStarting(() =>
+    {
+        var stats = context.RequestServices.GetService<DbQueryStats>();
+        if (stats is not null && !context.Response.HasStarted)
+        {
+            context.Response.Headers["X-Db-Queries"] = stats.Count.ToString();
+            context.Response.Headers["X-Db-Ms"] = ((int)stats.Elapsed.TotalMilliseconds).ToString();
+        }
+        return Task.CompletedTask;
+    });
+    await next();
+});
 
 app.UseAuthentication();
 

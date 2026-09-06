@@ -23,15 +23,21 @@ public class QrTokenService(IDataProtectionProvider provider)
     /// </summary>
     public const string DeliveryTableCode = "#DELIVERY";
 
+    /// <summary>Reserved table code for the waitlist QR — same "sits in the table-code slot"
+    /// trick as DeliveryTableCode, printed once at the entrance rather than tied to any seat.</summary>
+    public const string WaitlistTableCode = "#WAITLIST";
+
     private readonly IDataProtector _protector = provider.CreateProtector("CafePOS.QrToken.v1");
 
     public string Encode(int tenantId, string tableCode) => _protector.Protect($"{tenantId}:{tableCode}");
 
-    /// <summary>Which kind of QR a decoded table code belongs to — "delivery", "menu" (no seat),
-    /// or "table". One place, so the public page and the order endpoints can't disagree.</summary>
+    /// <summary>Which kind of QR a decoded table code belongs to — "delivery", "waitlist",
+    /// "menu" (no seat), or "table". One place, so the public page and the order endpoints
+    /// can't disagree.</summary>
     public static string ModeFor(string tableCode) => tableCode switch
     {
         DeliveryTableCode => "delivery",
+        WaitlistTableCode => "waitlist",
         "" => "menu",
         _ => "table",
     };

@@ -245,6 +245,28 @@ public class CafeTable : ITenantScoped
     public int? MergedIntoTableId { get; set; }
 }
 
+public enum WaitlistStatus { Waiting, Seated, Cancelled }
+
+/// <summary>A walk-in party waiting for a table, added by scanning the cafe's waitlist QR
+/// (see QrTokenService.WaitlistTableCode) — no login, just Name/Phone/PartySize. Staff work
+/// the list oldest-first from the Waiting tab (TableManagementScreen) and tap Seat once a
+/// table frees up. There is no automated "table's ready" notification: Phone is collected
+/// so staff can call the guest directly, nothing more (see WaitlistController.Seat, which
+/// only stamps this row — it never touches CafeTable or creates an Order itself).</summary>
+public class WaitlistEntry : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public required string Name { get; set; }
+    public required string Phone { get; set; }
+    public int PartySize { get; set; }
+    public WaitlistStatus Status { get; set; } = WaitlistStatus.Waiting;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public int? SeatedTableId { get; set; }
+    public DateTime? SeatedAt { get; set; }
+    public DateTime? CancelledAt { get; set; }
+}
+
 /// <summary>One row per (tenant, calendar day) — LastNumber is incremented atomically via an
 /// UPSERT (see OrderBuildingService.NextTokenNumberAsync) to hand out the next QSR token
 /// number for that day without a race under concurrent order creation. A new day gets a new
