@@ -177,6 +177,15 @@ builder.Services.AddScoped<IAuditService, AuditService>();
 // ---------- Order building (staff POS + anonymous QR + guest-session cart, shared) ----------
 builder.Services.AddScoped<IOrderBuildingService, OrderBuildingService>();
 
+// Queues a menu item's availability flip for the Zomato/Swiggy bridge (see
+// PlatformStockSyncService). MenuController takes this in its constructor, so without the
+// registration ASP.NET cannot build that controller at all — every action on it, GET
+// /api/menu-items included, answers 500 before it ever reaches the database. That is exactly
+// what happened in production on 2026-09-08: the whole menu appeared deleted for every cafe
+// while the rows sat untouched. Missing DI is not a compile error, which is why the build and
+// the test suite both passed.
+builder.Services.AddScoped<IPlatformStockSyncService, PlatformStockSyncService>();
+
 // ---------- Guest QR-ordering sessions (see docs/qr-ordering-session-plan) ----------
 builder.Services.AddScoped<IGuestSessionService, GuestSessionService>();
 builder.Services.AddHostedService<GuestSessionSweepService>();
