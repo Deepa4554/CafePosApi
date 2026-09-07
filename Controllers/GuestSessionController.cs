@@ -24,7 +24,8 @@ namespace CafePOS.Api.Controllers;
 [AllowAnonymous]
 [EnableRateLimiting("GuestSessionLimiter")]
 public class GuestSessionController(
-    CafePosDbContext db, QrTokenService qrTokens, IGuestSessionService sessionService, IOrderBuildingService orderBuilder) : ControllerBase
+    CafePosDbContext db, QrTokenService qrTokens, IGuestSessionService sessionService, IOrderBuildingService orderBuilder,
+    ReceiptTokenService receiptTokens) : ControllerBase
 {
     private const int HardTtlHours = 4;
 
@@ -300,7 +301,10 @@ public class GuestSessionController(
         session.Status = GuestSessionStatus.Locked;
         await db.SaveChangesAsync();
 
-        return GuestSessionStateDto.From(session, table.Code, await LoadOrderAsync(session.OrderId));
+        // The token goes out only here, at the one moment a guest can act on it: asking for the
+        // bill is what opens the option to pay for it (see GuestSessionStateDto.OrderToken).
+        return GuestSessionStateDto.From(session, table.Code, await LoadOrderAsync(session.OrderId),
+            receiptTokens.Encode(session.OrderId.Value));
     }
 
     /// <summary>Bill view — "Pay at Counter" only; no online gateway exists in this codebase

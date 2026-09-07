@@ -10,7 +10,7 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/settings")]
-public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage, CafeLogoLoader logoLoader, IThermalLogoCache thermalLogoCache) : ControllerBase
+public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRateCache taxRateCache, IImageStorageService imageStorage, CafeLogoLoader logoLoader, IThermalLogoCache thermalLogoCache, TenantSecretProtector secrets) : ControllerBase
 {
     /// <summary>
     /// The cafe's logo, pre-rendered into ESC/POS raster print bytes — ready to drop straight
@@ -110,6 +110,7 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         // creation (Order.ChargesTaxRatePct), so flipping either one never restates a bill that
         // is already open on a table or already settled.
         if (req.TaxChargesEnabled is not null) settings.TaxChargesEnabled = req.TaxChargesEnabled.Value;
+        if (req.MenuPricesIncludeTax is not null) settings.MenuPricesIncludeTax = req.MenuPricesIncludeTax.Value;
         if (req.IsCompositionScheme is not null) settings.IsCompositionScheme = req.IsCompositionScheme.Value;
         if (req.DefaultHsnCode is not null)
             settings.DefaultHsnCode = HsnCode.Normalize(req.DefaultHsnCode, "Default HSN/SAC code");
@@ -190,6 +191,37 @@ public class SettingsController(CafePosDbContext db, IAuditService audit, ITaxRa
         // Same "empty clears it" rule as UpiVpa above, and validated for the same reason: a QR is
         // scanned long after the bill left the counter, so a bad link has to fail here.
         if (req.GoogleReviewUrl is not null) settings.GoogleReviewUrl = GoogleReviewLink.Normalize(req.GoogleReviewUrl);
+
+        // --- The cafe's own Razorpay account (guest bill payments) ---
+        // Unlike every other field here, the two secrets are write-only: they are sent up when an
+        // Owner types them and are never sent back down, so the screen shows "configured" rather
+        // than a value someone could read off a shoulder. Both are encrypted at rest — see
+        // TenantSecretProtector for why these are the first credentials that needed it.
+        if (req.RazorpayKeyId is not null)
+        {
+            var keyId = req.RazorpayKeyId.Trim();
+            if (keyId.Length > 0 && !keyId.StartsWith("rzp_", StringComparison.Ordinal))
+                throw new ApiValidationException("A Razorpay key id starts with rzp_test_ or rzp_live_.");
+            settings.RazorpayKeyId = keyId.Length > 0 ? keyId : null;
+        }
+        // Empty string clears the stored secret; null (field untouched) leaves it alone. Without
+        // that distinction an Owner editing any other setting would blank their keys.
+        if (req.RazorpayKeySecret is not null)
+            settings.RazorpayKeySecretEnc = req.RazorpayKeySecret.Trim().Length > 0
+                ? secrets.Protect(req.RazorpayKeySecret.Trim()) : null;
+        if (req.RazorpayWebhookSecret is not null)
+            settings.RazorpayWebhookSecretEnc = req.RazorpayWebhookSecret.Trim().Length > 0
+                ? secrets.Protect(req.RazorpayWebhookSecret.Trim()) : null;
+
+        if (req.OnlinePaymentEnabled is not null)
+        {
+            // Refused rather than silently stored: a cafe that turns this on half-configured
+            // would show guests a Pay button that can only fail, which is worse than no button.
+            if (req.OnlinePaymentEnabled.Value
+                && (string.IsNullOrWhiteSpace(settings.RazorpayKeyId) || string.IsNullOrWhiteSpace(settings.RazorpayKeySecretEnc)))
+                throw new ApiValidationException("Enter this cafe's Razorpay key id and key secret before switching online payments on.");
+            settings.OnlinePaymentEnabled = req.OnlinePaymentEnabled.Value;
+        }
         if (req.Latitude is not null) settings.Latitude = req.Latitude;
         if (req.Longitude is not null) settings.Longitude = req.Longitude;
 

@@ -10,7 +10,11 @@ namespace CafePOS.Api.Controllers;
 
 [ApiController]
 [Route("api/menu-items")]
-public class MenuController(CafePosDbContext db, IImageStorageService imageStorage, IMenuPhotoAiService menuPhotoAi) : ControllerBase
+public class MenuController(
+    CafePosDbContext db,
+    IImageStorageService imageStorage,
+    IMenuPhotoAiService menuPhotoAi,
+    IPlatformStockSyncService platformStock) : ControllerBase
 {
     /// <summary>The internal POS grid's menu. Eager-loads Variants/Modifiers (with Options) so
     /// every item's ordering options render in a single round trip, instead of an extra fetch
@@ -316,7 +320,14 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
             if (req.Price < 0) throw new ApiValidationException("Price cannot be negative.");
             item.Price = req.Price.Value;
         }
-        if (req.Available is not null) item.Available = req.Available.Value;
+        if (req.Available is not null && req.Available.Value != item.Available)
+        {
+            item.Available = req.Available.Value;
+            // Same aggregator mirror as ToggleAvailability — an edit screen can change
+            // availability just as easily as the quick toggle does. Guarded on an actual change
+            // so re-saving an unrelated field doesn't queue a pointless push.
+            await platformStock.EnqueueAvailabilityAsync(db, item.Id, item.Available);
+        }
         if (req.Subtitle is not null) item.Subtitle = req.Subtitle;
         if (req.Image is not null) item.Image = await imageStorage.ResolveAsync("menu-items", req.Image) ?? "";
         if (req.Description is not null) item.Description = req.Description;
@@ -377,6 +388,10 @@ public class MenuController(CafePosDbContext db, IImageStorageService imageStora
         if (item is null) return NotFound();
 
         item.Available = !item.Available;
+        // Mirror the flip onto Zomato/Swiggy for any outlet this item is mapped to — "86 the
+        // paneer" has to reach the aggregators too, or online orders keep arriving for a dish the
+        // kitchen just said it can't make.
+        await platformStock.EnqueueAvailabilityAsync(db, item.Id, item.Available);
         await db.SaveChangesAsync();
         return item;
     }

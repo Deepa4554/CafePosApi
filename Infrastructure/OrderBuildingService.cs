@@ -63,7 +63,7 @@ public interface IOrderBuildingService
     /// means the line snapshots the item's own code or nothing.
     Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
-        decimal? openPrice = null, string? defaultHsnCode = null,
+        decimal? openPrice = null, string? defaultHsnCode = null, bool tenantPricesIncludeTax = false,
         IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null,
         IReadOnlyList<TaxGroupInfo>? preloadedTaxGroups = null);
 
@@ -211,7 +211,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
                 throw new ApiValidationException($"Invalid quantity for {menuItem.Name}.");
 
             var (linePrice, variantName, selections, stationName, lineTaxRatePct, linePriceIncludesTax, lineHsnCode) =
-                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice, settings.DefaultHsnCode, modifierGroups, taxGroupSlabs);
+                await ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds, explicitTenantId, line.OpenPrice, settings.DefaultHsnCode, settings.MenuPricesIncludeTax, modifierGroups, taxGroupSlabs);
             var orderItem = new OrderItem
             {
                 MenuItemId = menuItem.Id,
@@ -550,10 +550,11 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         }
         else
         {
-            var defaultHsn = await TenantScoped(db.Settings, explicitTenantId)
-                .Select(s => s.DefaultHsnCode).FirstOrDefaultAsync();
+            var lineSettings = await TenantScoped(db.Settings, explicitTenantId)
+                .Select(s => new { s.DefaultHsnCode, s.MenuPricesIncludeTax }).FirstOrDefaultAsync();
             var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
-                await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId, openPrice: null, defaultHsn);
+                await ResolveLinePricingAsync(db, menuItem, variantId, modifierOptionIds, explicitTenantId, openPrice: null,
+                    lineSettings?.DefaultHsnCode, lineSettings?.MenuPricesIncludeTax ?? false);
             existing = new OrderItem
             {
                 OrderId = order.Id,
@@ -591,7 +592,7 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
 
     public async Task<(decimal Price, string? VariantName, List<OrderItemModifier> Modifiers, string StationName, decimal? TaxRatePct, bool PriceIncludesTax, string? HsnCode)> ResolveLinePricingAsync(
         CafePosDbContext db, MenuItem menuItem, int? variantId, List<int>? modifierOptionIds, int? explicitTenantId,
-        decimal? openPrice = null, string? defaultHsnCode = null,
+        decimal? openPrice = null, string? defaultHsnCode = null, bool tenantPricesIncludeTax = false,
         IReadOnlyDictionary<int, List<ModifierGroupInfo>>? preloadedGroups = null,
         IReadOnlyList<TaxGroupInfo>? preloadedTaxGroups = null)
     {
@@ -716,7 +717,12 @@ public class OrderBuildingService(ITaxRateCache taxRateCache, ITenantContext ten
         // than two, and the invoice's HSN column can be dropped on a simple null check.
         var hsn = Blank(menuItem.HsnCode) ?? Blank(defaultHsnCode);
 
-        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen", taxRatePct, menuItem.IsOpenPrice, hsn);
+        // An MRP line is inclusive because its printed rate is a legal ceiling; a cafe with
+        // CafeSettings.MenuPricesIncludeTax on chooses the same treatment for every other line
+        // too, by billing policy rather than by law. Either reason lands on the same flag —
+        // RecomputeTotals doesn't distinguish why a line is inclusive, only that it is.
+        var priceIncludesTax = menuItem.IsOpenPrice || tenantPricesIncludeTax;
+        return (price, variantName, selections, menuItem.Station?.Name ?? "Kitchen", taxRatePct, priceIncludesTax, hsn);
 
         static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
     }

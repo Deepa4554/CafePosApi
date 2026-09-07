@@ -136,6 +136,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<ModifierOption> ModifierOptions => Set<ModifierOption>();
     public DbSet<CafeTable> Tables => Set<CafeTable>();
     public DbSet<WaitlistEntry> WaitlistEntries => Set<WaitlistEntry>();
+    public DbSet<GuestCall> GuestCalls => Set<GuestCall>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<OrderItemModifier> OrderItemModifiers => Set<OrderItemModifier>();
@@ -199,6 +200,13 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<Subscription> Subscriptions => Set<Subscription>();
     public DbSet<Integration> Integrations => Set<Integration>();
+    /// <summary>Zomato/Swiggy bridge state — the aggregator's own menu as dumped by Dyno, the
+    /// hand-made pairing of those entries to MenuItems, and the queue of availability changes
+    /// waiting to be pushed back out. See DynoWebhookController.</summary>
+    public DbSet<PlatformCatalogEntry> PlatformCatalogEntries => Set<PlatformCatalogEntry>();
+    public DbSet<PlatformMenuMapping> PlatformMenuMappings => Set<PlatformMenuMapping>();
+    public DbSet<PlatformStockChange> PlatformStockChanges => Set<PlatformStockChange>();
+    public DbSet<PlatformOrderPayload> PlatformOrderPayloads => Set<PlatformOrderPayload>();
     public DbSet<WhatsAppSession> WhatsAppSessions => Set<WhatsAppSession>();
     public DbSet<WhatsAppAuthState> WhatsAppAuthStates => Set<WhatsAppAuthState>();
     public DbSet<WhatsAppOrderTracking> WhatsAppTracking => Set<WhatsAppOrderTracking>();
@@ -402,6 +410,10 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<Subscription>().Property(s => s.Plan).HasConversion<string>();
         modelBuilder.Entity<Subscription>().Property(s => s.Cycle).HasConversion<string>();
         modelBuilder.Entity<Integration>().Property(i => i.Status).HasConversion<string>();
+        modelBuilder.Entity<PlatformCatalogEntry>().Property(p => p.Provider).HasConversion<string>();
+        modelBuilder.Entity<PlatformMenuMapping>().Property(p => p.Provider).HasConversion<string>();
+        modelBuilder.Entity<PlatformStockChange>().Property(p => p.Provider).HasConversion<string>();
+        modelBuilder.Entity<PlatformOrderPayload>().Property(p => p.Provider).HasConversion<string>();
         modelBuilder.Entity<WhatsAppSession>().Property(s => s.Status).HasConversion<string>();
         modelBuilder.Entity<WhatsAppMessageLog>().Property(m => m.Direction).HasConversion<string>();
         modelBuilder.Entity<WhatsAppMessageLog>().Property(m => m.Type).HasConversion<string>();
@@ -480,6 +492,8 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         modelBuilder.Entity<CafeTable>().HasIndex(t => new { t.TenantId, t.Code }).IsUnique();
         // The Waiting tab's only query: this tenant's still-waiting parties, oldest first.
         modelBuilder.Entity<WaitlistEntry>().HasIndex(w => new { w.TenantId, w.Status, w.CreatedAt });
+        // The floor screen only ever asks for this tenant's OPEN calls, oldest first.
+        modelBuilder.Entity<GuestCall>().HasIndex(g => new { g.TenantId, g.Status, g.CreatedAt });
         modelBuilder.Entity<Customer>().HasIndex(c => c.Name);
         // Every khata read is "this customer's ledger, newest first" or "sum this customer's
         // rows" — both are covered by one composite. Tenant-prefixed like the rest.
@@ -642,6 +656,28 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         // it degrades into a full scan of an append-only audit table that only ever grows.
         modelBuilder.Entity<WhatsAppMessageLog>().HasIndex(m => new { m.TenantId, m.Direction, m.Status, m.NextAttemptAt });
 
+        // Idempotent ingestion of aggregator orders. Dyno re-POSTs the same order every 40s
+        // until it gets a 200, so without this a slow or half-failed response mints duplicate
+        // orders — and a duplicate here means a duplicate KOT and a dish cooked twice.
+        // Filtered to rows that actually came from a platform: every POS/QR order leaves these
+        // columns null, and NULLs must not collide with each other.
+        modelBuilder.Entity<Order>()
+            .HasIndex(o => new { o.TenantId, o.PlatformProvider, o.PlatformOrderId })
+            .IsUnique()
+            .HasFilter("\"PlatformOrderId\" IS NOT NULL");
+        // The bridge's 30s poll asks "what's still pending for this outlet?" — same shape of
+        // hot, every-few-seconds query as the WhatsApp queue index above.
+        modelBuilder.Entity<PlatformStockChange>()
+            .HasIndex(p => new { p.TenantId, p.ResId, p.ProcessedAt });
+        // One mapping per aggregator entity, so a re-mapping updates rather than silently
+        // stacking a second contradictory row that the ingest path would pick between at random.
+        modelBuilder.Entity<PlatformMenuMapping>()
+            .HasIndex(p => new { p.TenantId, p.Provider, p.ResId, p.PlatformEntityId, p.IsCategory })
+            .IsUnique();
+        modelBuilder.Entity<PlatformCatalogEntry>()
+            .HasIndex(p => new { p.TenantId, p.Provider, p.ResId, p.PlatformEntityId, p.IsCategory })
+            .IsUnique();
+
         ApplyTenantIsolation(modelBuilder);
     }
 
@@ -770,6 +806,7 @@ public class CafePosDbContext(DbContextOptions<CafePosDbContext> options, ITenan
         [typeof(StaffTask)] = RealtimeScopes.Tasks,
         [typeof(ApprovalRequest)] = RealtimeScopes.Approvals,
         [typeof(WaitlistEntry)] = RealtimeScopes.Waitlist,
+        [typeof(GuestCall)] = RealtimeScopes.GuestCalls,
 
         [typeof(CafeSettings)] = RealtimeScopes.Settings,
         [typeof(Branch)] = RealtimeScopes.Settings,

@@ -30,6 +30,7 @@ public static class RealtimeScopes
     public const string Approvals = "approvals";
     public const string Settings = "settings";
     public const string Waitlist = "waitlist";
+    public const string GuestCalls = "guest-calls";
 }
 
 /// <summary>Thin wrapper around IHubContext&lt;OrdersHub&gt; so CafePosDbContext (which fires

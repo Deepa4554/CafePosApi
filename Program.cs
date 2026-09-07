@@ -83,6 +83,8 @@ builder.Services.AddDataProtection()
     .SetApplicationName("CafePOS")
     .PersistKeysToDbContext<CafePosDbContext>();
 builder.Services.AddSingleton<QrTokenService>();
+// Encrypts the credentials a CAFE hands us (its own Razorpay keys) — see TenantSecretProtector.
+builder.Services.AddSingleton<TenantSecretProtector>();
 builder.Services.AddSingleton<ReceiptTokenService>();
 // Scoped, not singleton: it takes ILogger<T> and an IHttpClientFactory, and has no state of
 // its own worth sharing across requests.
@@ -265,6 +267,11 @@ builder.Services.Configure<RazorpayOptions>(builder.Configuration.GetSection("Ra
 builder.Services.AddHttpClient<IRazorpayClient, RazorpayClient>(client =>
     // Well under the 100s HttpClient default: the owner is sitting in front of a modal
     // waiting for this, and a create-order that's still going after 20s has failed.
+    client.Timeout = TimeSpan.FromSeconds(20));
+
+// The same Razorpay API, charged against a CAFE's own account rather than the platform's —
+// this is what a guest pays their restaurant bill through (see TenantRazorpayClient).
+builder.Services.AddHttpClient<ITenantRazorpayClient, TenantRazorpayClient>(client =>
     client.Timeout = TimeSpan.FromSeconds(20));
 
 // Borzo courier booking for DELIVERY orders (see DeliveryController). No BaseAddress and no

@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260907172246_AddGuestCalls")]
+    partial class AddGuestCalls
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -694,9 +697,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<string>("NotificationCategoryOverridesJson")
                         .HasColumnType("text");
 
-                    b.Property<bool>("OnlinePaymentEnabled")
-                        .HasColumnType("boolean");
-
                     b.Property<bool>("OrderPendingConfirmationAlertsEnabled")
                         .HasColumnType("boolean");
 
@@ -743,15 +743,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<bool>("QsrEnabled")
                         .HasColumnType("boolean");
-
-                    b.Property<string>("RazorpayKeyId")
-                        .HasColumnType("text");
-
-                    b.Property<string>("RazorpayKeySecretEnc")
-                        .HasColumnType("text");
-
-                    b.Property<string>("RazorpayWebhookSecretEnc")
-                        .HasColumnType("text");
 
                     b.Property<string>("ReceiptFooter")
                         .IsRequired()

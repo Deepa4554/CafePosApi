@@ -3,6 +3,7 @@ using System;
 using CafePOS.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CafePOS.Api.Migrations
 {
     [DbContext(typeof(CafePosDbContext))]
-    partial class CafePosDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260906183832_AddMenuPricesIncludeTax")]
+    partial class AddMenuPricesIncludeTax
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -679,9 +682,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<decimal?>("Longitude")
                         .HasColumnType("numeric");
 
-                    b.Property<decimal>("LoyaltyEarnPct")
-                        .HasColumnType("numeric");
-
                     b.Property<bool>("MenuPricesIncludeTax")
                         .HasColumnType("boolean");
 
@@ -693,9 +693,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<string>("NotificationCategoryOverridesJson")
                         .HasColumnType("text");
-
-                    b.Property<bool>("OnlinePaymentEnabled")
-                        .HasColumnType("boolean");
 
                     b.Property<bool>("OrderPendingConfirmationAlertsEnabled")
                         .HasColumnType("boolean");
@@ -743,15 +740,6 @@ namespace CafePOS.Api.Migrations
 
                     b.Property<bool>("QsrEnabled")
                         .HasColumnType("boolean");
-
-                    b.Property<string>("RazorpayKeyId")
-                        .HasColumnType("text");
-
-                    b.Property<string>("RazorpayKeySecretEnc")
-                        .HasColumnType("text");
-
-                    b.Property<string>("RazorpayWebhookSecretEnc")
-                        .HasColumnType("text");
 
                     b.Property<string>("ReceiptFooter")
                         .IsRequired()
@@ -980,9 +968,6 @@ namespace CafePOS.Api.Migrations
                     b.Property<DateTime>("LastVisitAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int>("MilestoneClaimedThreshold")
-                        .HasColumnType("integer");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
@@ -1189,52 +1174,6 @@ namespace CafePOS.Api.Migrations
                         .IsUnique();
 
                     b.ToTable("GiftCards");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.GuestCall", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<DateTime?>("AcknowledgedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("AcknowledgedByUserId")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("Kind")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("OrderId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("TableCode")
-                        .HasColumnType("text");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<int?>("TokenNumber")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.HasIndex("TenantId", "Status", "CreatedAt");
-
-                    b.ToTable("GuestCalls");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.GuestSession", b =>
@@ -1602,35 +1541,6 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId");
 
                     b.ToTable("LeaveRequests");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.LoyaltyMilestone", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<decimal>("DiscountPct")
-                        .HasColumnType("numeric");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<int>("ThresholdPoints")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.ToTable("LoyaltyMilestones");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.MenuCategory", b =>
@@ -2166,15 +2076,6 @@ namespace CafePOS.Api.Migrations
                         .HasColumnType("numeric");
 
                     b.Property<int>("LoyaltyPointsRedeemed")
-                        .HasColumnType("integer");
-
-                    b.Property<decimal>("MilestoneDiscountAmount")
-                        .HasColumnType("numeric");
-
-                    b.Property<int?>("MilestonePreviousClaimedThreshold")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("MilestoneThresholdApplied")
                         .HasColumnType("integer");
 
                     b.Property<decimal>("OfferDiscountAmount")
@@ -4287,54 +4188,6 @@ namespace CafePOS.Api.Migrations
                     b.HasIndex("TenantId");
 
                     b.ToTable("Vendors");
-                });
-
-            modelBuilder.Entity("CafePOS.Api.Domain.WaitlistEntry", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<DateTime?>("CancelledAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<int>("PartySize")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Phone")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTime?>("SeatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("SeatedTableId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TenantId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.HasIndex("TenantId", "Status", "CreatedAt");
-
-                    b.ToTable("WaitlistEntries");
                 });
 
             modelBuilder.Entity("CafePOS.Api.Domain.WhatsAppAuthState", b =>

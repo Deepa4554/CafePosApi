@@ -33,6 +33,17 @@ public class TablesController(CafePosDbContext db, QrTokenService qrTokens, ITen
         return new { token = qrTokens.Encode(tenant.TenantIdOrDefault, QrTokenService.DeliveryTableCode) };
     }
 
+    /// <summary>A QR token for the counter/token queue — one card at the till. Scanning it opens
+    /// the ordering page in counter mode: the customer orders from their own phone, staff confirm
+    /// it, and the page then shows the token number their name will be called by (see
+    /// PublicController.CreateCounterOrder). The order arrives as an ordinary QSR ticket, so it
+    /// lands on the Token Dashboard the counter already works from.</summary>
+    [HttpGet("token-qr-token")]
+    public ActionResult<object> GetCounterQrToken()
+    {
+        return new { token = qrTokens.Encode(tenant.TenantIdOrDefault, QrTokenService.CounterTableCode) };
+    }
+
     /// <summary>Tables with live occupancy — a table only shows "empty" once its order
     /// is BOTH paid AND served (paying alone doesn't free it; the guest may still be
     /// sitting there waiting on food). Each table also carries an encrypted QrToken —

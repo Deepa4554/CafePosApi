@@ -373,7 +373,15 @@ public static class CustomerOrderPage
   .past-amount { font-weight: 700; }
   .past-send { background: none; border: 1px solid var(--divider); color: var(--heading); border-radius: 10px; padding: 7px 10px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
   .past-note { font-size: 13px; color: var(--muted); padding-top: 10px; text-align: left; }
-  #app, #placed-screen, #bill-screen, #join-screen, #staff-assist-screen, #ended-screen, #waiting-screen, #settled-screen { display: none; }
+  #app, #placed-screen, #bill-screen, #join-screen, #staff-assist-screen, #ended-screen, #waiting-screen, #settled-screen, #token-screen { display: none; }
+  /* The token number, sized to be read across a counter rather than in the hand — this is the
+     one thing on the screen a stranger is meant to be able to check at a glance. */
+  #token-badge {
+    background: var(--accent); color: #fff; border-radius: 20px;
+    padding: 18px 34px; margin-bottom: 18px; text-align: center; min-width: 190px;
+  }
+  #token-label { font-size: 12px; font-weight: 700; letter-spacing: 2px; opacity: 0.85; }
+  #token-number { font-size: 76px; font-weight: 800; line-height: 1.05; font-variant-numeric: tabular-nums; }
   .waiting-spinner {
     width: 40px; height: 40px; border-radius: 50%; margin: 4px auto 4px;
     border: 4px solid var(--divider); border-top-color: var(--accent);
@@ -471,6 +479,27 @@ public static class CustomerOrderPage
     <a class="place-btn pdf-btn" id="waiting-track-link" target="_blank" rel="noopener" style="display:none"></a>
   </div>
 
+  <!-- Counter/token QR only. The number is the whole point of the screen and is sized to be
+       readable at arm's length across a noisy counter — this is what the customer holds up when
+       their turn is called, so it outranks everything else on it. Not shown until staff accept
+       the order (see startCounterStatusPolling): a queue position for food nobody agreed to make
+       is worse than a short wait. -->
+  <div id="token-screen" class="center-screen">
+    <div id="token-badge">
+      <div id="token-label">YOUR TOKEN</div>
+      <div id="token-number">—</div>
+    </div>
+    <h2 id="token-heading">Confirmed — you're in the queue</h2>
+    <p id="token-sub">Pay at the counter when your number is called.</p>
+    <!-- Same two calls the seated flow offers. A counter guest is standing in the same room as
+         the staff, so "come here" and "I'd like to settle" are both still real asks. -->
+    <div class="action-row" id="token-call-row">
+      <button class="secondary-btn" id="token-call-waiter-btn">Call Staff</button>
+      <button class="secondary-btn" id="token-request-bill-btn">Request Bill</button>
+    </div>
+    <a class="place-btn pdf-btn" id="token-bill-link" target="_blank" rel="noopener" style="display:none">Download Bill (PDF)</a>
+  </div>
+
   <div id="placed-screen" class="wrap">
     <header><h1 id="placed-business-name">CafePOS</h1><div class="table-line" id="placed-table-line"></div></header>
     <div class="confirm-card">
@@ -480,11 +509,11 @@ public static class CustomerOrderPage
       <div class="order-total" id="placed-total"></div>
       <div class="action-row">
         <button class="secondary-btn" id="add-more-btn">Add more items</button>
-        <!-- Request Bill is hidden for now (product decision), not deleted: the whole flow
-             behind it still works end to end — /session/request-bill, the LOCKED status, and
-             the bill screen — so re-enabling it later is just dropping this style back off.
-             Guests settle at the counter meanwhile. -->
-        <button class="place-btn" id="request-bill-btn" style="display:none">Request Bill</button>
+        <!-- Both raise a call on the floor screen (see PublicController.RaiseGuestCall), which
+             is what actually rings at the till. Request Bill additionally locks a TABLE's guest
+             session, which is why it stays wired to the existing session endpoint as well. -->
+        <button class="secondary-btn" id="call-waiter-btn">Call Waiter</button>
+        <button class="place-btn" id="request-bill-btn">Request Bill</button>
       </div>
     </div>
   </div>
@@ -494,7 +523,11 @@ public static class CustomerOrderPage
     <div class="confirm-card">
       <h2>Your Bill</h2>
       <div id="bill-lines" style="text-align:left"></div>
-      <div class="locked-note">Bill requested — ordering is closed. Please pay at the counter.</div>
+      <!-- Only for a cafe that has switched online payments on and finished entering its own
+           Razorpay keys (see CafeSettings.OnlinePaymentEnabled). Everyone else keeps the
+           pay-at-the-counter line below, unchanged. -->
+      <button class="place-btn" id="pay-now-btn" style="display:none">Pay Now</button>
+      <div class="locked-note" id="bill-pay-note">Bill requested — ordering is closed. Please pay at the counter.</div>
     </div>
   </div>
 
@@ -586,6 +619,18 @@ public static class CustomerOrderPage
     // just can't hand it to a courier automatically.
     deliveryLat: null,
     deliveryLng: null,
+    // Counter/token QR (see QrTokenService.CounterTableCode). Sessionless and locally-carted for
+    // exactly the same reasons as deliveryMode above — the two share every cart branch in this
+    // file and part company only at placement, where this one waits for a token number instead
+    // of an address.
+    counterMode: false,
+    // The signed per-order token a sessionless flow gets back when it places (counter). Lets a
+    // later guest call say which order is asking; null everywhere a table code already does.
+    orderToken: null,
+    // The bill PDF is opened for the customer once, the first time the poll sees the order
+    // settled. Without this the four-second tick would reopen it for as long as the page stayed
+    // on screen.
+    billOpened: false,
   };
   var pollTimer = null;
   // One entry per cart line while its cart/items POST is in flight — see changeLineQty.
@@ -731,10 +776,11 @@ public static class CustomerOrderPage
   }
 
   function startPolling() {
-    // Polling reads the guest SESSION, which a home-delivery order doesn't have — left to run
-    // it would hammer /session/state with a table code matching no row, and the first 410 would
-    // throw a "this session has ended" screen over a perfectly good confirmation.
-    if (state.deliveryMode) return;
+    // Polling reads the guest SESSION, which neither a home-delivery nor a counter order has —
+    // left to run it would hammer /session/state with a table code matching no row, and the
+    // first 410 would throw a "this session has ended" screen over a perfectly good
+    // confirmation. Each of those flows polls its own order instead.
+    if (state.deliveryMode || state.counterMode) return;
     stopPolling();
     pollTimer = setInterval(function () {
       fetchJson(sessionBase + '/state').then(handleStateUpdate).catch(function (err) {
@@ -785,7 +831,7 @@ public static class CustomerOrderPage
   }
 
   function hideAllScreens() {
-    ['app', 'join-screen', 'staff-assist-screen', 'ended-screen', 'waiting-screen', 'placed-screen', 'bill-screen', 'settled-screen'].forEach(function (id) {
+    ['app', 'join-screen', 'staff-assist-screen', 'ended-screen', 'waiting-screen', 'placed-screen', 'bill-screen', 'settled-screen', 'token-screen'].forEach(function (id) {
       document.getElementById(id).style.display = 'none';
     });
     document.getElementById('cart-bar').style.display = 'none';
@@ -1084,6 +1130,7 @@ public static class CustomerOrderPage
 
       addRow('Total', money(order.total), { total: true });
     }
+    renderPayNow(order);
     document.getElementById('bill-screen').style.display = 'block';
     // Ordering is closed once LOCKED, but polling has to keep running: settling is what ends
     // the session from here, and that 410 is now what hands over the bill PDF (see
@@ -1619,10 +1666,10 @@ public static class CustomerOrderPage
       return;
     }
 
-    // Home delivery has no session to POST a cart line to — the whole order goes up in one
-    // request when the customer places it. So the local edit IS the cart here, and there is
-    // nothing to reconcile against afterwards.
-    if (state.deliveryMode) {
+    // Neither home delivery nor a counter order has a session to POST a cart line to — the whole
+    // order goes up in one request when the customer places it. So the local edit IS the cart
+    // here, and there is nothing to reconcile against afterwards.
+    if (state.deliveryMode || state.counterMode) {
       applyDeliveryQty(menuItemId, variantId, modifierOptionIds, next);
       patchItemCard(menuItemId);
       patchBestSellerCard(menuItemId);
@@ -2231,7 +2278,136 @@ public static class CustomerOrderPage
     }, 100);
   }
 
+  /**
+   * Counter/token QR. Structurally the delivery twin — one request, no session, no fire batches —
+   * differing only in what it collects (nothing mandatory; the customer is standing in the shop)
+   * and what it waits for: a token number, which the server withholds until staff accept.
+   */
+  function placeCounterOrder() {
+    if (cartCount() === 0) return;
+    clearError();
+
+    var name = (document.getElementById('guest-name').value || '').trim();
+    var phone = (document.getElementById('guest-phone').value || '').replace(/[^0-9]/g, '');
+    // Optional, but a half-typed number is a typo, not a choice — better caught here than
+    // bounced back off the server after the customer thinks they've ordered.
+    if (phone && phone.length !== 10) { showError('Enter a 10-digit mobile number, or leave it blank.'); return; }
+
+    var btn = document.getElementById('place-btn');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    document.getElementById('processing-overlay').classList.add('show');
+
+    fetchJson(apiBase + '/counter-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        guestName: name || null,
+        guestPhone: phone || null,
+        items: unfiredLines().map(function (line) {
+          return {
+            menuItemId: line.menuItemId,
+            qty: line.qty,
+            modifier: null,
+            variantId: line.variantId || null,
+            modifierOptionIds: lineOptionIds(line).length ? lineOptionIds(line) : null,
+          };
+        }),
+      }),
+    }).then(function (placed) {
+      document.getElementById('processing-overlay').classList.remove('show');
+      // Cleared before the screen switches, for the same reason the delivery flow clears it:
+      // this is what stops a second tap ordering the same food twice.
+      state.order = { items: [] };
+      state.cart = {};
+      // Kept so a later Call Staff / Request Bill from the token screen can name which token is
+      // asking — a counter guest has no table code to be identified by.
+      state.orderToken = placed.orderToken;
+      showCounterWaitingScreen(placed.orderToken);
+    }).catch(function (err) {
+      document.getElementById('processing-overlay').classList.remove('show');
+      btn.disabled = false;
+      btn.textContent = 'Place Order';
+      showError(err.message);
+    });
+  }
+
+  var counterStatusTimer = null;
+
+  function stopCounterStatusPolling() {
+    if (counterStatusTimer) { clearInterval(counterStatusTimer); counterStatusTimer = null; }
+  }
+
+  function showCounterWaitingScreen(orderToken) {
+    hideAllScreens();
+    var screen = document.getElementById('waiting-screen');
+    screen.querySelector('h2').textContent = 'Order sent — waiting for the counter to confirm';
+    screen.querySelector('p').textContent = 'Your token number appears here as soon as they accept it.';
+    screen.style.display = 'flex';
+    startCounterStatusPolling(orderToken);
+  }
+
+  /**
+   * Carries the customer from "sent" through to "paid" without them touching anything: the number
+   * appears when staff accept, and the bill replaces the pay-at-the-counter line the moment the
+   * till settles. Deliberately keeps polling past confirmation — a token screen that stopped
+   * updating would still be claiming "pay at the counter" long after they had.
+   */
+  function startCounterStatusPolling(orderToken) {
+    stopCounterStatusPolling();
+    var checking = false;
+    counterStatusTimer = setInterval(function () {
+      if (checking) return; // a slow response must not let two checks race each other
+      checking = true;
+      fetchJson('/api/public/counter-order-status/' + encodeURIComponent(orderToken))
+        .then(function (s) {
+          checking = false;
+          if (s.cancelled) {
+            stopCounterStatusPolling();
+            showEnded(s.cancelReason
+              ? ('The counter declined this order: ' + s.cancelReason)
+              : 'The counter declined this order. Please speak to the staff if you\'d like to know why.');
+            return;
+          }
+          if (s.pendingStaffConfirmation) return; // still the "waiting to confirm" copy
+
+          showTokenScreen(s, orderToken);
+
+          // Settled at the till — the only terminal state. The bill is worth handing over only
+          // once there is one to hand.
+          if (s.paid) stopCounterStatusPolling();
+        })
+        .catch(function () { checking = false; });
+    }, 4000);
+  }
+
+  function showTokenScreen(s, orderToken) {
+    hideAllScreens();
+    document.getElementById('token-number').textContent = s.tokenNumber != null ? ('#' + s.tokenNumber) : '—';
+    var billLink = document.getElementById('token-bill-link');
+    if (s.paid) {
+      document.getElementById('token-heading').textContent = 'Paid — thanks!';
+      document.getElementById('token-sub').textContent = 'Your bill is ready below.';
+      billLink.href = '/api/public/receipt/' + encodeURIComponent(orderToken);
+      billLink.style.display = 'block';
+      // Opened for them rather than left as one more thing to tap — the customer asked for the
+      // bill by paying. Done exactly once (billOpened), because a poll that fired this every
+      // four seconds would reopen the PDF forever. A blocked popup costs nothing: the link
+      // above is already on screen and says the same thing.
+      if (!state.billOpened) {
+        state.billOpened = true;
+        try { window.open(billLink.href, '_blank', 'noopener'); } catch (e) { /* link stands */ }
+      }
+    } else {
+      document.getElementById('token-heading').textContent = 'Confirmed — you\'re in the queue';
+      document.getElementById('token-sub').textContent = 'Pay at the counter when your number is called.';
+      billLink.style.display = 'none';
+    }
+    document.getElementById('token-screen').style.display = 'flex';
+  }
+
   function placeOrder() {
+    if (state.counterMode) { placeCounterOrder(); return; }
     if (state.deliveryMode) { placeDeliveryOrder(); return; }
     if (cartCount() === 0) return;
     if (Object.keys(pendingLineRequests).length > 0) { waitForCartThenPlace(); return; }
@@ -2270,8 +2446,122 @@ public static class CustomerOrderPage
     });
   }
 
+  /**
+   * Tells the floor a guest wants something — this is what rings at the till (see
+   * PublicController.RaiseGuestCall and the app's GuestCallsHost).
+   *
+   * The button confirms optimistically and never surfaces a failure. Raising a call twice while
+   * nobody has come yet is answered 204 by the server on purpose, and a guest who taps and sees
+   * an error just taps again — which is the one thing this is trying to save them from. If it
+   * genuinely didn't get through, the fallback has always been the same and is still there:
+   * catch someone's eye.
+   */
+  function raiseCall(kind, btn, doneLabel) {
+    var original = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = doneLabel; }
+    fetchJson(apiBase + '/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: kind, orderToken: state.orderToken || null }),
+    }).catch(function () { /* see above — the guest is told it landed either way */ });
+    // Re-armed rather than left dead: a table that has waited a while will press again, and a
+    // permanently disabled button reads as the app having given up on them.
+    if (btn) setTimeout(function () { btn.disabled = false; btn.textContent = original; }, 20000);
+  }
+
+  /**
+   * Razorpay's checkout script, fetched only when a cafe actually offers online payment. Loaded
+   * lazily rather than in <head> for the obvious reason: every guest of every OTHER cafe would
+   * otherwise pull a third-party script on a phone, on a restaurant's wifi, to render a menu.
+   */
+  function loadRazorpayScript() {
+    if (window.Razorpay) return Promise.resolve(true);
+    if (loadRazorpayScript._p) return loadRazorpayScript._p;
+    loadRazorpayScript._p = new Promise(function (resolve) {
+      var s = document.createElement('script');
+      s.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      s.onload = function () { resolve(true); };
+      s.onerror = function () { resolve(false); };
+      document.head.appendChild(s);
+    });
+    return loadRazorpayScript._p;
+  }
+
+  /**
+   * Shows Pay Now only when this cafe takes online payments AND there is something left to pay.
+   * The settings response carries the flag (onlinePaymentEnabled) but never the secret, so the
+   * page can decide this without ever holding a credential.
+   */
+  function renderPayNow(order) {
+    var btn = document.getElementById('pay-now-btn');
+    var note = document.getElementById('bill-pay-note');
+    var on = !!(state.settings && state.settings.onlinePaymentEnabled) && !!state.orderToken
+      && order && !order.paid && order.total > 0;
+    btn.style.display = on ? 'block' : 'none';
+    note.textContent = on
+      ? 'Pay here from your phone, or at the counter if you prefer.'
+      : 'Bill requested — ordering is closed. Please pay at the counter.';
+    if (on) {
+      btn.disabled = false;
+      btn.textContent = 'Pay Now';
+      btn.onclick = startPayment;
+    }
+  }
+
+  /**
+   * Opens Razorpay checkout in this same tab — the guest is already holding the phone, so UPI
+   * intent takes them straight into GPay/PhonePe and back. Nothing is scanned and nothing is
+   * retyped.
+   *
+   * The success callback deliberately does NOT settle the bill. It only stops the spinner and
+   * lets the poll take over: what actually closes the bill is Razorpay's signed webhook
+   * (PublicController.RazorpayWebhook). A browser saying "paid" is not proof, and a guest whose
+   * phone dies on the payment screen must still end up settled.
+   */
+  function startPayment() {
+    var btn = document.getElementById('pay-now-btn');
+    btn.disabled = true;
+    btn.textContent = 'Opening…';
+    loadRazorpayScript().then(function (ok) {
+      if (!ok) { btn.disabled = false; btn.textContent = 'Pay Now'; showError('Could not reach the payment page. Please pay at the counter.'); return; }
+      return fetchJson(apiBase + '/pay-bill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderToken: state.orderToken }),
+      }).then(function (p) {
+        btn.textContent = 'Waiting for payment…';
+        new window.Razorpay({
+          key: p.keyId,
+          order_id: p.razorpayOrderId,
+          amount: p.amountPaise,
+          currency: p.currency,
+          name: document.getElementById('business-name').textContent,
+          description: 'Table bill',
+          handler: function () {
+            btn.textContent = 'Confirming…';
+          },
+          modal: {
+            // Backing out is not a failure — the guest can still pay at the counter, and the
+            // button has to come back for them to try again.
+            ondismiss: function () { btn.disabled = false; btn.textContent = 'Pay Now'; },
+          },
+        }).open();
+      });
+    }).catch(function (err) {
+      btn.disabled = false;
+      btn.textContent = 'Pay Now';
+      showError(err && err.message ? err.message : 'Could not start the payment.');
+    });
+  }
+
   function requestBill() {
+    // The call is the part that reaches a human, so it goes first and is not conditional on the
+    // session lock below succeeding.
+    raiseCall('Bill', document.getElementById('request-bill-btn'), 'Staff notified');
     fetchJson(sessionBase + '/request-bill', { method: 'POST' }).then(function (s) {
+      // Only handed over at this moment, and only for this session's own order — it's what
+      // Pay Now is charged against (see GuestSessionStateDto.OrderToken).
+      if (s.orderToken) state.orderToken = s.orderToken;
       showBillScreen(s);
     }).catch(function (err) {
       if (err.status === 410) { showEnded(err.message || 'This session has ended.'); return; }
@@ -2340,8 +2630,22 @@ public static class CustomerOrderPage
       // Which of the three QRs was scanned (see QrTokenService.ModeFor). Only the delivery one
       // changes anything below; a table or menu-only token behaves exactly as before.
       state.deliveryMode = results[0].mode === 'delivery';
+      state.counterMode = results[0].mode === 'counter';
 
-      if (state.deliveryMode) {
+      if (state.counterMode) {
+        // Same three things the delivery branch below sets up, for the same reasons: no table
+        // means the "browse only" rule would otherwise lock out the very customer this QR
+        // exists for, the cart is local from the first tap, and neither session button has
+        // anything to act on.
+        state.browseOnly = false;
+        state.order = { items: [] };
+        document.getElementById('add-more-btn').style.display = 'none';
+        document.getElementById('request-bill-btn').style.display = 'none';
+        // Both optional here, unlike delivery — the customer is standing at the counter and is
+        // called by number. The labels say so, rather than leaving two fields that look required.
+        document.getElementById('guest-name-label').textContent = 'Your name (optional)';
+        document.getElementById('guest-phone-label').textContent = 'Mobile number (optional)';
+      } else if (state.deliveryMode) {
         // A delivery QR has no table, and the old rule "no table code means browse only" would
         // otherwise lock the very customer this code exists for out of ordering.
         state.browseOnly = false;
@@ -2359,15 +2663,20 @@ public static class CustomerOrderPage
         // fail against a session that was never created.
         document.getElementById('add-more-btn').style.display = 'none';
         document.getElementById('request-bill-btn').style.display = 'none';
+        // Nobody to call and nothing to walk over: a delivery customer is at home, and the cafe
+        // has their number, which is the actual channel for "something's wrong".
+        document.getElementById('call-waiter-btn').style.display = 'none';
       } else {
         state.browseOnly = !state.table.code;
       }
 
       document.getElementById('table-line').textContent = state.deliveryMode
         ? 'Home delivery'
-        : (state.table.code
-          ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
-          : 'Browsing the menu');
+        : state.counterMode
+          ? 'Counter order · you\'ll get a token number'
+          : (state.table.code
+            ? ('Table ' + state.table.code + ' · ' + state.table.seats + ' seats')
+            : 'Browsing the menu');
       document.getElementById('place-btn').onclick = placeOrder;
       document.getElementById('join-btn').onclick = joinSession;
       document.getElementById('add-more-btn').onclick = function () {
@@ -2379,6 +2688,17 @@ public static class CustomerOrderPage
         showMenuScreen();
       };
       document.getElementById('request-bill-btn').onclick = requestBill;
+      document.getElementById('call-waiter-btn').onclick = function () {
+        raiseCall('Waiter', this, 'Waiter notified');
+      };
+      document.getElementById('token-call-waiter-btn').onclick = function () {
+        raiseCall('Waiter', this, 'Staff notified');
+      };
+      // Counter guests have no session to lock, so unlike the seated Request Bill above this is
+      // only the call — they settle at the till and their bill opens here once staff do.
+      document.getElementById('token-request-bill-btn').onclick = function () {
+        raiseCall('Bill', this, 'Staff notified');
+      };
       document.getElementById('past-lookup-btn').onclick = lookupPastBills;
       // Passive: this only reads positions and toggles a class, so it must never be allowed to
       // hold up the scroll it's watching.
@@ -2408,7 +2728,7 @@ public static class CustomerOrderPage
         return;
       }
 
-      if (state.deliveryMode) {
+      if (state.deliveryMode || state.counterMode) {
         // Straight to the menu. doScan below is the table/session handshake — it claims a seat,
         // resolves JOIN/STAFF_ASSIST and starts the 5s poll, none of which exists without a
         // table, and calling it here would fail against a table code that matches no row.

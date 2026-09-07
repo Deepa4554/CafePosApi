@@ -52,7 +52,9 @@ public static class SeedData
                 new Integration { Name = "Deliveroo", Category = "Delivery" },
                 new Integration { Name = "Menulog", Category = "Delivery" },
                 new Integration { Name = "Stripe", Category = "Payments" },
-                new Integration { Name = "WhatsApp Business", Category = "Messaging" });
+                new Integration { Name = "WhatsApp Business", Category = "Messaging" },
+                new Integration { Name = "Zomato", Category = "Delivery" },
+                new Integration { Name = "Swiggy", Category = "Delivery" });
         }
         // Separate, idempotent check (not folded into the block above) so an already-seeded
         // deployment picks up the "WhatsApp Business" card retroactively instead of only ever
@@ -60,6 +62,15 @@ public static class SeedData
         else if (!db.Integrations.Any(i => i.Name == "WhatsApp Business"))
         {
             db.Integrations.Add(new Integration { Name = "WhatsApp Business", Category = "Messaging" });
+        }
+
+        // Same retroactive top-up for the aggregator cards, kept as its own check rather than an
+        // else-if so a database that already has the WhatsApp row still gets these two — the
+        // else-if chain above would skip them.
+        foreach (var aggregator in new[] { "Zomato", "Swiggy" })
+        {
+            if (!db.Integrations.Any(i => i.Name == aggregator))
+                db.Integrations.Add(new Integration { Name = aggregator, Category = "Delivery" });
         }
 
         // Starting catalog matches the old hardcoded 4-item list the Points screen used to

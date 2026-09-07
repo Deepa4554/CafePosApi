@@ -67,6 +67,15 @@ public record CreateDeliveryOrderRequest(
     decimal? Longitude,
     List<CreateOrderItemDto> Items);
 
+/// <summary>An order placed from the counter/token QR (see PublicController.CreateCounterOrder).
+/// Both name and phone are optional — the customer is standing in the shop and is called by token
+/// number, so nothing here is needed to reach them; a name just makes the ticket readable and a
+/// phone lets the bill be sent on WhatsApp afterwards.</summary>
+public record CreateCounterOrderRequest(
+    string? GuestName,
+    string? GuestPhone,
+    List<CreateOrderItemDto> Items);
+
 /// <summary>Live courier state for one order, for the delivery screen.</summary>
 public record DeliveryStatusDto(
     int OrderId,

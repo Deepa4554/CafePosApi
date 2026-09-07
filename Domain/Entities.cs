@@ -267,6 +267,43 @@ public class WaitlistEntry : ITenantScoped
     public DateTime? CancelledAt { get; set; }
 }
 
+/// <summary>What a guest is asking the floor for. Two kinds, because they are two different
+/// jobs: a bill request means "we're done, bring the machine", a waiter call means "come here,
+/// something is wrong or we want more".</summary>
+public enum GuestCallKind { Waiter = 0, Bill = 1 }
+
+public enum GuestCallStatus { Open = 0, Acknowledged = 1 }
+
+/// <summary>A guest pressing "Call Waiter" or "Request Bill" on their phone. Its own row rather
+/// than a flag on the session or the order, because it has to survive both: a bill request is
+/// answered by a person walking over, which is a fact about the FLOOR, not about the order's
+/// state — and a table can call twice for different reasons before anyone arrives.
+///
+/// TableCode is what staff actually navigate by and is copied here rather than joined: a call
+/// has to keep naming its table even after the order closes and the session is gone. OrderId is
+/// carried when there is one so the counter/token flow can say which token is calling; it is
+/// null for a table that has called before ordering anything.
+///
+/// Acknowledged (not deleted) when staff attend to it, so "who called, how long did they wait"
+/// stays answerable — the same reason a void keeps its row.</summary>
+public class GuestCall : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public GuestCallKind Kind { get; set; }
+    public GuestCallStatus Status { get; set; } = GuestCallStatus.Open;
+    /// <summary>Where to go. Null only for a flow that has no seat (the counter QR), where
+    /// TokenNumber below is what identifies the guest instead.</summary>
+    public string? TableCode { get; set; }
+    public int? OrderId { get; set; }
+    /// <summary>Snapshotted from the order so a counter call reads "Token #7" without a join,
+    /// and keeps reading it after the order is settled and its token reused tomorrow.</summary>
+    public int? TokenNumber { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? AcknowledgedAt { get; set; }
+    public int? AcknowledgedByUserId { get; set; }
+}
+
 /// <summary>One row per (tenant, calendar day) — LastNumber is incremented atomically via an
 /// UPSERT (see OrderBuildingService.NextTokenNumberAsync) to hand out the next QSR token
 /// number for that day without a race under concurrent order creation. A new day gets a new
@@ -363,6 +400,32 @@ public class Order : ITenantScoped
     public string? CourierRiderName { get; set; }
     public string? CourierRiderPhone { get; set; }
     public DateTime? CourierBookedAt { get; set; }
+
+    /// <summary>Set only on orders that originated on a delivery aggregator (Zomato/Swiggy) and
+    /// arrived through the Dyno bridge, never on orders rung up in the POS or placed from the QR
+    /// menu. Deliberately parallel to the Courier* block above rather than folded into it: a
+    /// courier is who *carries* an order the cafe already owns, a platform is where the order was
+    /// *placed* — a Zomato order carried by Borzo legitimately has both blocks filled.
+    ///
+    /// PlatformProvider is the aggregator's lowercase name as Dyno reports it ("zomato" /
+    /// "swiggy" — its own `vendor` field), and (TenantId, PlatformProvider, PlatformOrderId)
+    /// carries a unique index: Dyno re-POSTs the same order every 40s until we answer 200, so
+    /// ingestion has to be idempotent or a slow response would mint duplicate orders.</summary>
+    public string? PlatformProvider { get; set; }
+    public string? PlatformOrderId { get; set; }
+    /// <summary>Our view of where this order has got to on the aggregator's side, driven by the
+    /// codes Dyno's webhook loop speaks: null/"NEW" (needs accepting), "ACCEPTED", "READY",
+    /// "REJECTED". This is what DynoWebhookController turns into the pending-command feed, so it
+    /// tracks what the *platform* has confirmed — not Order.Status, which tracks the kitchen.
+    /// The two move independently: an order can be served in the cafe's own workflow while the
+    /// accept call to Zomato is still failing.</summary>
+    public string? PlatformStatus { get; set; }
+    /// <summary>What the aggregator says the customer paid, straight off their payload. Kept
+    /// because BuildOrderAsync reprices every line from the cafe's own menu and therefore will
+    /// NOT generally agree with it — the platform applies its own promos, packing charges and
+    /// commissions. Stored for reconciliation rather than billing; a divergence is a reporting
+    /// signal, not an error to correct silently.</summary>
+    public decimal? PlatformGrossAmount { get; set; }
 
     public decimal Subtotal { get; set; }
     public decimal DiscountPct { get; set; }
@@ -821,6 +884,24 @@ public class CafeSettings : ITenantScoped
     /// <see cref="TaxRatePct"/> (or its default TaxGroup), not any individual item's slab.</summary>
     public bool TaxChargesEnabled { get; set; }
 
+    /// <summary>Bills EVERY regular menu item tax-inclusive — the listed Price is treated as the
+    /// final amount a customer pays, and GST is carved out of it rather than added on top, the
+    /// same treatment an MRP/open-price line already always gets (see MenuItem.IsOpenPrice and
+    /// OrderItem.PriceIncludesTax). A ₹30 chai at 5% GST bills as ₹30 total either way once this
+    /// is on, instead of the exclusive default that adds tax on top and totals ₹31.50.
+    ///
+    /// Opt-in and off by default, same reasoning as TaxByPaymentModeEnabled/TaxChargesEnabled: it
+    /// changes how much of an existing menu price is reported as tax without changing what the
+    /// customer pays, and that's a billing-policy call for the cafe's own accountant to make, not
+    /// something a deploy should flip under an existing tenant.
+    ///
+    /// Read by ResolveLinePricingAsync at order-build time and snapshotted per line onto
+    /// OrderItem.PriceIncludesTax alongside menuItem.IsOpenPrice — RecomputeTotals's carve-out
+    /// arithmetic already treats every such line identically, MRP or not, so flipping this needs
+    /// no changes there. Applies to lines added after the change; an order already open keeps
+    /// whatever its existing lines were snapshotted with.</summary>
+    public bool MenuPricesIncludeTax { get; set; }
+
     /// <summary>This cafe bills under the GST composition scheme, so it collects no GST and its
     /// bill is a BILL OF SUPPLY rather than a TAX INVOICE (see ReceiptDocumentTitle). Purely a
     /// labelling and reporting flag — it does not zero anything out on its own, because a
@@ -1032,6 +1113,55 @@ public class CafeSettings : ITenantScoped
     [System.Text.Json.Serialization.JsonIgnore]
     public string? BorzoCallbackToken { get; set; }
 
+    // Dyno bridge — pulls this cafe's Zomato/Swiggy orders into the POS and pushes item
+    // availability back out (see DynoWebhookController). Per-cafe because each tenant has its
+    // own Zomato/Swiggy accounts and its own Dyno install logged into them.
+    public bool DynoEnabled { get; set; }
+    /// <summary>
+    /// A random secret that forms part of the webhook base URL the cafe pastes into its Dyno
+    /// install (https://.../api/dyno/{token}), so an incoming call can be tied to this tenant and
+    /// checked against something only this server and this cafe's bridge know.
+    ///
+    /// The URL is the ONLY place a secret can live here: Dyno's webhook client sends no auth
+    /// header of any kind — it just POSTs to whatever base URL it was configured with (see its
+    /// own utils.js, which builds an axios client from the configured URL and nothing else). So
+    /// this follows the same shape as BorzoCallbackToken above and for the same reason: the
+    /// server controls both what's configured and what's checked, and doesn't need the third
+    /// party to have invented a signature convention.
+    ///
+    /// Unlike the WhatsApp bridge's single global X-Service-Api-Key (see
+    /// ServiceApiKeyAuthenticationHandler), this is deliberately PER-TENANT — the token sits on a
+    /// Windows box the cafe or an ops engineer can read, and one leaked token must not expose
+    /// every other tenant's orders.
+    ///
+    /// [JsonIgnore] is load-bearing for the same reason as the Borzo secrets: SettingsController's
+    /// GET is [AllowAnonymous] and serves this whole entity.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? DynoBridgeToken { get; set; }
+    /// <summary>The cafe's restaurant/outlet ids on each aggregator — Dyno's own `zid`/`sid`
+    /// config values, which it echoes back as `resId` on every webhook call. Used to check an
+    /// incoming call is talking about the outlet this tenant actually owns, and to address stock
+    /// updates at the right outlet. Null until the cafe fills them in; the integration stays off
+    /// for a platform whose id is blank rather than guessing.</summary>
+    public string? ZomatoRestaurantId { get; set; }
+    public string? SwiggyRestaurantId { get; set; }
+    /// <summary>Prep time in minutes sent to the aggregator when accepting an order — what the
+    /// customer sees as the promised wait. Dyno defaults to 30 when we send nothing.</summary>
+    public int DynoDefaultPrepTimeMins { get; set; } = 30;
+    /// <summary>Whether a platform order is accepted (and fired to the kitchen) the moment it
+    /// arrives. On by default: an aggregator order that nobody accepts is auto-cancelled by the
+    /// platform after a few minutes, and the whole point of the bridge is that staff don't have
+    /// to watch a second screen. Off routes orders through the same staff-confirmation step as
+    /// RequireStaffOrderConfirmation does for QR orders.</summary>
+    public bool DynoAutoAccept { get; set; } = true;
+    /// <summary>Last time this tenant's Dyno bridge called in. The bridge polls on its own
+    /// 30–40s timers, so a gap materially longer than that means the box is off, the Windows
+    /// session died, or the aggregator login expired (Dyno's API answers 403 "Login Session
+    /// Expired. Please Login!" and its login flow is interactive, so it cannot recover itself).
+    /// Null until the bridge has ever connected.</summary>
+    public DateTime? DynoLastContactAt { get; set; }
+
     // Receipt Builder — which optional sections print on the customer bill (see
     // receiptFormat.ts buildReceiptLines, the one shared line-model every print
     // transport/screen renders from). Business name, items, and totals always print —
@@ -1055,6 +1185,59 @@ public class CafeSettings : ITenantScoped
     /// bill and on a QR sticker at the counter), not a credential. Knowing it lets someone
     /// send money to this cafe, nothing else.</summary>
     public string? UpiVpa { get; set; }
+
+    /// <summary>Opt-in, per cafe: a guest who taps Request Bill on their phone is offered
+    /// Razorpay checkout there and then, and the bill settles itself the moment the payment is
+    /// captured. Off means the flow behaves exactly as it always has — the guest is told staff
+    /// have been called, and someone settles at the till.
+    ///
+    /// Gated on the keys below actually being present as well as this flag, so a cafe that
+    /// switches it on before finishing setup shows no half-working Pay button.</summary>
+    public bool OnlinePaymentEnabled { get; set; }
+
+    /// <summary>The CAFE's own Razorpay key id (rzp_live_… / rzp_test_…), not the platform's.
+    /// This is the whole point of the per-tenant design: a guest paying their restaurant bill
+    /// pays the restaurant directly, so the money never passes through this platform's account
+    /// and no settlement or KYC obligation lands here. RazorpayOptions (env vars) stays what it
+    /// always was — the platform's own account, used only for SaaS subscription billing.
+    ///
+    /// Public half, safe to hand to the guest's browser: Razorpay checkout needs it client-side,
+    /// exactly like PaymentsController already returns the platform key id.</summary>
+    public string? RazorpayKeyId { get; set; }
+
+    /// <summary>The cafe's Razorpay key secret, DataProtection-encrypted at rest (see
+    /// TenantSecretProtector). Never leaves the server and is never returned by any GET — the
+    /// settings API answers with a "configured / not configured" flag instead. It is both the
+    /// API password and the HMAC key behind every payment signature, so a leak here would let
+    /// someone forge a paid bill for this cafe.
+    ///
+    /// [JsonIgnore] is load-bearing here for exactly the reason it is on the Borzo secrets above:
+    /// SettingsController.Get is [AllowAnonymous] and returns this record whole, so anything not
+    /// marked would be served to the open internet. Encrypted-at-rest is not a licence to hand
+    /// the ciphertext out.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? RazorpayKeySecretEnc { get; set; }
+
+    /// <summary>Whether a key secret has been stored, without revealing it — this is what the
+    /// settings screen shows in place of the value, and what tells an Owner mid-setup that the
+    /// half they can't see is done.</summary>
+    [NotMapped]
+    public bool RazorpayKeySecretConfigured => !string.IsNullOrWhiteSpace(RazorpayKeySecretEnc);
+
+    /// <summary>Same, for the webhook secret. Its own flag because the two are entered from
+    /// different places in the Razorpay dashboard and a cafe very often has one and not the
+    /// other — which is precisely the state where payments open but never settle.</summary>
+    [NotMapped]
+    public bool RazorpayWebhookSecretConfigured => !string.IsNullOrWhiteSpace(RazorpayWebhookSecretEnc);
+
+    /// <summary>The cafe's Razorpay WEBHOOK secret, encrypted the same way — a different secret
+    /// from the key secret, chosen by whoever creates the webhook in the Razorpay dashboard.
+    /// Without it the tenant's webhook endpoint rejects everything, which is the safe way to be
+    /// unconfigured: there is otherwise no way to tell a real Razorpay call from anyone else's.
+    ///
+    /// [JsonIgnore] for the same reason as the key secret above.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? RazorpayWebhookSecretEnc { get; set; }
 
     /// <summary>Where the "Rate us on Google" QR at the foot of a bill points. Null/blank means
     /// the cafe hasn't set one up and no review QR appears anywhere — exactly the same

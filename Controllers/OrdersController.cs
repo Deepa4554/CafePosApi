@@ -648,9 +648,10 @@ public class OrdersController(
         if (menuItem is null) throw new ApiValidationException("Menu item not found.");
         if (!menuItem.Available) throw new ApiValidationException($"{menuItem.Name} is currently unavailable.");
 
-        var defaultHsn = await db.Settings.Select(s => s.DefaultHsnCode).FirstOrDefaultAsync();
+        var lineSettings = await db.Settings.Select(s => new { s.DefaultHsnCode, s.MenuPricesIncludeTax }).FirstOrDefaultAsync();
         var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
-            await orderBuilder.ResolveLinePricingAsync(db, menuItem, req.VariantId, req.ModifierOptionIds, explicitTenantId: null, req.OpenPrice, defaultHsn);
+            await orderBuilder.ResolveLinePricingAsync(db, menuItem, req.VariantId, req.ModifierOptionIds, explicitTenantId: null, req.OpenPrice,
+                lineSettings?.DefaultHsnCode, lineSettings?.MenuPricesIncludeTax ?? false);
         var newItem = new OrderItem
         {
             OrderId = order.Id,
@@ -717,7 +718,10 @@ public class OrdersController(
             .Where(m => menuItemIds.Contains(m.Id))
             .ToDictionaryAsync(m => m.Id);
 
-        var defaultHsn = await db.Settings.Select(s => s.DefaultHsnCode).FirstOrDefaultAsync();
+        // Both fields in the one projection, matching the append path above — a line added to an
+        // existing order has to be priced tax-inclusive on exactly the same terms as a line on a
+        // brand-new one, or a second round would bill at a different rate from the first.
+        var lineSettings = await db.Settings.Select(s => new { s.DefaultHsnCode, s.MenuPricesIncludeTax }).FirstOrDefaultAsync();
 
         // One modifier-group lookup for the round, same reasoning as the menu lookup above.
         var modifierGroups = await orderBuilder.LoadModifierGroupsAsync(db, menuItemIds, explicitTenantId: null);
@@ -738,7 +742,8 @@ public class OrdersController(
 
             var (linePrice, variantName, selections, stationName, taxRatePct, priceIncludesTax, hsnCode) =
                 await orderBuilder.ResolveLinePricingAsync(db, menuItem, line.VariantId, line.ModifierOptionIds,
-                    explicitTenantId: null, line.OpenPrice, defaultHsn, modifierGroups, taxGroupSlabs);
+                    explicitTenantId: null, line.OpenPrice, lineSettings?.DefaultHsnCode,
+                    lineSettings?.MenuPricesIncludeTax ?? false, modifierGroups, taxGroupSlabs);
             newItems.Add(new OrderItem
             {
                 OrderId = order.Id,

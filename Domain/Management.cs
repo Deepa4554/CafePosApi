@@ -434,3 +434,115 @@ public class Integration : ITenantScoped
     public IntegrationStatus Status { get; set; } = IntegrationStatus.Disconnected;
     public DateTime? ConnectedAt { get; set; }
 }
+
+// ---------- Delivery-platform bridge (Dyno → Zomato/Swiggy) ----------
+
+/// <summary>Which aggregator a platform row belongs to. Stored as a string via
+/// HasConversion&lt;string&gt;() like MenuItem.ProductType, so the values in the database read the
+/// same way Dyno's own payloads spell them ("zomato" / "swiggy" in its `vendor` field) rather
+/// than as opaque ints.</summary>
+public enum PlatformProviderKind { Zomato, Swiggy }
+
+/// <summary>One line of a cafe's Zomato/Swiggy menu as the aggregator itself describes it,
+/// captured wholesale when Dyno answers a `getAllItems` request with the outlet's full menu.
+///
+/// This exists because nothing else knows the aggregator's item ids: a cafe's Zomato menu is
+/// maintained in Zomato's dashboard, and its ids are meaningless to CafePOS until someone sees
+/// them. Storing the catalog lets the mapping UI offer real names to pair against
+/// <see cref="MenuItem"/>s instead of asking an owner to type ids by hand. Refreshed wholesale
+/// rather than merged — the aggregator's menu is the authority on its own contents.</summary>
+public class PlatformCatalogEntry : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public PlatformProviderKind Provider { get; set; }
+    /// <summary>The outlet this entry belongs to (Dyno's `resId`) — a tenant may have several
+    /// outlets on one aggregator account, each with its own menu.</summary>
+    public required string ResId { get; set; }
+    /// <summary>The aggregator's own id for this item or category — what stock calls address.</summary>
+    public required string PlatformEntityId { get; set; }
+    public required string Name { get; set; }
+    /// <summary>Categories and items share this table because the stock API treats them as the
+    /// same shape (an id plus an in/out-of-stock flag) on two parallel endpoints, and a cafe
+    /// switching a whole category off is the common case this feature exists to serve.</summary>
+    public bool IsCategory { get; set; }
+    /// <summary>The aggregator's listed price, kept only so the mapping UI can show it next to a
+    /// candidate MenuItem — a big price gap is the clearest signal of a wrong mapping. Never used
+    /// for billing: an ingested order is always repriced from the cafe's own menu.</summary>
+    public decimal? PlatformPrice { get; set; }
+    public DateTime RefreshedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>Ties one aggregator item/category to the cafe's own <see cref="MenuItem"/>. Without a
+/// row here an incoming platform line can't become a real order line, and an availability toggle
+/// in the POS has nothing to push out.
+///
+/// Kept separate from <see cref="PlatformCatalogEntry"/> (rather than a nullable MenuItemId on
+/// it) because the catalog is disposable — it's re-dumped from the aggregator whenever the menu
+/// is refreshed — while the mapping is hand-made and must survive that.</summary>
+public class PlatformMenuMapping : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public PlatformProviderKind Provider { get; set; }
+    public required string ResId { get; set; }
+    public required string PlatformEntityId { get; set; }
+    public bool IsCategory { get; set; }
+    /// <summary>The cafe's item this maps to. Only meaningful when IsCategory is false — a
+    /// category mapping exists to push stock for a whole section, and has no single MenuItem.</summary>
+    public int? MenuItemId { get; set; }
+}
+
+/// <summary>The aggregator's original order document, kept verbatim next to the Order it became.
+///
+/// This exists because <see cref="Infrastructure.DynoOrderParser"/> is reading a shape nobody has
+/// specified — Dyno's API declares its responses untyped, and Zomato's and Swiggy's documents
+/// differ. Keeping the source means a parser corrected next month can be re-run over orders
+/// ingested today, instead of that data being gone. It also settles disputes: when a cafe says an
+/// order came through wrong, this is what the aggregator actually sent.
+///
+/// Separate table rather than a column on Order so the hot orders table (read by every report,
+/// dashboard, and KDS poll) doesn't carry a large JSON blob it never selects.</summary>
+public class PlatformOrderPayload : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public int OrderId { get; set; }
+    public PlatformProviderKind Provider { get; set; }
+    public required string PlatformOrderId { get; set; }
+    /// <summary>The raw `data` document as JSON text.</summary>
+    public required string RawJson { get; set; }
+    /// <summary>False when the parser found no recognisable lines and the order was ingested as a
+    /// single placeholder line — the flag the "needs attention" list and any future re-parse job
+    /// select on.</summary>
+    public bool LinesParsed { get; set; }
+    public DateTime ReceivedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>A queued "mark this in/out of stock on the aggregator" instruction, waiting for the
+/// tenant's Dyno bridge to collect it.
+///
+/// A queue rather than recomputing desired state on every poll: the bridge asks every 30s, and
+/// answering with the full menu each time would have Dyno re-issue an aggregator API call per
+/// item per half-minute — rate-limit territory for no benefit. This mirrors how the WhatsApp
+/// bridge drains work (pending jobs out, status back in) rather than inventing a second style.
+///
+/// Rows are never deleted on completion, only stamped — a cafe arguing that an item was showing
+/// as available on Zomato needs the history to be answerable.</summary>
+public class PlatformStockChange : ITenantScoped
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    public PlatformProviderKind Provider { get; set; }
+    public required string ResId { get; set; }
+    public required string PlatformEntityId { get; set; }
+    public bool IsCategory { get; set; }
+    /// <summary>True = should be purchasable on the aggregator, false = hidden. This is the
+    /// desired end state, not a delta, so a superseded row is safe to skip.</summary>
+    public bool DesiredInStock { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    /// <summary>Stamped when the bridge confirms it acted. Null = still pending, and the
+    /// oldest-first feed keeps handing it out until it isn't.</summary>
+    public DateTime? ProcessedAt { get; set; }
+    public string? FailureReason { get; set; }
+}

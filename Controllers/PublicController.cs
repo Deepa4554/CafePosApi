@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using CafePOS.Api.Contracts;
 using CafePOS.Api.Data;
 using CafePOS.Api.Domain;
@@ -29,6 +31,9 @@ public class PublicController(
     IOrderBuildingService orderBuilder,
     IWhatsAppEventPublisher whatsApp,
     CafeLogoLoader logoLoader,
+    TenantSecretProtector secrets,
+    ITenantRazorpayClient tenantRazorpay,
+    ILogger<PublicController> logger,
     IRealtimeNotifier realtime) : ControllerBase
 {
     /// <summary>
@@ -71,9 +76,10 @@ public class PublicController(
         // delivery flow opt-in rather than something the dine-in page has to reason about.
         var mode = QrTokenService.ModeFor(tableCode);
 
-        // A delivery QR belongs to no seat and never joins a table session; the page swaps in
-        // the address + location step on the strength of this alone.
-        if (mode == "delivery")
+        // Neither a delivery nor a counter QR belongs to a seat, and neither joins a table
+        // session. The page swaps in the address + location step, or the token flow, on the
+        // strength of this alone.
+        if (mode is "delivery" or "counter")
             return new { Mode = mode, Code = (string?)null, Zone = (string?)null, Seats = (int?)null, Occupied = false };
 
         // Empty table code == the generic "menu only, no table" token (see
@@ -177,6 +183,350 @@ public class PublicController(
             // than inventing a second one.
             OrderToken = receiptTokens.Encode(order.Id),
         };
+    }
+
+    /// <summary>
+    /// Places a counter order from the till's token QR. Shaped on CreateDeliveryOrder, not on the
+    /// dine-in path: there is no seat and no shared guest session, just one scan and one order.
+    /// The difference from delivery is what it leaves out — no address, no coordinates, no rider —
+    /// and what it hands back: the QSR token number the customer will be called by, which
+    /// BuildOrderAsync allocates for us the moment the order type is QSR.
+    ///
+    /// Staff confirmation is FORCED ON here, whatever the cafe's own RequireStaffOrderConfirmation
+    /// says. Every other QR flow has something behind it — a seat someone is sitting in, a phone
+    /// number a rider will call — but a counter card is scannable by anyone walking past the shop,
+    /// and a token number handed out before a human agreed to it is a queue position for food
+    /// nobody is making. The page therefore shows the number only once staff accept (see
+    /// CounterOrderStatus).
+    /// </summary>
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("WaitlistJoinLimiter")]
+    [HttpPost("{token}/counter-order")]
+    public async Task<ActionResult<object>> CreateCounterOrder(string token, CreateCounterOrderRequest req, CancellationToken ct)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) throw new ApiValidationException("This ordering link is invalid. Please re-scan the QR code.");
+        var (tenantId, tableCode) = decoded.Value;
+
+        if (QrTokenService.ModeFor(tableCode) != "counter")
+            throw new ApiValidationException("This QR code isn’t set up for counter orders.");
+
+        if (req.Items is null || req.Items.Count == 0)
+            throw new ApiValidationException("Add at least one item before placing the order.");
+
+        var settings = await db.Settings.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.TenantId == tenantId, ct);
+
+        // A cafe that has switched counter/token service off has no Token Dashboard open to work
+        // these from, so the order would land somewhere nobody is looking. Refused with a reason
+        // rather than accepted into a screen that isn't staffed.
+        if (settings is not null && !settings.QsrEnabled)
+            throw new ApiValidationException("This cafe isn’t taking counter orders right now. Please order at the till.");
+
+        var name = req.GuestName?.Trim();
+        if (name is { Length: > MaxDeliveryNameLength })
+            throw new ApiValidationException($"Name can be at most {MaxDeliveryNameLength} characters.");
+
+        // Optional, unlike delivery: nobody has to be phoned: the customer is standing in the
+        // shop and gets called by token number. Kept when given so the bill can be sent on
+        // WhatsApp and the visit joins their CRM record.
+        var phone = new string((req.GuestPhone ?? "").Where(char.IsDigit).ToArray());
+        if (phone.Length is not 0 and not 10)
+            throw new ApiValidationException("Enter a 10-digit mobile number, or leave it blank.");
+
+        var order = await orderBuilder.BuildOrderAsync(
+            db, "QSR", tableCode: null, guestName: string.IsNullOrWhiteSpace(name) ? null : name, items: req.Items,
+            discountPct: 0, user: null, explicitTenantId: tenantId,
+            guestPhone: phone.Length == 10 ? phone : null);
+
+        orderBuilder.MarkPendingConfirmation(db, order, tenantId);
+        await db.SaveChangesAsync(ct);
+
+        await realtime.NotifyOrdersChangedAsync(new HashSet<int> { tenantId });
+
+        // No TokenNumber in this reply on purpose — see the summary above. The page polls
+        // CounterOrderStatus and shows the number when staff have accepted the order.
+        return new {
+            order.Id,
+            order.Total,
+            OrderToken = receiptTokens.Encode(order.Id),
+        };
+    }
+
+    /// <summary>
+    /// What the counter customer's own phone polls after ordering, scoped to this one order's
+    /// signed token (same scheme as DeliveryOrderStatus — a plain /orders/{id} lookup would let
+    /// anyone holding the shared printed QR walk every other customer's order).
+    ///
+    /// Carries TokenNumber only once staff have confirmed, so the page cannot show a queue
+    /// position for an order still awaiting a human. Keeps answering through to settlement, since
+    /// the bill PDF the customer is handed at the end is only meaningful after the till settles.
+    /// </summary>
+    [HttpGet("counter-order-status/{orderToken}")]
+    public async Task<ActionResult<object>> CounterOrderStatus(string orderToken, CancellationToken ct)
+    {
+        var orderId = receiptTokens.TryDecode(orderToken);
+        if (orderId is null) return NotFound();
+
+        var order = await db.Orders.IgnoreQueryFilters().AsNoTracking()
+            .FirstOrDefaultAsync(o => o.Id == orderId.Value, ct);
+        if (order is null) return NotFound();
+
+        return new {
+            order.PendingStaffConfirmation,
+            order.Cancelled,
+            order.CancelReason,
+            order.Total,
+            Status = order.Status.ToString(),
+            order.Paid,
+            TokenNumber = order.PendingStaffConfirmation ? null : order.TokenNumber,
+        };
+    }
+
+    /// <summary>
+    /// Opens a Razorpay order for a guest paying their own bill from the same tab they ordered
+    /// in. Charged against the CAFE's own Razorpay account, never the platform's — see
+    /// CafeSettings.RazorpayKeyId for why that distinction is the whole design.
+    ///
+    /// Returns the cafe's public key id with the order so the page can open checkout inline; the
+    /// guest is already holding the phone, so this is one tap into their UPI app rather than a QR
+    /// they would have to scan with the device showing it.
+    ///
+    /// Deliberately does NOT settle anything. The browser telling us it paid is not proof — the
+    /// bill is closed only by RazorpayWebhook below, on Razorpay's own signed word.
+    /// </summary>
+    [HttpPost("{token}/pay-bill")]
+    public async Task<ActionResult<object>> CreateBillPayment(string token, PayBillRequest req, CancellationToken ct)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) throw new ApiValidationException("This link is invalid. Please re-scan the QR code.");
+        var (tenantId, _) = decoded.Value;
+
+        var orderId = receiptTokens.TryDecode(req.OrderToken ?? "");
+        if (orderId is null) throw new ApiValidationException("We couldn't find this bill. Please ask a staff member.");
+
+        var order = await db.Orders.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(o => o.Id == orderId.Value && o.TenantId == tenantId, ct);
+        if (order is null) return NotFound();
+        if (order.Cancelled) throw new ApiValidationException("This order was cancelled.");
+        if (order.Paid) throw new ApiValidationException("This bill has already been settled.");
+
+        var creds = await LoadRazorpayCredentialsAsync(tenantId, ct);
+        if (creds is null) throw new ApiValidationException("This cafe isn't taking online payments.");
+
+        // Whatever is still owed, not the whole total: a bill part-settled at the till (a split,
+        // a deposit) must not ask the guest for the full amount again.
+        var due = order.Total - order.Payments.Sum(p => p.Amount);
+        if (due <= 0) throw new ApiValidationException("There's nothing left to pay on this bill.");
+        var amountPaise = (long)Math.Round(due * 100m, MidpointRounding.AwayFromZero);
+
+        RazorpayOrder rzpOrder;
+        try
+        {
+            rzpOrder = await tenantRazorpay.CreateOrderAsync(creds, amountPaise,
+                receipt: $"bill-{order.Id}",
+                // Read back from Razorpay in the webhook, so which order a payment settles never
+                // depends on anything the browser said.
+                notes: new Dictionary<string, string>
+                {
+                    ["tenantId"] = tenantId.ToString(),
+                    ["orderId"] = order.Id.ToString(),
+                });
+        }
+        catch (RazorpayApiException ex)
+        {
+            throw new ApiValidationException(ex.Message);
+        }
+
+        return new { KeyId = creds.KeyId, RazorpayOrderId = rzpOrder.Id, AmountPaise = amountPaise, Currency = "INR" };
+    }
+
+    /// <summary>
+    /// Razorpay's own callback, one URL per cafe — the tenant is named in the path because the
+    /// signature can only be checked against THAT cafe's webhook secret, and there is no other
+    /// way to know whose secret to reach for before the body has been trusted.
+    ///
+    /// This, not the browser, is what settles a bill. A guest's phone reporting success can be
+    /// replayed, faked or simply lost when they close the tab on the payment screen; Razorpay's
+    /// signed `payment.captured` cannot.
+    /// </summary>
+    [HttpPost("razorpay-webhook/{token}")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    public async Task<IActionResult> RazorpayWebhook(string token, CancellationToken ct)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) return Unauthorized();
+        var (tenantId, _) = decoded.Value;
+
+        // Read before anything can consume the stream — the HMAC covers Razorpay's exact bytes.
+        string rawBody;
+        using (var reader = new StreamReader(Request.Body, Encoding.UTF8))
+            rawBody = await reader.ReadToEndAsync(ct);
+
+        var creds = await LoadRazorpayCredentialsAsync(tenantId, ct);
+        if (creds is null || !creds.CanVerifyWebhook
+            || !RazorpaySignature.IsValidWebhook(rawBody, Request.Headers["X-Razorpay-Signature"].FirstOrDefault(), creds.WebhookSecret))
+        {
+            // Also the "not configured" path: without the secret there is no way to tell a real
+            // Razorpay call from anyone else's, so unconfigured must reject everything.
+            logger.LogWarning("Rejected a Razorpay webhook for tenant {TenantId} (bad or missing signature)", tenantId);
+            return Unauthorized();
+        }
+
+        string? eventName, rzpOrderId;
+        try
+        {
+            using var doc = JsonDocument.Parse(rawBody);
+            eventName = doc.RootElement.TryGetProperty("event", out var e) ? e.GetString() : null;
+            var entity = doc.RootElement.GetProperty("payload").GetProperty("payment").GetProperty("entity");
+            rzpOrderId = entity.TryGetProperty("order_id", out var o) ? o.GetString() : null;
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            // Signature was valid, so this really is Razorpay — just an event shape we don't
+            // handle. 200 on purpose: a retry would deliver the same body and fail the same way.
+            logger.LogWarning(ex, "Razorpay webhook body wasn't in the expected payment shape; ignoring");
+            return Ok();
+        }
+
+        if (!string.Equals(eventName, "payment.captured", StringComparison.OrdinalIgnoreCase)) return Ok();
+        if (string.IsNullOrWhiteSpace(rzpOrderId)) return Ok();
+
+        // Which bill this paid comes from Razorpay's own copy of the notes we stamped at
+        // creation, never from the webhook body's free-form fields.
+        RazorpayOrder rzpOrder;
+        try
+        {
+            rzpOrder = await tenantRazorpay.GetOrderAsync(creds, rzpOrderId);
+        }
+        catch (RazorpayApiException)
+        {
+            // Worth a retry, and Razorpay redelivers on a non-2xx.
+            return StatusCode(StatusCodes.Status500InternalServerError);
+        }
+
+        if (rzpOrder.Notes is null
+            || !rzpOrder.Notes.TryGetValue("orderId", out var orderIdRaw) || !int.TryParse(orderIdRaw, out var orderId)
+            || !rzpOrder.Notes.TryGetValue("tenantId", out var noteTenant) || noteTenant != tenantId.ToString())
+        {
+            logger.LogWarning("Razorpay order {RzpOrderId} settled for tenant {TenantId} carried no matching bill note", rzpOrderId, tenantId);
+            return Ok();
+        }
+
+        await SettleOnlinePaymentAsync(tenantId, orderId, rzpOrder.AmountPaid / 100m, ct);
+        return Ok();
+    }
+
+    /// <summary>Closes a bill that Razorpay has confirmed as captured. Idempotent: Razorpay
+    /// redelivers a webhook it didn't get a 2xx for, and the same capture arriving twice must
+    /// not write a second tender or double the takings.</summary>
+    private async Task SettleOnlinePaymentAsync(int tenantId, int orderId, decimal amount, CancellationToken ct)
+    {
+        var order = await db.Orders.IgnoreQueryFilters()
+            .Include(o => o.Items).Include(o => o.Payments)
+            .FirstOrDefaultAsync(o => o.Id == orderId && o.TenantId == tenantId, ct);
+        if (order is null || order.Cancelled) return;
+        if (order.Paid) return; // already settled — the redelivery case
+
+        order.Payments.Add(new OrderPayment
+        {
+            TenantId = tenantId,
+            OrderId = order.Id,
+            Method = "UPI",
+            Amount = amount,
+            LedgerIndex = order.Payments.Count,
+        });
+
+        // Settles, and nothing else. Deliberately does NOT mark the food served on the guest's
+        // behalf: a table frees on Paid AND Served, and whether the food actually went out is
+        // the kitchen's fact to state, not a payment's. In the ordinary case the KDS has already
+        // served everything by the time a guest asks for the bill, so this settle is the last
+        // thing the table was waiting on and it frees on its own.
+        await OrderBuildingService.CloseOrderAsync(db, order);
+        await db.SaveChangesAsync(ct);
+        await realtime.NotifyOrdersChangedAsync(new HashSet<int> { tenantId });
+    }
+
+    /// <summary>This cafe's decrypted Razorpay credentials, or null when online payments are off
+    /// or half-configured — callers must treat those two the same way.</summary>
+    private async Task<RazorpayCredentials?> LoadRazorpayCredentialsAsync(int tenantId, CancellationToken ct)
+    {
+        var settings = await db.Settings.IgnoreQueryFilters().AsNoTracking()
+            .FirstOrDefaultAsync(s => s.TenantId == tenantId, ct);
+        if (settings is null || !settings.OnlinePaymentEnabled) return null;
+
+        var keySecret = secrets.TryUnprotect(settings.RazorpayKeySecretEnc);
+        if (string.IsNullOrWhiteSpace(settings.RazorpayKeyId) || string.IsNullOrWhiteSpace(keySecret)) return null;
+
+        return new RazorpayCredentials(settings.RazorpayKeyId, keySecret, secrets.TryUnprotect(settings.RazorpayWebhookSecretEnc));
+    }
+
+    /// <summary>
+    /// A guest asking the floor for something from any QR that has a floor to ask — "Call Waiter"
+    /// or "Request Bill". Anonymous, like every other endpoint here, and rate limited for the same
+    /// reason the waitlist join is: there is no login and no device to blame a burst on.
+    ///
+    /// Raising a call is all this does. Requesting the bill from a TABLE also locks that table's
+    /// guest session (see GuestSessionController.RequestBill) — that stays where it is, because it
+    /// needs the session this endpoint deliberately doesn't have. The two are separate on purpose:
+    /// a call is a message to a person, session locking is a rule about the order, and a counter
+    /// guest can want the first without there being a second.
+    ///
+    /// Refused for the delivery QR: there is nobody to walk over, and the cafe already holds that
+    /// customer's phone number, which is the actual channel for "something is wrong".
+    /// </summary>
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("WaitlistJoinLimiter")]
+    [HttpPost("{token}/call")]
+    public async Task<IActionResult> RaiseGuestCall(string token, GuestCallRequest req, CancellationToken ct)
+    {
+        var decoded = qrTokens.TryDecode(token);
+        if (decoded is null) throw new ApiValidationException("This link is invalid. Please re-scan the QR code.");
+        var (tenantId, tableCode) = decoded.Value;
+
+        var mode = QrTokenService.ModeFor(tableCode);
+        if (mode is not ("table" or "counter"))
+            throw new ApiValidationException("There's no one to call from this QR code.");
+
+        if (!Enum.TryParse<GuestCallKind>(req.Kind, ignoreCase: true, out var kind))
+            throw new ApiValidationException("Unknown request.");
+
+        int? orderId = null;
+        int? tokenNumber = null;
+        if (!string.IsNullOrWhiteSpace(req.OrderToken) && receiptTokens.TryDecode(req.OrderToken) is int decodedOrderId)
+        {
+            var order = await db.Orders.IgnoreQueryFilters().AsNoTracking()
+                .FirstOrDefaultAsync(o => o.Id == decodedOrderId && o.TenantId == tenantId, ct);
+            if (order is not null)
+            {
+                orderId = order.Id;
+                tokenNumber = order.TokenNumber;
+            }
+        }
+
+        // One open call per (table/order, kind). Pressing the button again while nobody has come
+        // yet is a guest getting impatient, not a second table needing service — a new row each
+        // time would stack the floor screen with duplicates of the one thing already on it.
+        var already = await db.GuestCalls.IgnoreQueryFilters().AnyAsync(c =>
+            c.TenantId == tenantId
+            && c.Status == GuestCallStatus.Open
+            && c.Kind == kind
+            && (tableCode == "#TOKEN" ? c.OrderId == orderId : c.TableCode == tableCode), ct);
+
+        if (!already)
+        {
+            db.GuestCalls.Add(new GuestCall
+            {
+                TenantId = tenantId,
+                Kind = kind,
+                TableCode = mode == "table" ? tableCode : null,
+                OrderId = orderId,
+                TokenNumber = tokenNumber,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+
+        // Answered the same either way: from the guest's side "we've told them" is true whether
+        // this raised the call or found one already standing.
+        return NoContent();
     }
 
     /// <summary>

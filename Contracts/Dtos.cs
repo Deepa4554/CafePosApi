@@ -476,10 +476,15 @@ public record PastBillDto(string Number, DateTime CreatedAt, decimal Total);
 /// are re-checked against the customer record, not trusted — see PublicController.SendMyBill.</summary>
 public record SendMyBillRequest(string? Name, string? Phone, string? Number);
 
-public record GuestSessionStateDto(string Status, string TableCode, OrderDto? Order)
+public record GuestSessionStateDto(string Status, string TableCode, OrderDto? Order, string? OrderToken = null)
 {
-    public static GuestSessionStateDto From(GuestSession session, string tableCode, Order? order) =>
-        new(session.Status.ToString().ToUpperInvariant(), tableCode, order is null ? null : OrderDto.From(order));
+    /// <summary>`orderToken` is the signed per-order token (see ReceiptTokenService), carried so a
+    /// seated guest can pay their own bill from the same tab — PublicController.CreateBillPayment
+    /// takes it instead of a raw order id, so nobody holding the printed table QR can open a
+    /// payment against someone else's bill by guessing a number. Null when there's no order yet.
+    /// Costs nothing to include: it grants exactly what this session already has.</summary>
+    public static GuestSessionStateDto From(GuestSession session, string tableCode, Order? order, string? orderToken = null) =>
+        new(session.Status.ToString().ToUpperInvariant(), tableCode, order is null ? null : OrderDto.From(order), orderToken);
 }
 
 /// <summary>Result of POST session/scan — Case drives which screen the guest page shows
@@ -849,6 +854,21 @@ public record UpdateSettingsRequest(
     /// CafeSettings.GoogleReviewUrl). A full URL or a bare Place ID; an empty string clears it,
     /// same as UpiVpa, while null means leave unchanged.</summary>
     string? GoogleReviewUrl = null,
+    /// <summary>Offer a guest Razorpay checkout when they ask for their bill from the QR page,
+    /// and settle the bill automatically once it's captured (see CafeSettings.OnlinePaymentEnabled).
+    /// Refused while the key id/secret below are missing — a Pay button that can only fail is
+    /// worse than none.</summary>
+    bool? OnlinePaymentEnabled = null,
+    /// <summary>THIS CAFE's own Razorpay key id, so guests pay the restaurant directly rather
+    /// than through the platform's account. Empty clears it, null leaves it unchanged.</summary>
+    string? RazorpayKeyId = null,
+    /// <summary>Write-only. Stored encrypted and never returned by the GET — the settings
+    /// response carries a "configured" flag instead. Empty clears it, null leaves it alone.</summary>
+    string? RazorpayKeySecret = null,
+    /// <summary>Write-only, same rules. A different secret from the key secret: it's the one
+    /// chosen when creating the webhook in the Razorpay dashboard, and without it this cafe's
+    /// webhook rejects everything.</summary>
+    string? RazorpayWebhookSecret = null,
     /// <summary>Charge tax only on the tenders in TaxablePaymentModes — see
     /// CafeSettings.TaxByPaymentModeEnabled.</summary>
     bool? TaxByPaymentModeEnabled = null,
@@ -861,6 +881,10 @@ public record UpdateSettingsRequest(
     /// CafeSettings.TaxChargesEnabled. Applies to orders placed after the change, never to
     /// existing bills.</summary>
     bool? TaxChargesEnabled = null,
+    /// <summary>Bills every regular menu item tax-inclusive — GST carved out of the listed price
+    /// instead of added on top, the same treatment an MRP item already gets. See
+    /// CafeSettings.MenuPricesIncludeTax. Applies to lines added after the change.</summary>
+    bool? MenuPricesIncludeTax = null,
     /// <summary>This cafe bills under the composition scheme, so its bill prints as a BILL OF
     /// SUPPLY rather than a TAX INVOICE — see CafeSettings.IsCompositionScheme.</summary>
     bool? IsCompositionScheme = null,
