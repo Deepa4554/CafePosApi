@@ -491,6 +491,10 @@ public static class CustomerOrderPage
     </div>
     <h2 id="token-heading">Confirmed — you're in the queue</h2>
     <p id="token-sub">Pay at the counter when your number is called.</p>
+    <!-- What's actually on the order so far, across every round (see renderTokenItems) — a
+         counter guest has no placed-screen like dine-in does, so without this the token number
+         was the only thing they ever saw again. Hidden whenever there's nothing to show. -->
+    <div id="token-items" class="confirm-card" style="width:100%;box-sizing:border-box;text-align:left;display:none"></div>
     <!-- Same person, same token, one more round — see PublicController.AddCounterOrderItems.
          Hidden once the bill is paid (showTokenScreen), since a settled order is done. -->
     <button class="place-btn" id="token-add-more-btn">Add more items</button>
@@ -2388,9 +2392,51 @@ public static class CustomerOrderPage
     }, 4000);
   }
 
+  /**
+   * What's actually on the order so far — every non-voided line CounterOrderStatus returns,
+   * split the same way showPlacedScreen splits a dine-in order: already-fired lines with their
+   * live kitchen status pill, then anything just sent and still waiting on staff to confirm
+   * (Unfired) under its own "not confirmed yet" note, since that round is real but not yet a
+   * queue position anyone but the customer knows about.
+   */
+  function renderTokenItems(items) {
+    var box = document.getElementById('token-items');
+    box.innerHTML = '';
+    items = items || [];
+    if (items.length === 0) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+
+    var firedItems = items.filter(function (i) { return !i.unfired; });
+    var unfiredItems = items.filter(function (i) { return i.unfired; });
+
+    firedItems.forEach(function (item) {
+      var row = el('div', null);
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 0';
+      var desc = lineDescriptor(item);
+      row.appendChild(el('span', null, item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : '')));
+      row.appendChild(el('span', 'status-pill' + (item.status === 'READY' ? ' ready' : item.status === 'SERVED' ? ' served' : ''), item.status));
+      box.appendChild(row);
+    });
+
+    if (unfiredItems.length > 0) {
+      var note = el('div', null, 'Not confirmed yet');
+      note.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px dashed var(--divider);font-size:12px;color:var(--muted)';
+      box.appendChild(note);
+      unfiredItems.forEach(function (item) {
+        var row = el('div', null);
+        row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 0;opacity:.75';
+        var desc = lineDescriptor(item);
+        row.appendChild(el('span', null, item.qty + '× ' + item.name + (desc ? ' (' + desc + ')' : '')));
+        row.appendChild(el('span', 'status-pill', 'SENT'));
+        box.appendChild(row);
+      });
+    }
+  }
+
   function showTokenScreen(s, orderToken) {
     hideAllScreens();
     document.getElementById('token-number').textContent = s.tokenNumber != null ? ('#' + s.tokenNumber) : '—';
+    renderTokenItems(s.items);
     var billLink = document.getElementById('token-bill-link');
     // A settled bill is done — nothing left to add to. Shown for every unpaid state, including
     // "in the queue", since a token that hasn't been called yet is exactly when ordering more

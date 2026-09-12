@@ -260,6 +260,11 @@ public class PublicController(
     /// Carries TokenNumber only once staff have confirmed, so the page cannot show a queue
     /// position for an order still awaiting a human. Keeps answering through to settlement, since
     /// the bill PDF the customer is handed at the end is only meaningful after the till settles.
+    ///
+    /// Items are included so the token screen can show what's actually on the order — every
+    /// non-voided line across every round so far (the original order plus any AddCounterOrderItems
+    /// rounds), unfired ones included so a round the customer just sent isn't invisible until
+    /// staff confirm it.
     /// </summary>
     [HttpGet("counter-order-status/{orderToken}")]
     public async Task<ActionResult<object>> CounterOrderStatus(string orderToken, CancellationToken ct)
@@ -268,6 +273,7 @@ public class PublicController(
         if (orderId is null) return NotFound();
 
         var order = await db.Orders.IgnoreQueryFilters().AsNoTracking()
+            .Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
             .FirstOrDefaultAsync(o => o.Id == orderId.Value, ct);
         if (order is null) return NotFound();
 
@@ -279,6 +285,15 @@ public class PublicController(
             Status = order.Status.ToString(),
             order.Paid,
             TokenNumber = order.PendingStaffConfirmation ? null : order.TokenNumber,
+            Items = order.Items.Where(i => !i.Voided).Select(i => new {
+                i.Name,
+                i.Qty,
+                i.Price,
+                i.VariantName,
+                Status = i.Status.ToString().ToUpperInvariant(),
+                Unfired = i.FireBatch == 0,
+                SelectedModifiers = i.SelectedModifiers.Select(m => new { m.Name, m.Qty }),
+            }),
         };
     }
 
