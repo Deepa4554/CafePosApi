@@ -283,6 +283,57 @@ public class PublicController(
     }
 
     /// <summary>
+    /// Lets a counter/token customer add another round of items to the SAME order after it's
+    /// already been placed. Closes a gap the QR page otherwise had only for this flow: a dine-in
+    /// guest can hit "Add more items" because a table GuestSession exists to append to, but a
+    /// counter order has neither a table nor a session (see CreateCounterOrder) — there was
+    /// previously no way back into an order once sent, so a second order for the same person had
+    /// no choice but to queue as a second, unrelated token.
+    ///
+    /// Scoped by the order's own signed receipt token (same scheme as CounterOrderStatus), not
+    /// the QR token — the QR token only identifies the cafe, this identifies the one order, so a
+    /// customer can only ever add to their own. Restricted to QSR orders on purpose: this token
+    /// scheme is shared with dine-in/delivery receipt links (see ReceiptTokenService), and those
+    /// order types have their own session/locking rules this endpoint doesn't implement.
+    ///
+    /// New lines land unfired (FireBatch 0, see AddOrUpdateCartItemAsync) exactly like items on a
+    /// brand-new counter order. If staff had already accepted this order (TokenNumber assigned,
+    /// PendingStaffConfirmation false), this re-raises that flag — a token number already handed
+    /// out must not be silently expanded with food nobody agreed to cook. Staff re-confirming
+    /// (OrdersController.ConfirmOrder) then fires only the newly-added lines as their own batch
+    /// under the SAME token; whatever's already fired/served is untouched.
+    /// </summary>
+    [HttpPost("counter-order/{orderToken}/items")]
+    public Task<ActionResult<object>> AddCounterOrderItems(string orderToken, AddCounterOrderItemsRequest req, CancellationToken ct) =>
+        DbConcurrency.InTransactionAsync<ActionResult<object>>(db, async () =>
+    {
+        var orderId = receiptTokens.TryDecode(orderToken);
+        if (orderId is null) throw new ApiValidationException("We couldn't find this order. Please ask a staff member.");
+
+        if (req.Items is null || req.Items.Count == 0)
+            throw new ApiValidationException("Add at least one item first.");
+
+        await DbConcurrency.LockRowsAsync<Order>(db, orderId.Value);
+        var order = await db.Orders.IgnoreQueryFilters()
+            .Include(o => o.Items).ThenInclude(i => i.SelectedModifiers)
+            .FirstOrDefaultAsync(o => o.Id == orderId.Value, ct);
+        if (order is null) return NotFound();
+        if (order.OrderType != "QSR") throw new ApiValidationException("This order can't take more items here. Please ask a staff member.");
+        if (order.Cancelled) throw new ApiValidationException("This order was cancelled. Please ask a staff member.");
+        if (order.Paid) throw new ApiValidationException("This order is already settled — please place a new order.");
+
+        foreach (var line in req.Items)
+            await orderBuilder.AddOrUpdateCartItemAsync(db, order, line.MenuItemId, line.Qty, line.Modifier, order.TenantId, line.VariantId, line.ModifierOptionIds);
+
+        orderBuilder.MarkPendingConfirmation(db, order, order.TenantId);
+        await db.SaveChangesAsync(ct);
+
+        await realtime.NotifyOrdersChangedAsync(new HashSet<int> { order.TenantId });
+
+        return new { order.Id, order.Total };
+    });
+
+    /// <summary>
     /// Opens a Razorpay order for a guest paying their own bill from the same tab they ordered
     /// in. Charged against the CAFE's own Razorpay account, never the platform's — see
     /// CafeSettings.RazorpayKeyId for why that distinction is the whole design.

@@ -76,6 +76,11 @@ public record CreateCounterOrderRequest(
     string? GuestPhone,
     List<CreateOrderItemDto> Items);
 
+/// <summary>A second (or third...) round of items on a counter order that's already been placed
+/// — see PublicController.AddCounterOrderItems. Same line shape as CreateCounterOrderRequest;
+/// no name/phone here since those were already captured (or skipped) on the original order.</summary>
+public record AddCounterOrderItemsRequest(List<CreateOrderItemDto> Items);
+
 /// <summary>Live courier state for one order, for the delivery screen.</summary>
 public record DeliveryStatusDto(
     int OrderId,

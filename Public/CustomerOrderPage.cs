@@ -491,6 +491,9 @@ public static class CustomerOrderPage
     </div>
     <h2 id="token-heading">Confirmed — you're in the queue</h2>
     <p id="token-sub">Pay at the counter when your number is called.</p>
+    <!-- Same person, same token, one more round — see PublicController.AddCounterOrderItems.
+         Hidden once the bill is paid (showTokenScreen), since a settled order is done. -->
+    <button class="place-btn" id="token-add-more-btn">Add more items</button>
     <!-- Same two calls the seated flow offers. A counter guest is standing in the same room as
          the staff, so "come here" and "I'd like to settle" are both still real asks. -->
     <div class="action-row" id="token-call-row">
@@ -2030,6 +2033,10 @@ public static class CustomerOrderPage
         placeBtn.disabled = false;
         placeBtn.onclick = function () {
           state.addingMore = false;
+          // Counter mode has no placed-screen to return to (it never uses one — see
+          // placeCounterOrder) — the token/waiting screen is what "your order" means here, and
+          // the next poll tick corrects it if nothing actually changed.
+          if (state.counterMode) { showCounterWaitingScreen(state.orderToken); return; }
           if (state.order) showPlacedScreen({ order: state.order });
         };
         return;
@@ -2385,6 +2392,10 @@ public static class CustomerOrderPage
     hideAllScreens();
     document.getElementById('token-number').textContent = s.tokenNumber != null ? ('#' + s.tokenNumber) : '—';
     var billLink = document.getElementById('token-bill-link');
+    // A settled bill is done — nothing left to add to. Shown for every unpaid state, including
+    // "in the queue", since a token that hasn't been called yet is exactly when ordering more
+    // for the same person is useful.
+    document.getElementById('token-add-more-btn').style.display = s.paid ? 'none' : 'block';
     if (s.paid) {
       document.getElementById('token-heading').textContent = 'Paid — thanks!';
       document.getElementById('token-sub').textContent = 'Your bill is ready below.';
@@ -2406,8 +2417,53 @@ public static class CustomerOrderPage
     document.getElementById('token-screen').style.display = 'flex';
   }
 
+  /**
+   * The counter/token twin of dine-in's "Add more items". There's no guest session to append
+   * to (see placeCounterOrder), so this posts to the order's own signed token instead (see
+   * PublicController.AddCounterOrderItems) — the same token the waiting/token screens already
+   * hold in state.orderToken from the first round.
+   */
+  function addCounterOrderItems() {
+    if (cartCount() === 0) return;
+    clearError();
+
+    var btn = document.getElementById('place-btn');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    document.getElementById('processing-overlay').classList.add('show');
+
+    fetchJson('/api/public/counter-order/' + encodeURIComponent(state.orderToken) + '/items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: unfiredLines().map(function (line) {
+          return {
+            menuItemId: line.menuItemId,
+            qty: line.qty,
+            modifier: null,
+            variantId: line.variantId || null,
+            modifierOptionIds: lineOptionIds(line).length ? lineOptionIds(line) : null,
+          };
+        }),
+      }),
+    }).then(function () {
+      document.getElementById('processing-overlay').classList.remove('show');
+      state.order = { items: [] };
+      state.cart = {};
+      state.addingMore = false;
+      // Same screen the first round used — the server re-raised PendingStaffConfirmation for
+      // this round, so the poll won't show the token screen again until staff confirm it too.
+      showCounterWaitingScreen(state.orderToken);
+    }).catch(function (err) {
+      document.getElementById('processing-overlay').classList.remove('show');
+      btn.disabled = false;
+      btn.textContent = 'Send to Kitchen';
+      showError(err.message);
+    });
+  }
+
   function placeOrder() {
-    if (state.counterMode) { placeCounterOrder(); return; }
+    if (state.counterMode) { if (state.addingMore) addCounterOrderItems(); else placeCounterOrder(); return; }
     if (state.deliveryMode) { placeDeliveryOrder(); return; }
     if (cartCount() === 0) return;
     if (Object.keys(pendingLineRequests).length > 0) { waitForCartThenPlace(); return; }
@@ -2688,6 +2744,12 @@ public static class CustomerOrderPage
         showMenuScreen();
       };
       document.getElementById('request-bill-btn').onclick = requestBill;
+      document.getElementById('token-add-more-btn').onclick = function () {
+        state.addingMore = true;
+        state.order = { items: [] };
+        state.cart = {};
+        showMenuScreen();
+      };
       document.getElementById('call-waiter-btn').onclick = function () {
         raiseCall('Waiter', this, 'Waiter notified');
       };
