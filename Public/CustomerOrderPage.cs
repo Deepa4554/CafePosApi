@@ -2745,6 +2745,13 @@ public static class CustomerOrderPage
       };
       document.getElementById('request-bill-btn').onclick = requestBill;
       document.getElementById('token-add-more-btn').onclick = function () {
+        // The token screen's own poll (startCounterStatusPolling) is still running at this
+        // point — left alone it re-fetches within 4s, sees the order still confirmed (not
+        // pendingStaffConfirmation, since nothing's been sent yet), and calls showTokenScreen
+        // right out from under the menu this button just opened. Stopped here and only
+        // restarted by showCounterWaitingScreen, which addCounterOrderItems and the empty-cart
+        // "Back to your order" button both already go through.
+        stopCounterStatusPolling();
         state.addingMore = true;
         state.order = { items: [] };
         state.cart = {};
